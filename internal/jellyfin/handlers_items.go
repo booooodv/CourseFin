@@ -1066,7 +1066,7 @@ func (h *Handler) queryLessons(ctx context.Context, libraryID, courseID, chapter
 		       mf.duration_ms, mf.container, mf.video_codec, mf.audio_codec, mf.width, mf.height, mf.bitrate, mf.thumbnail_path, mf.status,
 		       COALESCE(pp.position_ticks, 0), COALESCE(pp.played, 0), COALESCE(pp.play_count, 0), COALESCE(pp.last_played_at, ''),
 		       l.created_at, l.updated_at,
-		       c.title, c.cover_path, c.library_id, ch.title, ch.sort_order
+		       c.title, c.cover_path, c.updated_at, c.library_id, ch.title, ch.sort_order
 		FROM lessons l
 		JOIN chapters ch ON ch.id = l.chapter_id
 		JOIN courses c ON c.id = l.course_id
@@ -1089,7 +1089,7 @@ func (h *Handler) queryLessons(ctx context.Context, libraryID, courseID, chapter
 			&item.DurationMs, &item.Container, &item.VideoCodec, &item.AudioCodec, &item.Width, &item.Height, &item.Bitrate, &item.ThumbnailPath, &item.MediaStatus,
 			&item.PositionTicks, &playedInt, &item.PlayCount, &item.LastPlayedAt,
 			&item.CreatedAt, &item.UpdatedAt,
-			&item.CourseTitle, &item.CourseCoverPath, &item.LibraryID, &item.ChapterTitle, &item.ChapterSortOrder,
+			&item.CourseTitle, &item.CourseCoverPath, &item.CourseUpdatedAt, &item.LibraryID, &item.ChapterTitle, &item.ChapterSortOrder,
 		); err != nil {
 			return nil, err
 		}
@@ -1396,16 +1396,17 @@ func mapLessonWithContextDTO(l catalog.LessonWithContext, serverID string, cours
 		ID:        l.CourseID,
 		Title:     l.CourseTitle,
 		CoverPath: l.CourseCoverPath,
+		UpdatedAt: l.CourseUpdatedAt,
 	}
 	return mapLessonDTO(l.LessonDetail, courseSummary, l.ChapterTitle, l.ChapterSortOrder, serverID, courseImgMap)
 }
 
 func coursePrimaryTag(c catalog.CourseSummary, courseImgMap map[string]string) string {
 	if c.CoverPath != "" {
-		return makeImageTag(c.ID, c.CoverPath, "")
+		return makeImageTag(c.ID, c.CoverPath, c.UpdatedAt)
 	}
 	if fallback, ok := courseImgMap[c.ID]; ok && fallback != "" {
-		return makeImageTag(c.ID, fallback, "")
+		return makeImageTag(c.ID, fallback, c.UpdatedAt)
 	}
 	return ""
 }

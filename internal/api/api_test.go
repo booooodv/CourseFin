@@ -518,6 +518,42 @@ func TestAIOrganizeDoesNotMutateUntilApply(t *testing.T) {
 		t.Fatalf("expected sidecar subtitle excerpt in AI prompt, got: %s", seenPromptBody)
 	}
 
+	// Setting ai_max_subtitle_chars = 0 persists as 0, returns 0 on GET, and omits all subtitle excerpts on /ai/organize
+	resp, raw = env.doJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_max_subtitle_chars": 0,
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /settings ai_max_subtitle_chars=0 = %d: %s", resp.StatusCode, raw)
+	}
+	var zeroPutView map[string]any
+	if err := json.Unmarshal(raw, &zeroPutView); err != nil {
+		t.Fatalf("unmarshal zeroPutView: %v", err)
+	}
+	if zeroPutView["ai_max_subtitle_chars"] != float64(0) {
+		t.Fatalf("expected ai_max_subtitle_chars=0 after PUT, got %v (%s)", zeroPutView["ai_max_subtitle_chars"], raw)
+	}
+
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/settings", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /settings after zero = %d: %s", resp.StatusCode, raw)
+	}
+	var zeroGetView map[string]any
+	if err := json.Unmarshal(raw, &zeroGetView); err != nil {
+		t.Fatalf("unmarshal zeroGetView: %v", err)
+	}
+	if zeroGetView["ai_max_subtitle_chars"] != float64(0) {
+		t.Fatalf("expected ai_max_subtitle_chars=0 on GET /settings, got %v (%s)", zeroGetView["ai_max_subtitle_chars"], raw)
+	}
+
+	seenPromptBody = ""
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/ai/organize", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /ai/organize with 0 subtitle chars = %d: %s", resp.StatusCode, raw)
+	}
+	if strings.Contains(seenPromptBody, "Hello Docker setup") {
+		t.Fatalf("expected empty subtitle excerpts when ai_max_subtitle_chars=0, got: %s", seenPromptBody)
+	}
+
 	afterOrganize, err := env.catSvc.GetCourseDetail(context.Background(), course.ID)
 	if err != nil {
 		t.Fatalf("GetCourseDetail: %v", err)
@@ -687,6 +723,48 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 	}
 	if p3.Mode != "unsupported" || p3.StreamURL != "" {
 		t.Fatalf("expected unsupported mode with empty stream_url, got %+v", p3)
+	}
+
+	// 4. WebM (vp9/opus) -> direct, MKV (vp9/opus) -> unsupported, MKV (hevc/aac) -> unsupported, MKV (h264/opus) -> hls
+	extraCases := []struct {
+		name      string
+		relPath   string
+		container string
+		vcodec    string
+		acodec    string
+		wantMode  string
+	}{
+		{name: "webm_vp9_opus", relPath: "CodecTest/04_vp9.webm", container: "webm", vcodec: "vp9", acodec: "opus", wantMode: "direct"},
+		{name: "mkv_vp9_opus", relPath: "CodecTest/05_vp9.mkv", container: "mkv", vcodec: "vp9", acodec: "opus", wantMode: "unsupported"},
+		{name: "mkv_hevc_aac", relPath: "CodecTest/06_hevc.mkv", container: "mkv", vcodec: "hevc", acodec: "aac", wantMode: "unsupported"},
+		{name: "mkv_av1_aac", relPath: "CodecTest/08_av1.mkv", container: "mkv", vcodec: "av1", acodec: "aac", wantMode: "unsupported"},
+		{name: "mkv_h264_opus", relPath: "CodecTest/07_h264_opus.mkv", container: "mkv", vcodec: "h264", acodec: "opus", wantMode: "hls"},
+	}
+	for _, tc := range extraCases {
+		mfID := id.New()
+		now := time.Now().UTC().Format(time.RFC3339)
+		if _, err := env.db.Exec(`
+			INSERT INTO media_files (id, source_id, relative_path, file_name, file_size, mod_time, status, duration_ms, container, video_codec, audio_codec, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 100, ?, 'active', 10000, ?, ?, ?, ?, ?)`,
+			mfID, src.ID, tc.relPath, filepath.Base(tc.relPath), now, tc.container, tc.vcodec, tc.acodec, now, now,
+		); err != nil {
+			t.Fatalf("insert media_file %s: %v", tc.name, err)
+		}
+		lsn, err := env.catSvc.AddLesson(context.Background(), course.Chapters[0].ID, mfID, tc.name)
+		if err != nil {
+			t.Fatalf("AddLesson %s: %v", tc.name, err)
+		}
+		cResp, cRaw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lsn.ID+"/playback", nil, token)
+		if cResp.StatusCode != http.StatusOK {
+			t.Fatalf("GET playback %s = %d: %s", tc.name, cResp.StatusCode, cRaw)
+		}
+		var cp playbackResp
+		if err := json.Unmarshal(cRaw, &cp); err != nil {
+			t.Fatalf("unmarshal %s: %v", tc.name, err)
+		}
+		if cp.Mode != tc.wantMode {
+			t.Fatalf("%s: got mode=%q, want %q", tc.name, cp.Mode, tc.wantMode)
+		}
 	}
 }
 

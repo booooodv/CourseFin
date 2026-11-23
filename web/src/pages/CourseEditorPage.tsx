@@ -76,6 +76,113 @@ function buildLessonPlacements(chapters: ChapterDetail[]): LessonPlacement[] {
   return placements;
 }
 
+export type DragReorderResult =
+  | { type: 'chapter'; chapters: ChapterDetail[] }
+  | { type: 'lesson'; chapters: ChapterDetail[] };
+
+export function resolveDragReorder(
+  chapters: ChapterDetail[],
+  activeStr: string,
+  overStr: string,
+): DragReorderResult | null {
+  if (!overStr || activeStr === overStr) return null;
+
+  // Dragging a chapter (including dropping onto a lesson inside a populated chapter card)
+  if (activeStr.startsWith('chapter-')) {
+    const activeId = activeStr.slice('chapter-'.length);
+    let overChapterId = '';
+    if (overStr.startsWith('chapter-')) {
+      overChapterId = overStr.slice('chapter-'.length);
+    } else if (overStr.startsWith('lesson-')) {
+      const overLessonId = overStr.slice('lesson-'.length);
+      const parentChapter = chapters.find((ch) =>
+        (ch.lessons ?? []).some((l) => l.id === overLessonId),
+      );
+      if (parentChapter) {
+        overChapterId = parentChapter.id;
+      }
+    }
+    if (!overChapterId) return null;
+    const oldIdx = chapters.findIndex((c) => c.id === activeId);
+    const newIdx = chapters.findIndex((c) => c.id === overChapterId);
+    if (oldIdx >= 0 && newIdx >= 0 && oldIdx !== newIdx) {
+      return { type: 'chapter', chapters: arrayMove(chapters, oldIdx, newIdx) };
+    }
+    return null;
+  }
+
+  // Dragging a lesson
+  if (activeStr.startsWith('lesson-')) {
+    const activeLessonId = activeStr.slice('lesson-'.length);
+    let sourceChapIdx = -1;
+    let sourceLessonIdx = -1;
+    chapters.forEach((ch, ci) => {
+      const li = (ch.lessons ?? []).findIndex((l) => l.id === activeLessonId);
+      if (li >= 0) {
+        sourceChapIdx = ci;
+        sourceLessonIdx = li;
+      }
+    });
+    if (sourceChapIdx < 0) return null;
+
+    let targetChapIdx = -1;
+    let targetLessonIdx = -1;
+
+    if (overStr.startsWith('lesson-')) {
+      const overLessonId = overStr.slice('lesson-'.length);
+      chapters.forEach((ch, ci) => {
+        const li = (ch.lessons ?? []).findIndex((l) => l.id === overLessonId);
+        if (li >= 0) {
+          targetChapIdx = ci;
+          targetLessonIdx = li;
+        }
+      });
+    } else if (overStr.startsWith('chapter-')) {
+      const overChapterId = overStr.slice('chapter-'.length);
+      targetChapIdx = chapters.findIndex((ch) => ch.id === overChapterId);
+      if (targetChapIdx >= 0) {
+        targetLessonIdx = (chapters[targetChapIdx].lessons ?? []).length;
+      }
+    }
+
+    if (targetChapIdx < 0) return null;
+
+    if (sourceChapIdx === targetChapIdx) {
+      const currentLessons = chapters[sourceChapIdx].lessons ?? [];
+      const clampedTarget = Math.min(targetLessonIdx, currentLessons.length - 1);
+      if (sourceLessonIdx === clampedTarget) return null;
+      const nextChapters = chapters.map((ch, idx) =>
+        idx === sourceChapIdx
+          ? { ...ch, lessons: arrayMove(currentLessons, sourceLessonIdx, clampedTarget) }
+          : ch,
+      );
+      return { type: 'lesson', chapters: nextChapters };
+    }
+
+    const movingLesson = {
+      ...chapters[sourceChapIdx].lessons[sourceLessonIdx],
+      chapter_id: chapters[targetChapIdx].id,
+    };
+    const nextChapters = chapters.map((ch, idx) => {
+      if (idx === sourceChapIdx) {
+        return {
+          ...ch,
+          lessons: ch.lessons.filter((l) => l.id !== activeLessonId),
+        };
+      }
+      if (idx === targetChapIdx) {
+        const dest = [...(ch.lessons ?? [])];
+        dest.splice(targetLessonIdx, 0, movingLesson);
+        return { ...ch, lessons: dest };
+      }
+      return ch;
+    });
+    return { type: 'lesson', chapters: nextChapters };
+  }
+
+  return null;
+}
+
 interface SortableLessonRowProps {
   lesson: LessonDetail;
   chapterId: string;
@@ -881,89 +988,16 @@ export default function CourseEditorPage() {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
 
-    const activeStr = String(active.id);
-    const overStr = String(over.id);
-    const chapters = course.chapters ?? [];
-
-    // Dragging a chapter
-    if (activeStr.startsWith('chapter-') && overStr.startsWith('chapter-')) {
-      const activeId = activeStr.replace('chapter-', '');
-      const overId = overStr.replace('chapter-', '');
-      const oldIdx = chapters.findIndex((c) => c.id === activeId);
-      const newIdx = chapters.findIndex((c) => c.id === overId);
-      if (oldIdx >= 0 && newIdx >= 0 && oldIdx !== newIdx) {
-        await commitChapterOrder(arrayMove(chapters, oldIdx, newIdx));
-      }
-      return;
-    }
-
-    // Dragging a lesson
-    if (activeStr.startsWith('lesson-')) {
-      const activeLessonId = activeStr.replace('lesson-', '');
-      let sourceChapIdx = -1;
-      let sourceLessonIdx = -1;
-      chapters.forEach((ch, ci) => {
-        const li = (ch.lessons ?? []).findIndex((l) => l.id === activeLessonId);
-        if (li >= 0) {
-          sourceChapIdx = ci;
-          sourceLessonIdx = li;
-        }
-      });
-      if (sourceChapIdx < 0) return;
-
-      let targetChapIdx = -1;
-      let targetLessonIdx = -1;
-
-      if (overStr.startsWith('lesson-')) {
-        const overLessonId = overStr.replace('lesson-', '');
-        chapters.forEach((ch, ci) => {
-          const li = (ch.lessons ?? []).findIndex((l) => l.id === overLessonId);
-          if (li >= 0) {
-            targetChapIdx = ci;
-            targetLessonIdx = li;
-          }
-        });
-      } else if (overStr.startsWith('chapter-')) {
-        const overChapterId = overStr.replace('chapter-', '');
-        targetChapIdx = chapters.findIndex((ch) => ch.id === overChapterId);
-        if (targetChapIdx >= 0) {
-          targetLessonIdx = (chapters[targetChapIdx].lessons ?? []).length;
-        }
-      }
-
-      if (targetChapIdx < 0) return;
-
-      if (sourceChapIdx === targetChapIdx) {
-        const currentLessons = chapters[sourceChapIdx].lessons ?? [];
-        const clampedTarget = Math.min(targetLessonIdx, currentLessons.length - 1);
-        if (sourceLessonIdx === clampedTarget) return;
-        const nextChapters = chapters.map((ch, idx) =>
-          idx === sourceChapIdx
-            ? { ...ch, lessons: arrayMove(currentLessons, sourceLessonIdx, clampedTarget) }
-            : ch,
-        );
-        await commitLessonOrder(nextChapters);
-      } else {
-        const movingLesson = {
-          ...chapters[sourceChapIdx].lessons[sourceLessonIdx],
-          chapter_id: chapters[targetChapIdx].id,
-        };
-        const nextChapters = chapters.map((ch, idx) => {
-          if (idx === sourceChapIdx) {
-            return {
-              ...ch,
-              lessons: ch.lessons.filter((l) => l.id !== activeLessonId),
-            };
-          }
-          if (idx === targetChapIdx) {
-            const dest = [...(ch.lessons ?? [])];
-            dest.splice(targetLessonIdx, 0, movingLesson);
-            return { ...ch, lessons: dest };
-          }
-          return ch;
-        });
-        await commitLessonOrder(nextChapters);
-      }
+    const result = resolveDragReorder(
+      course.chapters ?? [],
+      String(active.id),
+      String(over.id),
+    );
+    if (!result) return;
+    if (result.type === 'chapter') {
+      await commitChapterOrder(result.chapters);
+    } else {
+      await commitLessonOrder(result.chapters);
     }
   }
 

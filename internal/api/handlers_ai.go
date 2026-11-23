@@ -75,7 +75,7 @@ func (h *handler) buildSettingsResponse(ctx context.Context) (*settingsPayload, 
 
 	maxSubChars := ai.DefaultMaxSubtitleChars
 	if raw := strings.TrimSpace(m["ai_max_subtitle_chars"]); raw != "" {
-		if v, convErr := strconv.Atoi(raw); convErr == nil && v > 0 {
+		if v, convErr := strconv.Atoi(raw); convErr == nil && v >= 0 {
 			maxSubChars = v
 		}
 	}
@@ -111,7 +111,7 @@ func (h *handler) loadAIConfig(ctx context.Context) (ai.Config, error) {
 	}
 	maxSub := ai.DefaultMaxSubtitleChars
 	if raw := strings.TrimSpace(m["ai_max_subtitle_chars"]); raw != "" {
-		if v, convErr := strconv.Atoi(raw); convErr == nil && v > 0 {
+		if v, convErr := strconv.Atoi(raw); convErr == nil && v >= 0 {
 			maxSub = v
 		}
 	}
@@ -233,7 +233,7 @@ func (h *handler) handleTestAI(w http.ResponseWriter, r *http.Request) {
 		AIAPIKey         string `json:"ai_api_key"`
 		Model            string `json:"model"`
 		AIModel          string `json:"ai_model"`
-		MaxSubtitleChars int    `json:"max_subtitle_chars"`
+		MaxSubtitleChars *int   `json:"max_subtitle_chars"`
 	}
 	if err := decodeJSON(r, &req, true); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -249,8 +249,8 @@ func (h *handler) handleTestAI(w http.ResponseWriter, r *http.Request) {
 	if v := firstNonEmpty(req.Model, req.AIModel); v != "" {
 		stored.Model = v
 	}
-	if req.MaxSubtitleChars > 0 {
-		stored.MaxSubtitleChars = req.MaxSubtitleChars
+	if req.MaxSubtitleChars != nil && *req.MaxSubtitleChars >= 0 {
+		stored.MaxSubtitleChars = *req.MaxSubtitleChars
 	}
 
 	if stored.BaseURL == "" || stored.Model == "" {
@@ -286,7 +286,7 @@ func (h *handler) handleAIOrganize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mfMeta, err := h.loadLessonMediaAndSubtitles(ctx, course)
+	mfMeta, err := h.loadLessonMediaAndSubtitles(ctx, course, aiCfg.MaxSubtitleChars > 0)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -301,8 +301,8 @@ func (h *handler) handleAIOrganize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	remainingBudget := aiCfg.MaxSubtitleChars
-	if remainingBudget <= 0 {
-		remainingBudget = ai.DefaultMaxSubtitleChars
+	if remainingBudget < 0 {
+		remainingBudget = 0
 	}
 
 	for _, ch := range course.Chapters {
@@ -351,7 +351,7 @@ type lessonMediaSubtitleMeta struct {
 	subRelPath   string
 }
 
-func (h *handler) loadLessonMediaAndSubtitles(ctx context.Context, course *catalog.CourseDetail) (map[string]lessonMediaSubtitleMeta, error) {
+func (h *handler) loadLessonMediaAndSubtitles(ctx context.Context, course *catalog.CourseDetail, includeSubtitles bool) (map[string]lessonMediaSubtitleMeta, error) {
 	out := make(map[string]lessonMediaSubtitleMeta)
 	var mfIDs []string
 	seen := make(map[string]bool)
@@ -398,6 +398,10 @@ func (h *handler) loadLessonMediaAndSubtitles(ctx context.Context, course *catal
 		return nil, err
 	}
 	rows.Close()
+
+	if !includeSubtitles {
+		return out, nil
+	}
 
 	sRows, err := h.db.QueryContext(ctx, `
 		SELECT sf.media_file_id, sf.relative_path, ss.driver, ss.root_path, ss.config_json

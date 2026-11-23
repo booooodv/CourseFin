@@ -362,10 +362,15 @@ export const api = {
   getLessonPlayback(lessonId: string): Promise<LessonPlaybackInfo> {
     return request<LessonPlaybackInfo>(`/api/v1/lessons/${encodeURIComponent(lessonId)}/playback`);
   },
-  reportProgress(lessonId: string, positionTicks: number): Promise<ProgressResponse> {
+  reportProgress(
+    lessonId: string,
+    positionTicks: number,
+    options?: { keepalive?: boolean },
+  ): Promise<ProgressResponse> {
     return request<ProgressResponse>(`/api/v1/lessons/${encodeURIComponent(lessonId)}/progress`, {
       method: 'POST',
       body: JSON.stringify({ position_ticks: positionTicks }),
+      keepalive: options?.keepalive,
     });
   },
   setLessonPlayed(lessonId: string, played = true): Promise<ProgressResponse> {

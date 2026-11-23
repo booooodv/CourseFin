@@ -103,16 +103,39 @@ func (s *Service) CanRemuxVideoCodec(codec string) bool {
 	return CanRemuxVideoCodec(codec)
 }
 
+// CanWebRemuxVideoCodec reports whether the video bitstream can be stream-copied
+// into MPEG-TS HLS segments that hls.js and browsers can reliably demux.
+func CanWebRemuxVideoCodec(codec string) bool {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "h264", "avc", "avc1":
+		return true
+	default:
+		return false
+	}
+}
+
+// CanWebRemuxVideoCodec reports whether the video bitstream can be stream-copied
+// into MPEG-TS HLS segments that hls.js and browsers can reliably demux.
+func (s *Service) CanWebRemuxVideoCodec(codec string) bool {
+	return CanWebRemuxVideoCodec(codec)
+}
+
 // NeedsAudioTranscode reports whether the audio codec must be transcoded to AAC
-// during HLS remuxing for browser compatibility.
-func (s *Service) NeedsAudioTranscode(codec string) bool {
+// during MPEG-TS HLS remuxing for browser compatibility.
+func NeedsAudioTranscode(codec string) bool {
 	c := strings.ToLower(strings.TrimSpace(codec))
 	switch c {
-	case "", "aac", "mp3", "opus":
+	case "", "aac", "mp3":
 		return false
 	default:
 		return true
 	}
+}
+
+// NeedsAudioTranscode reports whether the audio codec must be transcoded to AAC
+// during MPEG-TS HLS remuxing for browser compatibility.
+func (s *Service) NeedsAudioTranscode(codec string) bool {
+	return NeedsAudioTranscode(codec)
 }
 
 // ServeDirectPlay serves a media file via storage DirectURL redirect (302) or

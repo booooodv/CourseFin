@@ -54,12 +54,12 @@ export default function SettingsPage() {
   const applySettingsPayload = useCallback((data: SettingsPayload) => {
     setSettings(data);
     setServerName(data.server_name || 'CourseFin');
-    setScanIntervalMinutes(String(data.scan_interval_minutes || 60));
+    setScanIntervalMinutes(String(data.scan_interval_minutes ?? 60));
     setAiBaseUrl(data.ai_base_url || '');
     setAiApiKey('');
     setClearAiKey(false);
     setAiModel(data.ai_model || '');
-    setAiMaxSubtitleChars(String(data.ai_max_subtitle_chars || 4000));
+    setAiMaxSubtitleChars(String(data.ai_max_subtitle_chars ?? 4000));
   }, []);
 
   const loadData = useCallback(async () => {
@@ -108,8 +108,10 @@ export default function SettingsPage() {
     setSettingsSuccess(null);
     setError(null);
 
-    const intervalNum = Math.max(1, Number.parseInt(scanIntervalMinutes, 10) || 60);
-    const maxSubNum = Math.max(0, Number.parseInt(aiMaxSubtitleChars, 10) || 0);
+    const parsedInterval = Number.parseInt(scanIntervalMinutes, 10);
+    const intervalNum = Number.isNaN(parsedInterval) ? 60 : Math.max(1, parsedInterval);
+    const parsedMaxSub = Number.parseInt(aiMaxSubtitleChars, 10);
+    const maxSubNum = Number.isNaN(parsedMaxSub) ? 4000 : Math.max(0, parsedMaxSub);
 
     const payload: UpdateSettingsInput = {
       server_name: serverName.trim() || 'CourseFin',
@@ -145,6 +147,7 @@ export default function SettingsPage() {
     setAiTestMessage(null);
 
     const trimmedKey = aiApiKey.trim();
+    const parsedMaxSub = Number.parseInt(aiMaxSubtitleChars, 10);
     const overrides: {
       base_url?: string;
       api_key?: string;
@@ -153,7 +156,7 @@ export default function SettingsPage() {
     } = {
       base_url: aiBaseUrl.trim(),
       model: aiModel.trim(),
-      max_subtitle_chars: Number.parseInt(aiMaxSubtitleChars, 10) || 4000,
+      max_subtitle_chars: Number.isNaN(parsedMaxSub) ? 4000 : Math.max(0, parsedMaxSub),
     };
     if (trimmedKey !== '' && trimmedKey !== MASKED_KEY_PLACEHOLDER) {
       overrides.api_key = trimmedKey;

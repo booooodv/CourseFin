@@ -7,6 +7,7 @@ import CourseDetailPage from '../pages/CourseDetailPage';
 import type { CourseDetail, LessonPlaybackInfo } from '../types/coursefin';
 
 const hlsMockInstances: Array<{
+  config?: unknown;
   loadSource: ReturnType<typeof vi.fn>;
   attachMedia: ReturnType<typeof vi.fn>;
   destroy: ReturnType<typeof vi.fn>;
@@ -24,12 +25,14 @@ vi.mock('hls.js', () => {
     static isSupported() {
       return hlsIsSupportedMock();
     }
+    config?: unknown;
     loadSource = vi.fn();
     attachMedia = vi.fn();
     destroy = vi.fn();
     on = vi.fn();
     off = vi.fn();
-    constructor() {
+    constructor(config?: unknown) {
+      this.config = config;
       hlsMockInstances.push(this);
     }
   }
@@ -364,6 +367,102 @@ describe('VideoPlayer', () => {
     Object.defineProperty(video, 'paused', { value: false, configurable: true });
     fireEvent.keyDown(window, { key: ' ', code: 'Space' });
     expect(pauseSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes { startPosition } to Hls on unplayed resume and omits it when played or zero', () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({}, 204)));
+
+    const resumePlayback = makePlayback({
+      mode: 'hls',
+      play_session_id: 'hls-resume-1',
+      stream_url: '/Videos/l1/master.m3u8?PlaySessionId=hls-resume-1&MediaSourceId=mf1',
+      progress: {
+        position_ticks: 45 * 10_000_000,
+        played: false,
+        play_count: 0,
+      },
+    });
+    const { unmount: unmountResume } = render(<VideoPlayer playback={resumePlayback} />);
+    expect(hlsMockInstances).toHaveLength(1);
+    expect(hlsMockInstances[0].config).toEqual({ startPosition: 45 });
+    unmountResume();
+
+    const playedPlayback = makePlayback({
+      mode: 'hls',
+      play_session_id: 'hls-played-2',
+      stream_url: '/Videos/l1/master.m3u8?PlaySessionId=hls-played-2&MediaSourceId=mf1',
+      progress: {
+        position_ticks: 45 * 10_000_000,
+        played: true,
+        play_count: 1,
+      },
+    });
+    const { unmount: unmountPlayed } = render(<VideoPlayer playback={playedPlayback} />);
+    expect(hlsMockInstances).toHaveLength(2);
+    expect(hlsMockInstances[1].config).toBeUndefined();
+    unmountPlayed();
+  });
+
+  it('flushes latest progress on unmount only when not already flushed or ended', async () => {
+    const progressCalls: Array<{ body: { position_ticks: number }; keepalive?: boolean }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/lessons/l1/progress') && init?.method === 'POST') {
+          const body = JSON.parse(String(init.body ?? '{}')) as { position_ticks: number };
+          progressCalls.push({ body, keepalive: init.keepalive });
+          return jsonResponse({
+            lesson_id: 'l1',
+            position_ticks: body.position_ticks,
+            played: false,
+            play_count: 0,
+            updated_at: '2026-11-23T00:00:00Z',
+          });
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    // 1. Advancing time via timeupdate and unmounting without pausing flushes progress with keepalive
+    const { container, unmount } = render(<VideoPlayer playback={makePlayback()} />);
+    const video = container.querySelector('video') as HTMLVideoElement;
+    video.currentTime = 53.2;
+    fireEvent.timeUpdate(video);
+
+    unmount();
+    await waitFor(() => {
+      expect(progressCalls).toHaveLength(1);
+    });
+    expect(progressCalls[0].body.position_ticks).toBe(532_000_000);
+    expect(progressCalls[0].keepalive).toBe(true);
+
+    // 2. Pausing at same time then unmounting does not double-flush
+    progressCalls.length = 0;
+    const { container: c2, unmount: unmount2 } = render(<VideoPlayer playback={makePlayback()} />);
+    const v2 = c2.querySelector('video') as HTMLVideoElement;
+    v2.currentTime = 18;
+    fireEvent.timeUpdate(v2);
+    fireEvent.pause(v2);
+    await waitFor(() => {
+      expect(progressCalls).toHaveLength(1);
+    });
+    unmount2();
+    expect(progressCalls).toHaveLength(1);
+
+    // 3. Ending video then unmounting does not overwrite completion
+    progressCalls.length = 0;
+    const { container: c3, unmount: unmount3 } = render(<VideoPlayer playback={makePlayback()} />);
+    const v3 = c3.querySelector('video') as HTMLVideoElement;
+    Object.defineProperty(v3, 'duration', { value: 120, configurable: true });
+    v3.currentTime = 120;
+    fireEvent.timeUpdate(v3);
+    fireEvent.ended(v3);
+    await waitFor(() => {
+      expect(progressCalls).toHaveLength(1);
+    });
+    unmount3();
+    expect(progressCalls).toHaveLength(1);
   });
 });
 

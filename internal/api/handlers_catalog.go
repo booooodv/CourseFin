@@ -549,9 +549,7 @@ func (h *handler) handleLessonPlayback(w http.ResponseWriter, r *http.Request) {
 	playSessionID := id.New()
 
 	var mode, streamURL string
-	if vcodec != "" && !h.media.CanRemuxVideoCodec(vcodec) {
-		mode = "unsupported"
-	} else if isBrowserDirectContainer(container) && !h.media.NeedsAudioTranscode(acodec) && isBrowserDirectVideoCodec(vcodec) {
+	if isBrowserDirectContainer(container) && isBrowserDirectAudioCodec(acodec) && isBrowserDirectVideoCodec(vcodec) {
 		mode = "direct"
 		q := url.Values{}
 		q.Set("Static", "true")
@@ -560,6 +558,8 @@ func (h *handler) handleLessonPlayback(w http.ResponseWriter, r *http.Request) {
 			q.Set("api_key", ac.Token)
 		}
 		streamURL = fmt.Sprintf("/Videos/%s/stream.%s?%s", lesson.ID, container, q.Encode())
+	} else if vcodec != "" && !h.media.CanWebRemuxVideoCodec(vcodec) {
+		mode = "unsupported"
 	} else {
 		mode = "hls"
 		q := url.Values{}
@@ -653,6 +653,15 @@ func isBrowserDirectContainer(c string) bool {
 func isBrowserDirectVideoCodec(c string) bool {
 	switch c {
 	case "h264", "avc", "avc1", "vp9", "av1":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBrowserDirectAudioCodec(c string) bool {
+	switch c {
+	case "", "aac", "mp3", "opus":
 		return true
 	default:
 		return false

@@ -227,13 +227,24 @@ func TestCanRemuxVideoCodecRejectsLegacyCodecs(t *testing.T) {
 		}
 	}
 
-	for _, c := range []string{"aac", "mp3", "opus"} {
-		if svc.NeedsAudioTranscode(c) {
+	for _, c := range []string{"h264", "H264", "avc", "avc1"} {
+		if !svc.CanWebRemuxVideoCodec(c) || !media.CanWebRemuxVideoCodec(c) {
+			t.Errorf("CanWebRemuxVideoCodec(%q) = false, want true", c)
+		}
+	}
+	for _, c := range []string{"hevc", "h265", "av1", "vp9", "wmv3", ""} {
+		if svc.CanWebRemuxVideoCodec(c) || media.CanWebRemuxVideoCodec(c) {
+			t.Errorf("CanWebRemuxVideoCodec(%q) = true, want false", c)
+		}
+	}
+
+	for _, c := range []string{"aac", "mp3"} {
+		if svc.NeedsAudioTranscode(c) || media.NeedsAudioTranscode(c) {
 			t.Errorf("NeedsAudioTranscode(%q) = true, want false", c)
 		}
 	}
-	for _, c := range []string{"ac3", "eac3", "dts", "flac", "pcm_s16le", "pcm_f32le"} {
-		if !svc.NeedsAudioTranscode(c) {
+	for _, c := range []string{"ac3", "eac3", "dts", "flac", "opus", "pcm_s16le", "pcm_f32le"} {
+		if !svc.NeedsAudioTranscode(c) || !media.NeedsAudioTranscode(c) {
 			t.Errorf("NeedsAudioTranscode(%q) = false, want true", c)
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1271,5 +1272,179 @@ func TestJellyfinGenreIDsTagIDsAndLatestIsPlayedFilter(t *testing.T) {
 	}
 	if len(latestOut) != 1 || latestOut[0].Id != cOld.ID {
 		t.Fatalf("expected Latest?IsPlayed=false&Limit=1 to return cOld (%s), got %s", cOld.ID, string(body))
+	}
+}
+
+func TestCoursePrimaryTagCacheBustingAndStopQueryFallback(t *testing.T) {
+	env := setupTestEnv(t)
+	token, userID, _ := env.authenticate(t)
+	ctx := context.Background()
+	headers := map[string]string{"X-Emby-Token": token}
+
+	srcID := env.seedSource(t)
+	mfID := env.seedMediaFile(t, srcID, "cover/01.mp4", "mp4", "h264", "aac", 60000, "", "")
+
+	course, err := env.catSvc.CreateCourse(ctx, catalog.CreateCourseInput{LibraryID: env.libID, Title: "Cover Cache Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse: %v", err)
+	}
+	lesson, err := env.catSvc.AddLesson(ctx, course.Chapters[0].ID, mfID, "Lesson 1")
+	if err != nil {
+		t.Fatalf("AddLesson: %v", err)
+	}
+
+	// Set initial progress so the lesson also appears on /Users/{uid}/Items/Resume
+	if _, err := env.catSvc.ReportProgress(ctx, lesson.ID, 15_000*10000); err != nil {
+		t.Fatalf("ReportProgress: %v", err)
+	}
+
+	coverFile := course.ID + "_cover.jpg"
+	if _, err := env.catSvc.UpdateCourse(ctx, course.ID, catalog.UpdateCourseInput{CoverPath: &coverFile}); err != nil {
+		t.Fatalf("UpdateCourse initial cover: %v", err)
+	}
+
+	readTags := func() (seriesTag, episodeTag, resumeTag string) {
+		t.Helper()
+		resp, raw := env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items/"+course.ID, nil, headers)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET Series = %d: %s", resp.StatusCode, raw)
+		}
+		var series struct {
+			ImageTags map[string]string `json:"ImageTags"`
+		}
+		if err := json.Unmarshal(raw, &series); err != nil {
+			t.Fatalf("decode Series: %v", err)
+		}
+		seriesTag = series.ImageTags["Primary"]
+
+		resp, raw = env.doJSON(t, http.MethodGet, "/Shows/"+course.ID+"/Episodes?UserId="+userID, nil, headers)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET Episodes = %d: %s", resp.StatusCode, raw)
+		}
+		var eps struct {
+			Items []struct {
+				SeriesPrimaryImageTag string `json:"SeriesPrimaryImageTag"`
+			} `json:"Items"`
+		}
+		if err := json.Unmarshal(raw, &eps); err != nil || len(eps.Items) != 1 {
+			t.Fatalf("decode Episodes: err=%v raw=%s", err, raw)
+		}
+		episodeTag = eps.Items[0].SeriesPrimaryImageTag
+
+		resp, raw = env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items/Resume", nil, headers)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET Resume = %d: %s", resp.StatusCode, raw)
+		}
+		var res struct {
+			Items []struct {
+				SeriesPrimaryImageTag string `json:"SeriesPrimaryImageTag"`
+			} `json:"Items"`
+		}
+		if err := json.Unmarshal(raw, &res); err != nil || len(res.Items) != 1 {
+			t.Fatalf("decode Resume: err=%v raw=%s", err, raw)
+		}
+		resumeTag = res.Items[0].SeriesPrimaryImageTag
+		return seriesTag, episodeTag, resumeTag
+	}
+
+	tag1, epTag1, resTag1 := readTags()
+	if tag1 == "" || epTag1 != tag1 || resTag1 != tag1 {
+		t.Fatalf("expected matching non-empty primary tags initially, got series=%q ep=%q resume=%q", tag1, epTag1, resTag1)
+	}
+
+	// Replace cover with the exact same filename ({courseID}_cover.jpg)
+	time.Sleep(5 * time.Millisecond)
+	if _, err := env.catSvc.UpdateCourse(ctx, course.ID, catalog.UpdateCourseInput{CoverPath: &coverFile}); err != nil {
+		t.Fatalf("UpdateCourse replaced cover: %v", err)
+	}
+
+	tag2, epTag2, resTag2 := readTags()
+	if tag2 == "" || tag2 == tag1 {
+		t.Fatalf("expected Series ImageTags[Primary] to change after cover replacement with same extension: before=%q after=%q", tag1, tag2)
+	}
+	if epTag2 != tag2 || resTag2 != tag2 {
+		t.Fatalf("expected Episode/Resume SeriesPrimaryImageTag to match new Series tag %q, got ep=%q resume=%q", tag2, epTag2, resTag2)
+	}
+
+	// Test POST /Sessions/Playing/Stopped?PlaySessionId=... fallback when body PlaySessionId is omitted
+	ffmpegBin := ""
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		ffmpegBin = p
+	} else {
+		for _, cand := range []string{"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"} {
+			if _, err := os.Stat(cand); err == nil {
+				ffmpegBin = cand
+				break
+			}
+		}
+	}
+
+	if ffmpegBin != "" {
+		// Re-seed an active remux session using a real tiny MKV and verify query PlaySessionId tears it down
+		mkvRel := "remuxstop/01.mkv"
+		mfMKV := env.seedMediaFile(t, srcID, mkvRel, "mkv", "h264", "aac", 10000, "", "")
+		mkvAbs := filepath.Join(env.mediaDir, mkvRel)
+		if out, err := exec.Command(
+			ffmpegBin, "-y",
+			"-f", "lavfi", "-i", "testsrc=duration=10:size=320x240:rate=24",
+			"-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+			"-c:v", "libx264", "-c:a", "aac",
+			mkvAbs,
+		).CombinedOutput(); err != nil {
+			t.Fatalf("generate mkv: %v\n%s", err, string(out))
+		}
+		lMKV, err := env.catSvc.AddLesson(ctx, course.Chapters[0].ID, mfMKV, "MKV Lesson")
+		if err != nil {
+			t.Fatalf("AddLesson MKV: %v", err)
+		}
+		reg := storage.NewRegistry()
+		mediaWithFF := media.NewService(env.db, env.dataDir, reg, ffmpegBin)
+		defer mediaWithFF.Close()
+		jfHandler := jellyfin.NewHandler(env.db, env.authSvc, env.catSvc, mediaWithFF)
+		jfSrv := httptest.NewServer(jfHandler)
+		defer jfSrv.Close()
+
+		playSession := "querystopsess99"
+		segReq, _ := http.NewRequest(http.MethodGet, jfSrv.URL+"/Videos/"+lMKV.ID+"/hls1/main/0.ts?PlaySessionId="+playSession, nil)
+		segReq.Header.Set("X-Emby-Token", token)
+		segResp, err := http.DefaultClient.Do(segReq)
+		if err != nil {
+			t.Fatalf("GET segment: %v", err)
+		}
+		_ = segResp.Body.Close()
+		if segResp.StatusCode != http.StatusOK {
+			t.Fatalf("GET segment status = %d", segResp.StatusCode)
+		}
+		sessDir := filepath.Join(env.dataDir, "cache", "remux", lMKV.ID+"_"+playSession)
+		if _, err := os.Stat(sessDir); err != nil {
+			t.Fatalf("expected active remux dir %s before stop: %v", sessDir, err)
+		}
+
+		stopBody, _ := json.Marshal(map[string]any{
+			"ItemId":        lMKV.ID,
+			"PositionTicks": int64(3_000 * 10000),
+		})
+		stopReq, _ := http.NewRequest(http.MethodPost, jfSrv.URL+"/Sessions/Playing/Stopped?PlaySessionId="+playSession, bytes.NewReader(stopBody))
+		stopReq.Header.Set("Content-Type", "application/json")
+		stopReq.Header.Set("X-Emby-Token", token)
+		stopResp, err := http.DefaultClient.Do(stopReq)
+		if err != nil {
+			t.Fatalf("POST Stopped: %v", err)
+		}
+		_ = stopResp.Body.Close()
+		if stopResp.StatusCode != http.StatusNoContent {
+			t.Fatalf("POST Stopped status = %d, want 204", stopResp.StatusCode)
+		}
+		if _, err := os.Stat(sessDir); !os.IsNotExist(err) {
+			t.Fatalf("expected remux dir %s removed by query PlaySessionId fallback", sessDir)
+		}
+	} else {
+		resp, _ := env.doJSON(t, http.MethodPost, "/Sessions/Playing/Stopped?PlaySessionId=q-sess-1", map[string]any{
+			"ItemId":        lesson.ID,
+			"PositionTicks": int64(25_000 * 10000),
+		}, headers)
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("POST /Sessions/Playing/Stopped?PlaySessionId=... status = %d", resp.StatusCode)
+		}
 	}
 }

@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import AIOrganizeModal from '../components/AIOrganizeModal';
 import ImportCourseModal from '../components/ImportCourseModal';
-import CourseEditorPage from '../pages/CourseEditorPage';
+import CourseEditorPage, { resolveDragReorder } from '../pages/CourseEditorPage';
 import StoragePage from '../pages/StoragePage';
 import SettingsPage from '../pages/SettingsPage';
 import type { CourseDetail, Library } from '../types/coursefin';
@@ -563,6 +563,30 @@ describe('CourseEditorPage', () => {
     expect(await screen.findByText('课时重命名失败：服务器错误')).toBeInTheDocument();
     expect(screen.getByLabelText(/编辑课时标题 01_intro\.mp4/)).toBeInTheDocument();
   });
+
+  it('resolveDragReorder resolves parent chapter when dragging a chapter over a lesson inside a populated chapter card', () => {
+    const chapters = structuredClone(sampleCourse.chapters);
+
+    // Dragging chapter 1 onto lesson-2 (inside chapter 2) reorders chapters [chap-2, chap-1]
+    const overOtherChapterLesson = resolveDragReorder(chapters, 'chapter-chap-1', 'lesson-lesson-2');
+    expect(overOtherChapterLesson?.type).toBe('chapter');
+    expect(overOtherChapterLesson?.chapters.map((c) => c.id)).toEqual(['chap-2', 'chap-1']);
+
+    // Dragging chapter 1 onto a lesson inside chapter 1 itself is a no-op
+    const overOwnLesson = resolveDragReorder(chapters, 'chapter-chap-1', 'lesson-lesson-1');
+    expect(overOwnLesson).toBeNull();
+
+    // Dragging chapter 1 directly over chapter 2 reorders chapters
+    const overChapterDirect = resolveDragReorder(chapters, 'chapter-chap-1', 'chapter-chap-2');
+    expect(overChapterDirect?.type).toBe('chapter');
+    expect(overChapterDirect?.chapters.map((c) => c.id)).toEqual(['chap-2', 'chap-1']);
+
+    // Dragging lesson 1 onto chapter 2 moves lesson 1 into chapter 2
+    const lessonToChapter = resolveDragReorder(chapters, 'lesson-lesson-1', 'chapter-chap-2');
+    expect(lessonToChapter?.type).toBe('lesson');
+    expect(lessonToChapter?.chapters[0].lessons).toHaveLength(0);
+    expect(lessonToChapter?.chapters[1].lessons.map((l) => l.id)).toEqual(['lesson-2', 'lesson-1']);
+  });
 });
 
 describe('StoragePage & SettingsPage', () => {
@@ -901,5 +925,90 @@ describe('StoragePage & SettingsPage', () => {
     await waitFor(() => {
       expect(revokedToken).toBe('sess-infuse-1');
     });
+  });
+
+  it('SettingsPage renders ai_max_subtitle_chars = 0 as "0" and submits 0 on save and test', async () => {
+    let savedPayload: unknown = null;
+    let testPayload: unknown = null;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/v1/settings') && method === 'GET') {
+          return jsonResponse({
+            server_name: 'CourseFin Studio',
+            scan_interval_minutes: 60,
+            base_url_hint: 'http://localhost:8096',
+            jellyfin_username: 'admin',
+            ai_base_url: 'https://api.openai.com/v1',
+            ai_api_key: '',
+            ai_api_key_set: false,
+            ai_model: 'gpt-4o-mini',
+            ai_max_subtitle_chars: 0,
+          });
+        }
+        if (url.endsWith('/api/v1/settings') && method === 'PUT') {
+          savedPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return jsonResponse({
+            server_name: 'CourseFin Studio',
+            scan_interval_minutes: 60,
+            base_url_hint: 'http://localhost:8096',
+            jellyfin_username: 'admin',
+            ai_base_url: 'https://api.openai.com/v1',
+            ai_api_key: '',
+            ai_api_key_set: false,
+            ai_model: 'gpt-4o-mini',
+            ai_max_subtitle_chars: 0,
+          });
+        }
+        if (url.endsWith('/api/v1/settings/ai/test') && method === 'POST') {
+          testPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return jsonResponse({ ok: true });
+        }
+        if (url.endsWith('/api/v1/sessions') && method === 'GET') {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me') && method === 'GET') {
+          return jsonResponse({
+            user: { id: 'u1', username: 'admin', created_at: '', updated_at: '' },
+            session: {
+              token: 'test-token',
+              user_id: 'u1',
+              device_id: 'web',
+              device_name: 'Web',
+              client_name: 'CourseFin Web',
+              client_version: '0.1.0',
+              last_active_at: '',
+              created_at: '',
+            },
+          });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    const subInput = await screen.findByLabelText(/最大字幕上下文字符数/);
+    expect(subInput).toHaveValue(0);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /保存设置/ }));
+    await waitFor(() => {
+      expect(savedPayload).toBeTruthy();
+    });
+    expect((savedPayload as Record<string, unknown>).ai_max_subtitle_chars).toBe(0);
+
+    await user.click(screen.getByRole('button', { name: /测试连接/ }));
+    await waitFor(() => {
+      expect(testPayload).toBeTruthy();
+    });
+    expect((testPayload as Record<string, unknown>).max_subtitle_chars).toBe(0);
   });
 });

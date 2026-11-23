@@ -80,6 +80,9 @@ export default function VideoPlayer({
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const resumeAppliedRef = useRef(false);
+  const latestTimeRef = useRef<number>(0);
+  const endedRef = useRef<boolean>(false);
+  const lastFlushedTicksRef = useRef<number>(-1);
 
   const onProgressSavedRef = useRef(onProgressSaved);
   onProgressSavedRef.current = onProgressSaved;
@@ -99,6 +102,31 @@ export default function VideoPlayer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [hlsUnsupportedBrowser, setHlsUnsupportedBrowser] = useState(false);
+
+  // Flush latest playback progress on unmount or lesson/session switch
+  useEffect(() => {
+    const lessonId = playback.lesson_id;
+    latestTimeRef.current = 0;
+    endedRef.current = false;
+    lastFlushedTicksRef.current =
+      playback.progress && !playback.progress.played && playback.progress.position_ticks > 0
+        ? playback.progress.position_ticks
+        : -1;
+
+    return () => {
+      if (endedRef.current || latestTimeRef.current <= 0) {
+        return;
+      }
+      const ticks = Math.floor(latestTimeRef.current * TICKS_PER_SECOND);
+      if (ticks <= 0 || ticks === lastFlushedTicksRef.current) {
+        return;
+      }
+      lastFlushedTicksRef.current = ticks;
+      void api.reportProgress(lessonId, ticks, { keepalive: true }).catch(() => {});
+    };
+    // Only flush when switching lessons/sessions or unmounting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playback.lesson_id, playback.play_session_id]);
 
   // Reset per-lesson state when lesson or session changes
   useEffect(() => {
@@ -127,7 +155,11 @@ export default function VideoPlayer({
     let usedNativeHls = false;
 
     if (Hls.isSupported()) {
-      hls = new Hls();
+      const resumeSec =
+        playback.progress && !playback.progress.played && playback.progress.position_ticks > 0
+          ? playback.progress.position_ticks / TICKS_PER_SECOND
+          : -1;
+      hls = new Hls(resumeSec > 0 ? { startPosition: resumeSec } : undefined);
       hls.loadSource(resolvedStreamUrl);
       hls.attachMedia(video);
       hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -171,6 +203,7 @@ export default function VideoPlayer({
   const reportTicks = useCallback(
     async (ticks: number) => {
       const safeTicks = Math.max(0, Math.floor(ticks));
+      lastFlushedTicksRef.current = safeTicks;
       try {
         const res = await api.reportProgress(playback.lesson_id, safeTicks);
         onProgressSavedRef.current?.(res);
@@ -189,6 +222,7 @@ export default function VideoPlayer({
     const timer = window.setInterval(() => {
       const video = videoRef.current;
       if (!video || video.paused || video.ended) return;
+      latestTimeRef.current = video.currentTime;
       void reportTicks(Math.floor(video.currentTime * TICKS_PER_SECOND));
     }, PROGRESS_SYNC_INTERVAL_MS);
 
@@ -227,10 +261,12 @@ export default function VideoPlayer({
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
         video.currentTime = Math.max(0, video.currentTime - 10);
+        latestTimeRef.current = video.currentTime;
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         const maxTime = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : Infinity;
         video.currentTime = Math.min(maxTime, video.currentTime + 10);
+        latestTimeRef.current = video.currentTime;
       } else if (e.key === 'f' || e.key === 'F') {
         e.preventDefault();
         if (document.fullscreenElement) {
@@ -268,6 +304,14 @@ export default function VideoPlayer({
     }
   }
 
+  function handleTimeUpdate() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (Number.isFinite(video.currentTime) && video.currentTime >= 0) {
+      latestTimeRef.current = video.currentTime;
+    }
+  }
+
   function handlePlay() {
     setIsPlaying(true);
     setPlayerError(null);
@@ -277,10 +321,12 @@ export default function VideoPlayer({
     setIsPlaying(false);
     const video = videoRef.current;
     if (!video || video.ended) return;
+    latestTimeRef.current = video.currentTime;
     void reportTicks(Math.floor(video.currentTime * TICKS_PER_SECOND));
   }
 
   async function handleEnded() {
+    endedRef.current = true;
     setIsPlaying(false);
     const video = videoRef.current;
     let endTicks = 0;
@@ -385,6 +431,8 @@ export default function VideoPlayer({
           playsInline
           preload="metadata"
           onLoadedMetadata={handleLoadedMetadata}
+          onTimeUpdate={handleTimeUpdate}
+          onSeeked={handleTimeUpdate}
           onPlay={handlePlay}
           onPause={handlePause}
           onEnded={() => void handleEnded()}

@@ -246,8 +246,12 @@ func (h *Handler) handlePlaybackStopped(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	if req.PlaySessionId != "" {
-		h.media.StopRemuxSession(req.PlaySessionId)
+	playSessionID := strings.TrimSpace(req.PlaySessionId)
+	if playSessionID == "" {
+		playSessionID = strings.TrimSpace(queryParam(r, "PlaySessionId"))
+	}
+	if playSessionID != "" {
+		h.media.StopRemuxSession(playSessionID)
 	}
 	itemID := normalizeID(req.ItemId)
 	if itemID == "" {

@@ -28,6 +28,7 @@ type LessonWithContext struct {
 	LessonDetail
 	CourseTitle      string `json:"course_title"`
 	CourseCoverPath  string `json:"course_cover_path"`
+	CourseUpdatedAt  string `json:"course_updated_at"`
 	LibraryID        string `json:"library_id"`
 	ChapterTitle     string `json:"chapter_title"`
 	ChapterSortOrder int    `json:"chapter_sort_order"`
@@ -191,7 +192,7 @@ const lessonWithContextSelect = `
 	       mf.duration_ms, mf.container, mf.video_codec, mf.audio_codec, mf.width, mf.height, mf.bitrate, mf.thumbnail_path, mf.status,
 	       COALESCE(pp.position_ticks, 0), COALESCE(pp.played, 0), COALESCE(pp.play_count, 0), COALESCE(pp.last_played_at, ''),
 	       l.created_at, l.updated_at,
-	       c.title, c.cover_path, c.library_id, ch.title, ch.sort_order
+	       c.title, c.cover_path, c.updated_at, c.library_id, ch.title, ch.sort_order
 	FROM lessons l
 	JOIN chapters ch ON ch.id = l.chapter_id
 	JOIN courses c ON c.id = l.course_id
@@ -206,7 +207,7 @@ func scanLessonWithContext(rows *sql.Rows) (LessonWithContext, error) {
 		&item.DurationMs, &item.Container, &item.VideoCodec, &item.AudioCodec, &item.Width, &item.Height, &item.Bitrate, &item.ThumbnailPath, &item.MediaStatus,
 		&item.PositionTicks, &playedInt, &item.PlayCount, &item.LastPlayedAt,
 		&item.CreatedAt, &item.UpdatedAt,
-		&item.CourseTitle, &item.CourseCoverPath, &item.LibraryID, &item.ChapterTitle, &item.ChapterSortOrder,
+		&item.CourseTitle, &item.CourseCoverPath, &item.CourseUpdatedAt, &item.LibraryID, &item.ChapterTitle, &item.ChapterSortOrder,
 	)
 	item.Played = playedInt != 0
 	return item, err
