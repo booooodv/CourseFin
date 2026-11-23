@@ -1,5 +1,7 @@
 .git
 .superpowers
+.env
+.env.local
 data
 media
 web/node_modules

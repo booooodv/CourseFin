@@ -1,4 +1,6 @@
 .superpowers/
+.env
+.env.local
 /data
 data/
 /media
