@@ -1,0 +1,23 @@
+services:
+  coursefin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: coursefin:local
+    container_name: coursefin
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    environment:
+      COURSEFIN_PORT: "8096"
+      COURSEFIN_DATA_DIR: /data
+      COURSEFIN_LOG_LEVEL: info
+    volumes:
+      - ./data:/data
+      - ./media:/media:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8096/System/Ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
