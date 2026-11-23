@@ -1,6 +1,6 @@
 import type { FormEvent } from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   BookOpen,
   CheckCircle2,
@@ -88,6 +88,7 @@ function CoursePoster({ courseId, title, hasCover, tag }: CoursePosterProps) {
 }
 
 export default function HomePage() {
+  const navigate = useNavigate();
   const [home, setHome] = useState<HomeResponse | null>(null);
   const [libraries, setLibraries] = useState<Library[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
@@ -104,6 +105,13 @@ export default function HomePage() {
   const [creatingLib, setCreatingLib] = useState(false);
   const [createLibError, setCreateLibError] = useState<string | null>(null);
 
+  // Create blank course inline form state
+  const [showCreateCourse, setShowCreateCourse] = useState(false);
+  const [newCourseTitle, setNewCourseTitle] = useState('');
+  const [newCourseLibraryId, setNewCourseLibraryId] = useState('');
+  const [creatingCourse, setCreatingCourse] = useState(false);
+  const [createCourseError, setCreateCourseError] = useState<string | null>(null);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -114,7 +122,11 @@ export default function HomePage() {
         api.listTags(),
       ]);
       setHome(homeData);
-      setLibraries(libsData.libraries ?? homeData.libraries ?? []);
+      const resolvedLibs = libsData.libraries ?? homeData.libraries ?? [];
+      setLibraries(resolvedLibs);
+      if (resolvedLibs.length > 0) {
+        setNewCourseLibraryId((prev) => prev || resolvedLibs[0].id);
+      }
       setTags(tagsData.tags ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载课程库失败');
@@ -146,6 +158,35 @@ export default function HomePage() {
       setCreateLibError(err instanceof Error ? err.message : '创建媒体库失败');
     } finally {
       setCreatingLib(false);
+    }
+  }
+
+  async function handleCreateBlankCourse(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = newCourseTitle.trim();
+    const targetLib = newCourseLibraryId || libraries[0]?.id || '';
+    if (!trimmed) {
+      setCreateCourseError('请输入课程名称');
+      return;
+    }
+    if (!targetLib) {
+      setCreateCourseError('请先创建一个媒体库');
+      return;
+    }
+    setCreatingCourse(true);
+    setCreateCourseError(null);
+    try {
+      const created = await api.createCourse({
+        library_id: targetLib,
+        title: trimmed,
+      });
+      setNewCourseTitle('');
+      setShowCreateCourse(false);
+      navigate(`/courses/${created.id}/edit`);
+    } catch (err) {
+      setCreateCourseError(err instanceof Error ? err.message : '创建课程失败');
+    } finally {
+      setCreatingCourse(false);
     }
   }
 
@@ -312,6 +353,20 @@ export default function HomePage() {
               <Plus className="h-4 w-4" />
               <span>新建媒体库</span>
             </button>
+
+            {libraries.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateCourse((v) => !v);
+                  setCreateCourseError(null);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2 text-sm font-medium text-slate-200 hover:border-indigo-500/60 hover:text-indigo-300 transition-colors"
+              >
+                <Plus className="h-4 w-4" />
+                <span>新建空白课程</span>
+              </button>
+            )}
           </div>
 
           {/* Search box */}
@@ -370,6 +425,54 @@ export default function HomePage() {
             </div>
             {createLibError && (
               <p className="text-xs text-rose-400 sm:ml-2">{createLibError}</p>
+            )}
+          </form>
+        )}
+
+        {/* Inline Create Blank Course Form */}
+        {showCreateCourse && (
+          <form
+            onSubmit={handleCreateBlankCourse}
+            className="flex flex-col sm:flex-row sm:items-center gap-3 rounded-2xl border border-slate-800 bg-slate-900/90 p-4"
+          >
+            <input
+              type="text"
+              value={newCourseTitle}
+              onChange={(e) => setNewCourseTitle(e.target.value)}
+              placeholder="输入新课程名称"
+              aria-label="新课程名称"
+              className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+            />
+            <select
+              aria-label="目标媒体库"
+              value={newCourseLibraryId || libraries[0]?.id || ''}
+              onChange={(e) => setNewCourseLibraryId(e.target.value)}
+              className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+            >
+              {libraries.map((lib) => (
+                <option key={lib.id} value={lib.id}>
+                  {lib.name}
+                </option>
+              ))}
+            </select>
+            <div className="flex items-center gap-2">
+              <button
+                type="submit"
+                disabled={creatingCourse}
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              >
+                {creatingCourse ? '创建中...' : '创建并编辑'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowCreateCourse(false)}
+                className="rounded-xl border border-slate-700 px-3.5 py-2 text-sm text-slate-300 hover:bg-slate-800 transition-colors"
+              >
+                取消
+              </button>
+            </div>
+            {createCourseError && (
+              <p className="text-xs text-rose-400 sm:ml-2">{createCourseError}</p>
             )}
           </form>
         )}

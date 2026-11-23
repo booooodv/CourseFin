@@ -88,6 +88,14 @@ export function itemPrimaryImageUrl(itemId: string, tag?: string, maxWidth = 480
   return `${base}?maxWidth=${maxWidth}`;
 }
 
+export function itemBackdropImageUrl(itemId: string, tag?: string, maxWidth = 1280): string {
+  const base = `/Items/${encodeURIComponent(itemId)}/Images/Backdrop`;
+  if (tag) {
+    return `${base}?tag=${encodeURIComponent(tag)}&maxWidth=${maxWidth}`;
+  }
+  return `${base}?maxWidth=${maxWidth}`;
+}
+
 function redirectToLoginOnUnauthorized(): void {
   clearToken();
   if (typeof window !== 'undefined' && window.location) {

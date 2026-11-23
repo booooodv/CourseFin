@@ -3,13 +3,11 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { getToken } from './api/client';
 import Layout from './components/Layout';
 import CourseDetailPage from './pages/CourseDetailPage';
+import CourseEditorPage from './pages/CourseEditorPage';
 import HomePage from './pages/HomePage';
+import SettingsPage from './pages/SettingsPage';
 import SetupLoginPage from './pages/SetupLoginPage';
-import {
-  CourseEditPlaceholder,
-  SettingsPlaceholder,
-  StoragePlaceholder,
-} from './pages/Placeholders';
+import StoragePage from './pages/StoragePage';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = getToken();
@@ -48,7 +46,7 @@ export function AppRoutes() {
         element={
           <RequireAuth>
             <Layout>
-              <CourseEditPlaceholder />
+              <CourseEditorPage />
             </Layout>
           </RequireAuth>
         }
@@ -58,7 +56,7 @@ export function AppRoutes() {
         element={
           <RequireAuth>
             <Layout>
-              <StoragePlaceholder />
+              <StoragePage />
             </Layout>
           </RequireAuth>
         }
@@ -68,7 +66,7 @@ export function AppRoutes() {
         element={
           <RequireAuth>
             <Layout>
-              <SettingsPlaceholder />
+              <SettingsPage />
             </Layout>
           </RequireAuth>
         }
