@@ -74,6 +74,10 @@ func TestOrganizeCourseParsesValidJSONAndMarkdownFence(t *testing.T) {
 			name:    "plain markdown fence",
 			content: "```\n" + proposalJSON + "\n```",
 		},
+		{
+			name:    "raw json with backticks inside overview",
+			content: "{\n\"title\": \"Go 语言系统精讲\",\n\"overview\": \"包含代码示例：```go\\nfmt.Println()\\n```\",\n\"tags\": [\"Go\", \"后端开发\", \"系统编程\"],\n\"chapters\": [{\"title\": \"第一章：入门与环境搭建\", \"lessons\": [{\"lesson_id\": \"lesson-aaa\", \"title\": \"课程介绍\"}, {\"lesson_id\": \"lesson-bbb\", \"title\": \"Go 开发环境搭建\"}]}]\n}",
+		},
 	}
 
 	for _, tc := range cases {
@@ -148,7 +152,11 @@ func TestOrganizeCourseParsesValidJSONAndMarkdownFence(t *testing.T) {
 			if prop.Title != "Go 语言系统精讲" {
 				t.Errorf("Title = %q, want %q", prop.Title, "Go 语言系统精讲")
 			}
-			if prop.Overview != "从零开始系统学习 Go 语言核心语法与工程实践。" {
+			if tc.name == "raw json with backticks inside overview" {
+				if !strings.Contains(prop.Overview, "```go") {
+					t.Errorf("Overview = %q, expected backticks preserved", prop.Overview)
+				}
+			} else if prop.Overview != "从零开始系统学习 Go 语言核心语法与工程实践。" {
 				t.Errorf("Overview = %q", prop.Overview)
 			}
 			if len(prop.Tags) != 3 || prop.Tags[0] != "Go" {
@@ -271,6 +279,13 @@ func TestValidateProposalRejectsMissingOrUnknownLessonID(t *testing.T) {
 				Title: "Title",
 				Chapters: []ai.ProposalChapter{
 					{Title: "Ch", Lessons: []ai.ProposalLesson{{LessonID: "id-1", Title: ""}, {LessonID: "id-2", Title: "L2"}}},
+				},
+			},
+			{
+				Title: "Title",
+				Chapters: []ai.ProposalChapter{
+					{Title: "Empty Chapter", Lessons: nil},
+					{Title: "Ch", Lessons: []ai.ProposalLesson{{LessonID: "id-1", Title: "L1"}, {LessonID: "id-2", Title: "L2"}}},
 				},
 			},
 		}

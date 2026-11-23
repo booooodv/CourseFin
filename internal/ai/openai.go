@@ -287,6 +287,9 @@ func truncateRunes(s string, maxRunes int) (string, int) {
 
 func stripMarkdownJSONFence(raw string) string {
 	s := strings.TrimSpace(raw)
+	if strings.HasPrefix(s, "{") {
+		return s
+	}
 	if start := strings.Index(s, "```"); start != -1 {
 		afterOpen := s[start+3:]
 		if nl := strings.IndexByte(afterOpen, '\n'); nl != -1 {

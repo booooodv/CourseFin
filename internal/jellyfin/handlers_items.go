@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"coursefin/internal/catalog"
+	"coursefin/internal/id"
 	"coursefin/internal/media"
 )
 
@@ -106,6 +107,12 @@ func (h *Handler) handleItems(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if tagIDsRaw := parseMultiFilter(queryParam(r, "TagIds")); len(tagIDsRaw) > 0 {
+		tagsFilter = append(tagsFilter, resolveTagIDsToNames(tagIDsRaw, tagMap)...)
+	}
+	if genreIDsRaw := parseMultiFilter(queryParam(r, "GenreIds")); len(genreIDsRaw) > 0 {
+		genresFilter = append(genresFilter, resolveTagIDsToNames(genreIDsRaw, tagMap)...)
 	}
 	courseImgMap, err := h.loadCourseFallbackImageMap(ctx)
 	if err != nil {
@@ -424,7 +431,19 @@ func (h *Handler) handleLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	courses, err := h.cat.GetLatestCourses(ctx, parentID, limit)
+	isPlayed := queryBool(r, "IsPlayed")
+	var courses []catalog.CourseSummary
+	if isPlayed != nil {
+		courses, err = h.cat.ListCourses(ctx, catalog.CourseFilter{
+			LibraryID: parentID,
+			IsPlayed:  isPlayed,
+			SortBy:    "created_at",
+			SortDesc:  true,
+			Limit:     limit,
+		})
+	} else {
+		courses, err = h.cat.GetLatestCourses(ctx, parentID, limit)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -435,12 +454,8 @@ func (h *Handler) handleLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isPlayed := queryBool(r, "IsPlayed")
 	out := make([]BaseItemDto, 0, len(courses))
 	for _, c := range courses {
-		if isPlayed != nil && c.Played != *isPlayed {
-			continue
-		}
 		out = append(out, mapCourseDTO(c, ident.ID, tagMap, courseImgMap))
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -1425,6 +1440,26 @@ func parseTypeSet(raw string) map[string]bool {
 		set[strings.ToLower(item)] = true
 	}
 	return set
+}
+
+func resolveTagIDsToNames(rawIDs []string, tagMap map[string]string) []string {
+	idToLowerName := make(map[string]string, len(tagMap))
+	for name, tid := range tagMap {
+		idToLowerName[tid] = strings.ToLower(name)
+	}
+	out := make([]string, 0, len(rawIDs))
+	for _, raw := range rawIDs {
+		norm := raw
+		if n, ok := id.Normalize(raw); ok {
+			norm = n
+		}
+		if name, ok := idToLowerName[norm]; ok {
+			out = append(out, name)
+		} else {
+			out = append(out, "__unknown_tag_id__:"+norm)
+		}
+	}
+	return out
 }
 
 func parseMultiFilter(raw string) []string {

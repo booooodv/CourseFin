@@ -39,8 +39,14 @@ func (s *Service) ReportProgress(ctx context.Context, lessonID string, positionT
 		positionTicks = 0
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin progress tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var durationMs int64
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT mf.duration_ms
 		FROM lessons l
 		JOIN media_files mf ON mf.id = l.media_file_id
@@ -53,28 +59,35 @@ func (s *Service) ReportProgress(ctx context.Context, lessonID string, positionT
 	}
 
 	var (
-		playedInt int
-		playCount int
+		prevPositionTicks int64
+		playedInt         int
+		playCount         int
 	)
-	err = s.db.QueryRowContext(ctx, `
-		SELECT played, play_count FROM playback_progress WHERE lesson_id = ?`, lessonID).
-		Scan(&playedInt, &playCount)
+	err = tx.QueryRowContext(ctx, `
+		SELECT position_ticks, played, play_count FROM playback_progress WHERE lesson_id = ?`, lessonID).
+		Scan(&prevPositionTicks, &playedInt, &playCount)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("load playback_progress: %w", err)
 	}
 
-	played := playedInt != 0
+	prevPlayed := playedInt != 0
+	played := prevPlayed
 	finalPos := positionTicks
 
 	if durationMs > 0 && float64(positionTicks)/float64(durationMs*ticksPerMillisecond) >= autoCompleteThreshold {
 		played = true
-		playCount++
+		if !prevPlayed || prevPositionTicks > 0 {
+			playCount++
+		}
 		finalPos = 0
 	}
 
 	now := nowUTC()
-	if err := s.upsertProgress(ctx, lessonID, finalPos, played, playCount, now, now); err != nil {
+	if err := upsertProgressWith(ctx, tx, lessonID, finalPos, played, playCount, now, now); err != nil {
 		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit progress tx: %w", err)
 	}
 
 	return &Progress{
@@ -139,6 +152,14 @@ func (s *Service) SetPlayed(ctx context.Context, lessonID string, played bool) (
 }
 
 func (s *Service) upsertProgress(ctx context.Context, lessonID string, positionTicks int64, played bool, playCount int, lastPlayedAt, updatedAt string) error {
+	return upsertProgressWith(ctx, s.db, lessonID, positionTicks, played, playCount, lastPlayedAt, updatedAt)
+}
+
+type progressExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func upsertProgressWith(ctx context.Context, execer progressExecer, lessonID string, positionTicks int64, played bool, playCount int, lastPlayedAt, updatedAt string) error {
 	playedInt := 0
 	if played {
 		playedInt = 1
@@ -148,7 +169,7 @@ func (s *Service) upsertProgress(ctx context.Context, lessonID string, positionT
 		lastPlayVal = lastPlayedAt
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := execer.ExecContext(ctx, `
 		INSERT INTO playback_progress (lesson_id, position_ticks, played, play_count, last_played_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(lesson_id) DO UPDATE SET

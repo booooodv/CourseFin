@@ -61,6 +61,11 @@ interface CoursePosterProps {
 
 function CoursePoster({ courseId, title, hasCover, tag }: CoursePosterProps) {
   const [imgFailed, setImgFailed] = useState(false);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [courseId, tag]);
+
   const initial = title.trim().slice(0, 1).toUpperCase() || '课';
   const gradient = gradientForId(courseId);
 
@@ -90,6 +95,7 @@ function CoursePoster({ courseId, title, hasCover, tag }: CoursePosterProps) {
 export default function HomePage() {
   const navigate = useNavigate();
   const [home, setHome] = useState<HomeResponse | null>(null);
+  const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [libraries, setLibraries] = useState<Library[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [loading, setLoading] = useState(true);
@@ -116,12 +122,14 @@ export default function HomePage() {
     setLoading(true);
     setError(null);
     try {
-      const [homeData, libsData, tagsData] = await Promise.all([
+      const [homeData, coursesData, libsData, tagsData] = await Promise.all([
         api.getHome(),
+        api.listCourses(),
         api.listLibraries(),
         api.listTags(),
       ]);
       setHome(homeData);
+      setCourses(coursesData.courses ?? homeData.courses ?? []);
       const resolvedLibs = libsData.libraries ?? homeData.libraries ?? [];
       setLibraries(resolvedLibs);
       if (resolvedLibs.length > 0) {
@@ -190,7 +198,7 @@ export default function HomePage() {
     }
   }
 
-  const allCourses: CourseSummary[] = home?.courses ?? [];
+  const allCourses: CourseSummary[] = courses;
 
   const filteredCourses = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -267,7 +275,7 @@ export default function HomePage() {
                 >
                   <div className="relative aspect-video w-full overflow-hidden bg-slate-800">
                     <CoursePoster
-                      courseId={item.course_id}
+                      courseId={item.cover_path || item.thumbnail_path ? item.id : item.course_id}
                       title={item.course_title}
                       hasCover={hasThumb}
                       tag={item.updated_at}

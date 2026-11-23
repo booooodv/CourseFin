@@ -282,21 +282,24 @@ func (h *handler) saveUploadedCourseImage(r *http.Request, courseID, kind, prevF
 		return "", fmt.Errorf("uploaded file is empty")
 	}
 
+	detected := http.DetectContentType(raw)
+	var detectedExt string
+	switch detected {
+	case "image/jpeg":
+		detectedExt = ".jpg"
+	case "image/png":
+		detectedExt = ".png"
+	case "image/webp":
+		detectedExt = ".webp"
+	case "image/gif":
+		detectedExt = ".gif"
+	default:
+		return "", fmt.Errorf("unsupported image format (%s)", detected)
+	}
+
 	ext := strings.ToLower(path.Ext(header.Filename))
 	if !allowedCoverExts[ext] {
-		detected := http.DetectContentType(raw)
-		switch detected {
-		case "image/jpeg":
-			ext = ".jpg"
-		case "image/png":
-			ext = ".png"
-		case "image/webp":
-			ext = ".webp"
-		case "image/gif":
-			ext = ".gif"
-		default:
-			return "", fmt.Errorf("unsupported image format (%s)", detected)
-		}
+		ext = detectedExt
 	}
 
 	coversDir := filepath.Join(h.dataDir, "covers")

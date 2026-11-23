@@ -64,6 +64,8 @@ export default function StoragePage() {
   // Scan states by source ID
   const [scanStates, setScanStates] = useState<Record<string, ScanState>>({});
   const pollTimersRef = useRef<Record<string, number>>({});
+  const pollInFlightRef = useRef<Record<string, boolean>>({});
+  const mountedRef = useRef(true);
   const browseStateRef = useRef({
     selectedSourceId: '',
     currentPrefix: '',
@@ -84,8 +86,10 @@ export default function StoragePage() {
 
   // Cleanup all polling timers on unmount
   useEffect(() => {
+    mountedRef.current = true;
     const timers = pollTimersRef.current;
     return () => {
+      mountedRef.current = false;
       for (const id of Object.keys(timers)) {
         window.clearInterval(timers[id]);
         delete timers[id];
@@ -121,6 +125,59 @@ export default function StoragePage() {
     [],
   );
 
+  const stopPolling = useCallback((sourceId: string) => {
+    const timer = pollTimersRef.current[sourceId];
+    if (timer !== undefined) {
+      window.clearInterval(timer);
+      delete pollTimersRef.current[sourceId];
+    }
+    delete pollInFlightRef.current[sourceId];
+  }, []);
+
+  const startPolling = useCallback(
+    (sourceId: string) => {
+      stopPolling(sourceId);
+      const poll = async () => {
+        if (pollInFlightRef.current[sourceId]) {
+          return;
+        }
+        pollInFlightRef.current[sourceId] = true;
+        try {
+          const st = await api.getScanStatus(sourceId);
+          if (!mountedRef.current) return;
+          setScanStates((prev) => ({ ...prev, [sourceId]: st }));
+          if (!st.running) {
+            stopPolling(sourceId);
+            const srcRes = await api.listSources();
+            if (!mountedRef.current) return;
+            setSources(srcRes.sources ?? []);
+            const cur = browseStateRef.current;
+            if (sourceId === cur.selectedSourceId) {
+              await loadBrowseData(
+                sourceId,
+                cur.currentPrefix,
+                cur.fileStatusFilter,
+                cur.fileSearch,
+              );
+            }
+          }
+        } catch (err) {
+          stopPolling(sourceId);
+          if (mountedRef.current) {
+            setError(err instanceof Error ? err.message : '查询扫描状态失败');
+          }
+        } finally {
+          pollInFlightRef.current[sourceId] = false;
+        }
+      };
+
+      pollTimersRef.current[sourceId] = window.setInterval(() => {
+        void poll();
+      }, 450);
+    },
+    [loadBrowseData, stopPolling],
+  );
+
   const loadInitial = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -133,56 +190,35 @@ export default function StoragePage() {
         const initialId = srcList[0].id;
         setSelectedSourceId(initialId);
         await loadBrowseData(initialId, '', 'all', '');
+        const statuses = await Promise.all(
+          srcList.map((src) => api.getScanStatus(src.id).catch(() => null)),
+        );
+        if (!mountedRef.current) return;
+        const nextStates: Record<string, ScanState> = {};
+        for (const st of statuses) {
+          if (st) {
+            nextStates[st.source_id] = st;
+          }
+        }
+        if (Object.keys(nextStates).length > 0) {
+          setScanStates((prev) => ({ ...prev, ...nextStates }));
+        }
+        for (const st of statuses) {
+          if (st?.running) {
+            startPolling(st.source_id);
+          }
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载存储源失败');
     } finally {
       setLoading(false);
     }
-  }, [loadBrowseData]);
+  }, [loadBrowseData, startPolling]);
 
   useEffect(() => {
     void loadInitial();
   }, [loadInitial]);
-
-  function stopPolling(sourceId: string) {
-    const timer = pollTimersRef.current[sourceId];
-    if (timer !== undefined) {
-      window.clearInterval(timer);
-      delete pollTimersRef.current[sourceId];
-    }
-  }
-
-  function startPolling(sourceId: string) {
-    stopPolling(sourceId);
-    const poll = async () => {
-      try {
-        const st = await api.getScanStatus(sourceId);
-        setScanStates((prev) => ({ ...prev, [sourceId]: st }));
-        if (!st.running) {
-          stopPolling(sourceId);
-          const srcRes = await api.listSources();
-          setSources(srcRes.sources ?? []);
-          const cur = browseStateRef.current;
-          if (sourceId === cur.selectedSourceId) {
-            await loadBrowseData(
-              sourceId,
-              cur.currentPrefix,
-              cur.fileStatusFilter,
-              cur.fileSearch,
-            );
-          }
-        }
-      } catch (err) {
-        stopPolling(sourceId);
-        setError(err instanceof Error ? err.message : '查询扫描状态失败');
-      }
-    };
-
-    pollTimersRef.current[sourceId] = window.setInterval(() => {
-      void poll();
-    }, 450);
-  }
 
   async function handleStartScan(sourceId: string) {
     setError(null);

@@ -205,6 +205,9 @@ func (s *Service) ServeMediaPlaylist(w http.ResponseWriter, r *http.Request, les
 	}
 
 	effectiveSession := resolveEffectiveSessionID(r, sessionID)
+	if effectiveSession == "" {
+		effectiveSession = id.New()
+	}
 	qs := propagateHLSQuery(r, effectiveSession)
 	durations := buildSegmentDurations(rec.DurationMs)
 

@@ -2,7 +2,7 @@
 FROM node:22-alpine AS web-builder
 WORKDIR /src/web
 
-RUN corepack enable
+RUN npm install -g pnpm@12.21.0
 
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
@@ -40,7 +40,6 @@ ENV COURSEFIN_PORT=8096 \
 EXPOSE 8096
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-	CMD curl -fsS http://127.0.0.1:8096/System/Ping || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["sh", "-c", "curl -fsS http://127.0.0.1:${COURSEFIN_PORT:-8096}/System/Ping || exit 1"]
 
 ENTRYPOINT ["/usr/local/bin/coursefin"]

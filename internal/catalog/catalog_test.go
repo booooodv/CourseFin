@@ -557,4 +557,27 @@ func TestProgressAutoCompleteAt90PercentAndNextUp(t *testing.T) {
 	if detail.PlayedPercentage != 50.0 {
 		t.Fatalf("PlayedPercentage = %v, want 50.0", detail.PlayedPercentage)
 	}
+
+	// Repeated heartbeats in the final 10% (92%, 95%, 99%) must NOT inflate play_count.
+	for _, pct := range []int64{92, 95, 99} {
+		pRepeat, err := svc.ReportProgress(ctx, l1.ID, (totalTicks*pct)/100)
+		if err != nil {
+			t.Fatalf("ReportProgress %d%%: %v", pct, err)
+		}
+		if !pRepeat.Played || pRepeat.PositionTicks != 0 || pRepeat.PlayCount != 1 {
+			t.Fatalf("at %d%%: expected Played=true PositionTicks=0 PlayCount=1, got %+v", pct, pRepeat)
+		}
+	}
+
+	// Genuine replay: seek back >0 then complete again increments play_count once to 2.
+	if _, err := svc.ReportProgress(ctx, l1.ID, totalTicks/4); err != nil {
+		t.Fatalf("ReportProgress replay 25%%: %v", err)
+	}
+	pReplayDone, err := svc.ReportProgress(ctx, l1.ID, (totalTicks*95)/100)
+	if err != nil {
+		t.Fatalf("ReportProgress replay 95%%: %v", err)
+	}
+	if pReplayDone.PlayCount != 2 {
+		t.Fatalf("expected PlayCount=2 after genuine replay, got %+v", pReplayDone)
+	}
 }

@@ -132,6 +132,8 @@ function SortableLessonRow({
     try {
       await onRename(lesson, trimmed);
       setEditing(false);
+    } catch {
+      // error is surfaced via parent handleRenameLesson
     } finally {
       setSaving(false);
     }
@@ -351,6 +353,8 @@ function SortableChapterCard({
     try {
       await onRenameChapter(chapter, trimmed);
       setEditing(false);
+    } catch {
+      // error is surfaced via parent handleRenameChapter
     } finally {
       setSaving(false);
     }
@@ -728,18 +732,24 @@ export default function CourseEditorPage() {
   }
 
   async function handleRenameChapter(chapter: ChapterDetail, nextTitle: string) {
-    const updated = await api.updateChapter(chapter.id, nextTitle, chapter.overview);
-    setCourse((prev) =>
-      prev
-        ? {
-            ...prev,
-            chapters: (prev.chapters ?? []).map((ch) =>
-              ch.id === chapter.id ? { ...ch, title: updated.title } : ch,
-            ),
-          }
-        : prev,
-    );
-    showNotice('章节标题已更新');
+    setError(null);
+    try {
+      const updated = await api.updateChapter(chapter.id, nextTitle, chapter.overview);
+      setCourse((prev) =>
+        prev
+          ? {
+              ...prev,
+              chapters: (prev.chapters ?? []).map((ch) =>
+                ch.id === chapter.id ? { ...ch, title: updated.title } : ch,
+              ),
+            }
+          : prev,
+      );
+      showNotice('章节标题已更新');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '重命名章节失败');
+      throw err;
+    }
   }
 
   async function handleDeleteChapter(chapterId: string) {
@@ -830,21 +840,27 @@ export default function CourseEditorPage() {
   }
 
   async function handleRenameLesson(lesson: LessonDetail, nextTitle: string) {
-    const updated = await api.updateLesson(lesson.id, nextTitle, lesson.overview, lesson.chapter_id);
-    setCourse((prev) =>
-      prev
-        ? {
-            ...prev,
-            chapters: (prev.chapters ?? []).map((ch) => ({
-              ...ch,
-              lessons: (ch.lessons ?? []).map((l) =>
-                l.id === lesson.id ? { ...l, title: updated.title } : l,
-              ),
-            })),
-          }
-        : prev,
-    );
-    showNotice('课时标题已更新');
+    setError(null);
+    try {
+      const updated = await api.updateLesson(lesson.id, nextTitle, lesson.overview, lesson.chapter_id);
+      setCourse((prev) =>
+        prev
+          ? {
+              ...prev,
+              chapters: (prev.chapters ?? []).map((ch) => ({
+                ...ch,
+                lessons: (ch.lessons ?? []).map((l) =>
+                  l.id === lesson.id ? { ...l, title: updated.title } : l,
+                ),
+              })),
+            }
+          : prev,
+      );
+      showNotice('课时标题已更新');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '重命名课时失败');
+      throw err;
+    }
   }
 
   async function handleDeleteLesson(lessonId: string) {

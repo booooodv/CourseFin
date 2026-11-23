@@ -148,6 +148,75 @@ describe('HomePage', () => {
           ],
         });
       }
+      if (url.endsWith('/api/v1/courses')) {
+        return jsonResponse({
+          courses: [
+            {
+              id: 'course-go',
+              library_id: 'lib-dev',
+              title: 'Go 语言进阶实战',
+              sort_title: 'Go 语言进阶实战',
+              overview: '深入 Go 并发模型与工程实践',
+              instructor: '张老师',
+              cover_path: 'go.jpg',
+              backdrop_path: '',
+              tags: ['Go', '后端'],
+              chapter_count: 3,
+              lesson_count: 10,
+              played_count: 4,
+              unplayed_item_count: 6,
+              played_percentage: 40,
+              played: false,
+              total_duration_ms: 3600000,
+              first_lesson_id: 'lesson-1',
+              created_at: '2026-11-20T00:00:00Z',
+              updated_at: '2026-11-20T00:00:00Z',
+            },
+            {
+              id: 'course-react',
+              library_id: 'lib-dev',
+              title: 'React 19 架构精讲',
+              sort_title: 'React 19 架构精讲',
+              overview: '现代前端状态与渲染优化',
+              instructor: '李老师',
+              cover_path: '',
+              backdrop_path: '',
+              tags: ['React', '前端'],
+              chapter_count: 2,
+              lesson_count: 8,
+              played_count: 0,
+              unplayed_item_count: 8,
+              played_percentage: 0,
+              played: false,
+              total_duration_ms: 2400000,
+              first_lesson_id: 'lesson-2',
+              created_at: '2026-11-21T00:00:00Z',
+              updated_at: '2026-11-21T00:00:00Z',
+            },
+            {
+              id: 'course-figma',
+              library_id: 'lib-design',
+              title: 'Figma 设计系统全解',
+              sort_title: 'Figma 设计系统全解',
+              overview: '从零构建企业级设计规范',
+              instructor: '王老师',
+              cover_path: '',
+              backdrop_path: '',
+              tags: ['UI设计'],
+              chapter_count: 4,
+              lesson_count: 12,
+              played_count: 12,
+              unplayed_item_count: 0,
+              played_percentage: 100,
+              played: true,
+              total_duration_ms: 4800000,
+              first_lesson_id: 'lesson-3',
+              created_at: '2026-11-22T00:00:00Z',
+              updated_at: '2026-11-22T00:00:00Z',
+            },
+          ],
+        });
+      }
       if (url.endsWith('/api/v1/libraries')) {
         return jsonResponse({
           libraries: [
@@ -244,6 +313,9 @@ describe('HomePage', () => {
         if (url.endsWith('/api/v1/home')) {
           return jsonResponse({ resume: [], next_up: [], libraries: [], courses: [] });
         }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses: [] });
+        }
         if (url.endsWith('/api/v1/libraries')) {
           return jsonResponse({ libraries: [] });
         }
@@ -270,6 +342,9 @@ describe('HomePage', () => {
       const url = typeof input === 'string' ? input : input.toString();
       if (url.endsWith('/api/v1/home')) {
         return jsonResponse({ resume: [], next_up: [], libraries: [], courses: [] });
+      }
+      if (url.endsWith('/api/v1/courses')) {
+        return jsonResponse({ courses: [] });
       }
       if (url.endsWith('/api/v1/libraries') && (!init?.method || init.method === 'GET')) {
         return jsonResponse({ libraries: [] });
@@ -315,6 +390,123 @@ describe('HomePage', () => {
     await user.click(screen.getByRole('button', { name: '确认创建' }));
 
     expect(await screen.findByRole('button', { name: /系统架构/ })).toBeInTheDocument();
+  });
+
+  it('loads all >20 courses from /api/v1/courses and uses lesson id for Continue Watching thumbnail when course has no cover', async () => {
+    const fullCourses = Array.from({ length: 24 }, (_, idx) => ({
+      id: `course-${idx + 1}`,
+      library_id: 'lib-1',
+      title: `系统课程 ${idx + 1}`,
+      sort_title: `系统课程 ${idx + 1}`,
+      overview: '',
+      instructor: '讲师',
+      cover_path: '',
+      backdrop_path: '',
+      tags: [],
+      chapter_count: 1,
+      lesson_count: 1,
+      played_count: 0,
+      unplayed_item_count: 1,
+      played_percentage: 0,
+      played: false,
+      total_duration_ms: 600000,
+      first_lesson_id: '',
+      created_at: '2026-11-23T00:00:00Z',
+      updated_at: '2026-11-23T00:00:00Z',
+    }));
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({
+            resume: [
+              {
+                id: 'lesson-resume-99',
+                course_id: 'course-24',
+                chapter_id: 'chap-24',
+                media_file_id: 'mf-24',
+                title: '第 24 课：高并发收官',
+                overview: '',
+                sort_order: 1,
+                cover_path: '',
+                duration_ms: 600000,
+                container: 'mp4',
+                video_codec: 'h264',
+                audio_codec: 'aac',
+                width: 1920,
+                height: 1080,
+                bitrate: 2000000,
+                thumbnail_path: 'mf-24.jpg',
+                media_status: 'active',
+                position_ticks: 150000 * 10000,
+                played: false,
+                play_count: 0,
+                created_at: '2026-11-23T00:00:00Z',
+                updated_at: '2026-11-23T12:00:00Z',
+                course_title: '系统课程 24',
+                course_cover_path: '',
+                library_id: 'lib-1',
+                chapter_title: '正片',
+                chapter_sort_order: 1,
+              },
+            ],
+            next_up: [],
+            libraries: [
+              {
+                id: 'lib-1',
+                name: '默认库',
+                cover_path: '',
+                sort_order: 1,
+                course_count: 24,
+                created_at: '2026-11-23T00:00:00Z',
+                updated_at: '2026-11-23T00:00:00Z',
+              },
+            ],
+            courses: fullCourses.slice(0, 20),
+          });
+        }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses: fullCourses });
+        }
+        if (url.endsWith('/api/v1/libraries')) {
+          return jsonResponse({
+            libraries: [
+              {
+                id: 'lib-1',
+                name: '默认库',
+                cover_path: '',
+                sort_order: 1,
+                course_count: 24,
+                created_at: '2026-11-23T00:00:00Z',
+                updated_at: '2026-11-23T00:00:00Z',
+              },
+            ],
+          });
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({ tags: [] });
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole('button', { name: '全部 (24)' })).toBeInTheDocument();
+    expect(screen.getAllByText('系统课程 24').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByRole('link', { name: '系统课程 21' })).toBeInTheDocument();
+
+    const posterImg = screen.getByRole('img', { name: '系统课程 24' });
+    expect(posterImg).toHaveAttribute(
+      'src',
+      '/Items/lesson-resume-99/Images/Primary?tag=2026-11-23T12%3A00%3A00Z&maxWidth=480',
+    );
   });
 });
 

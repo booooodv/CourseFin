@@ -771,6 +771,31 @@ func TestCourseCoverUploadAndLessonFramePick(t *testing.T) {
 		t.Fatalf("expected .png cover_path, got %q", updated.CoverPath)
 	}
 
+	// 3. Reject disguised non-image file even with .png extension
+	var badBody bytes.Buffer
+	badMW := multipart.NewWriter(&badBody)
+	badFW, err := badMW.CreateFormFile("file", "evil.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile bad: %v", err)
+	}
+	_, _ = badFW.Write([]byte("<html><script>alert(1)</script></html>"))
+	_ = badMW.Close()
+
+	badReq, err := http.NewRequest(http.MethodPost, env.server.URL+"/api/v1/courses/"+course.ID+"/cover", &badBody)
+	if err != nil {
+		t.Fatalf("NewRequest bad: %v", err)
+	}
+	badReq.Header.Set("Content-Type", badMW.FormDataContentType())
+	badReq.Header.Set("Authorization", "Bearer "+token)
+	badResp, err := http.DefaultClient.Do(badReq)
+	if err != nil {
+		t.Fatalf("upload bad cover: %v", err)
+	}
+	defer badResp.Body.Close()
+	if badResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for disguised non-image cover, got %d", badResp.StatusCode)
+	}
+
 	// Ensure id package is used cleanly if needed
 	_ = id.New()
 }

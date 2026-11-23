@@ -88,13 +88,19 @@ func (s *Service) Close() error {
 
 // CanRemuxVideoCodec reports whether the video bitstream can be stream-copied
 // into HLS without CPU video re-encoding for modern web/Jellyfin players.
-func (s *Service) CanRemuxVideoCodec(codec string) bool {
+func CanRemuxVideoCodec(codec string) bool {
 	switch strings.ToLower(strings.TrimSpace(codec)) {
 	case "h264", "avc", "avc1", "hevc", "h265", "av1", "vp9":
 		return true
 	default:
 		return false
 	}
+}
+
+// CanRemuxVideoCodec reports whether the video bitstream can be stream-copied
+// into HLS without CPU video re-encoding for modern web/Jellyfin players.
+func (s *Service) CanRemuxVideoCodec(codec string) bool {
+	return CanRemuxVideoCodec(codec)
 }
 
 // NeedsAudioTranscode reports whether the audio codec must be transcoded to AAC

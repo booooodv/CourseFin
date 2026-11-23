@@ -510,6 +510,59 @@ describe('CourseEditorPage', () => {
       expect(appendedBody).toEqual({ media_file_ids: ['mf-new-1'] });
     });
   });
+
+  it('surfaces inline chapter and lesson rename errors without unhandled rejections', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+
+      if (url.endsWith('/api/v1/courses/course-1') && method === 'GET') {
+        return jsonResponse(structuredClone(sampleCourse));
+      }
+      if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+        return jsonResponse({ libraries: sampleLibraries });
+      }
+      if (url.endsWith('/api/v1/chapters/chap-1') && method === 'PUT') {
+        return jsonResponse({ error: '章节重命名失败：标题重复' }, 400);
+      }
+      if (url.endsWith('/api/v1/lessons/lesson-1') && method === 'PUT') {
+        return jsonResponse({ error: '课时重命名失败：服务器错误' }, 500);
+      }
+      return jsonResponse({ error: 'not found' }, 404);
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    render(
+      <MemoryRouter initialEntries={['/courses/course-1/edit']}>
+        <Routes>
+          <Route path="/courses/:courseId/edit" element={<CourseEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByLabelText(/课程标题/);
+    const user = userEvent.setup();
+
+    // Fail chapter rename
+    await user.click(screen.getByRole('button', { name: /重命名章节 01_basics/ }));
+    const chapInput = screen.getByLabelText(/编辑章节标题 01_basics/);
+    await user.clear(chapInput);
+    await user.type(chapInput, '新章节名称');
+    await user.click(within(chapInput.parentElement!).getByRole('button', { name: '保存' }));
+
+    expect(await screen.findByText('章节重命名失败：标题重复')).toBeInTheDocument();
+    expect(screen.getByLabelText(/编辑章节标题 01_basics/)).toBeInTheDocument();
+
+    // Fail lesson rename
+    await user.click(screen.getByRole('button', { name: /重命名课时 01_intro\.mp4/ }));
+    const lessonInput = screen.getByLabelText(/编辑课时标题 01_intro\.mp4/);
+    await user.clear(lessonInput);
+    await user.type(lessonInput, '新课时名称');
+    await user.click(within(lessonInput.parentElement!).getByRole('button', { name: '保存' }));
+
+    expect(await screen.findByText('课时重命名失败：服务器错误')).toBeInTheDocument();
+    expect(screen.getByLabelText(/编辑课时标题 01_intro\.mp4/)).toBeInTheDocument();
+  });
 });
 
 describe('StoragePage & SettingsPage', () => {
@@ -536,6 +589,7 @@ describe('StoragePage & SettingsPage', () => {
         updated_at: '2026-11-20T00:00:00Z',
       },
     ];
+    let scanTriggered = false;
     let statusCalls = 0;
 
     const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -587,9 +641,13 @@ describe('StoragePage & SettingsPage', () => {
         });
       }
       if (url.includes('/api/v1/sources/src-1/scan?async=true') && method === 'POST') {
+        scanTriggered = true;
         return jsonResponse({ source_id: 'src-1', running: true }, 202);
       }
       if (url.endsWith('/api/v1/sources/src-1/scan/status') && method === 'GET') {
+        if (!scanTriggered) {
+          return jsonResponse({ source_id: 'src-1', running: false });
+        }
         statusCalls++;
         if (statusCalls === 1) {
           return jsonResponse({ source_id: 'src-1', running: true });
@@ -663,6 +721,82 @@ describe('StoragePage & SettingsPage', () => {
     // Launch ImportCourseModal from directory row
     await user.click(screen.getByRole('button', { name: /一键导入为课程/ }));
     expect(await screen.findByLabelText(/课程标题/)).toHaveValue('rust-course');
+  });
+
+  it('StoragePage automatically resumes polling on load when a scan is already running', async () => {
+    const sources = [
+      {
+        id: 'src-1',
+        name: '后台扫描盘',
+        driver: 'local',
+        root_path: '/data/active',
+        config_json: '{}',
+        enabled: true,
+        media_count: 5,
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+      },
+    ];
+    let statusCalls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/v1/sources') && method === 'GET') {
+          return jsonResponse({ sources });
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries: sampleLibraries });
+        }
+        if (url.includes('/api/v1/sources/src-1/dirs') && method === 'GET') {
+          return jsonResponse({ dirs: [] });
+        }
+        if (url.includes('/api/v1/sources/src-1/files') && method === 'GET') {
+          return jsonResponse({ files: [] });
+        }
+        if (url.endsWith('/api/v1/sources/src-1/scan/status') && method === 'GET') {
+          statusCalls++;
+          if (statusCalls <= 2) {
+            return jsonResponse({ source_id: 'src-1', running: true });
+          }
+          return jsonResponse({
+            source_id: 'src-1',
+            running: false,
+            last_report: {
+              source_id: 'src-1',
+              started_at: '2026-11-23T00:00:00Z',
+              finished_at: '2026-11-23T00:00:01Z',
+              total_videos: 10,
+              added_videos: 5,
+              updated_videos: 0,
+              skipped_videos: 5,
+              missing_videos: 0,
+              restored_videos: 0,
+              probed_videos: 5,
+              total_subtitles: 2,
+            },
+          });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <StoragePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('扫描中...')).toBeInTheDocument();
+    await waitFor(
+      () => {
+        expect(screen.getByText('总视频：10')).toBeInTheDocument();
+      },
+      { timeout: 4000 },
+    );
+    expect(statusCalls).toBeGreaterThanOrEqual(3);
   });
 
   it('SettingsPage shows Jellyfin info, saves settings without overwriting masked key, tests AI, and revokes sessions', async () => {

@@ -1154,3 +1154,122 @@ func TestSortOrderDescendingStrictWeakOrderingAndStability(t *testing.T) {
 		}
 	}
 }
+
+func TestJellyfinGenreIDsTagIDsAndLatestIsPlayedFilter(t *testing.T) {
+	env := setupTestEnv(t)
+	token, userID, _ := env.authenticate(t)
+	ctx := context.Background()
+	headers := map[string]string{"X-Emby-Token": token}
+
+	srcID := env.seedSource(t)
+	mf1 := env.seedMediaFile(t, srcID, "tags/01.mp4", "mp4", "h264", "aac", 60000, "", "")
+	mf2 := env.seedMediaFile(t, srcID, "tags/02.mp4", "mp4", "h264", "aac", 60000, "", "")
+
+	// Older unplayed course with tag "Go"
+	cOld, err := env.catSvc.CreateCourse(ctx, catalog.CreateCourseInput{
+		LibraryID: env.libID,
+		Title:     "Older Unplayed Go",
+		Tags:      []string{"Go", "Backend"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCourse cOld: %v", err)
+	}
+	if _, err := env.catSvc.AddLesson(ctx, cOld.Chapters[0].ID, mf1, "L1"); err != nil {
+		t.Fatalf("AddLesson cOld: %v", err)
+	}
+
+	// Newer played course with tag "Rust"
+	cNew, err := env.catSvc.CreateCourse(ctx, catalog.CreateCourseInput{
+		LibraryID: env.libID,
+		Title:     "Newer Played Rust",
+		Tags:      []string{"Rust"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCourse cNew: %v", err)
+	}
+	lNew, err := env.catSvc.AddLesson(ctx, cNew.Chapters[0].ID, mf2, "L2")
+	if err != nil {
+		t.Fatalf("AddLesson cNew: %v", err)
+	}
+	if _, err := env.catSvc.SetPlayed(ctx, lNew.ID, true); err != nil {
+		t.Fatalf("SetPlayed cNew: %v", err)
+	}
+
+	// Ensure deterministic created_at ordering (cNew strictly newer than cOld)
+	if _, err := env.db.Exec(`UPDATE courses SET created_at = '2026-11-20T00:00:00Z' WHERE id = ?`, cOld.ID); err != nil {
+		t.Fatalf("update cOld created_at: %v", err)
+	}
+	if _, err := env.db.Exec(`UPDATE courses SET created_at = '2026-11-22T00:00:00Z' WHERE id = ?`, cNew.ID); err != nil {
+		t.Fatalf("update cNew created_at: %v", err)
+	}
+
+	tags, err := env.catSvc.ListTags(ctx)
+	if err != nil {
+		t.Fatalf("ListTags: %v", err)
+	}
+	tagIDByName := make(map[string]string, len(tags))
+	for _, tg := range tags {
+		tagIDByName[tg.Name] = tg.ID
+	}
+	goTagID := tagIDByName["Go"]
+	rustTagID := tagIDByName["Rust"]
+	if goTagID == "" || rustTagID == "" {
+		t.Fatalf("missing expected tag IDs: %+v", tagIDByName)
+	}
+
+	// 1. ?GenreIds= (with dashed uppercase UUID) returns only cOld
+	resp, body := env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items?ParentId="+env.libID+"&IncludeItemTypes=Series&GenreIds="+formatDashedUpperUUID(goTagID), nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET Items?GenreIds status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	var itemsOut struct {
+		Items []struct {
+			Id   string `json:"Id"`
+			Name string `json:"Name"`
+		} `json:"Items"`
+		TotalRecordCount int `json:"TotalRecordCount"`
+	}
+	if err := json.Unmarshal(body, &itemsOut); err != nil {
+		t.Fatalf("decode GenreIds response: %v", err)
+	}
+	if itemsOut.TotalRecordCount != 1 || len(itemsOut.Items) != 1 || itemsOut.Items[0].Id != cOld.ID {
+		t.Fatalf("expected only cOld for GenreIds=Go, got %s", string(body))
+	}
+
+	// 2. ?TagIds= (with pipe-separated IDs) returns matching course
+	resp, body = env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items?IncludeItemTypes=Series&Recursive=true&TagIds="+rustTagID+"|00000000000000000000000000000000", nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET Items?TagIds status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	if err := json.Unmarshal(body, &itemsOut); err != nil {
+		t.Fatalf("decode TagIds response: %v", err)
+	}
+	if itemsOut.TotalRecordCount != 1 || len(itemsOut.Items) != 1 || itemsOut.Items[0].Id != cNew.ID {
+		t.Fatalf("expected only cNew for TagIds=Rust, got %s", string(body))
+	}
+
+	// 3. Unknown TagIds returns 0 items
+	resp, body = env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items?IncludeItemTypes=Series&Recursive=true&TagIds=nonexistenttagid", nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET Items?TagIds=unknown status = %d", resp.StatusCode)
+	}
+	if err := json.Unmarshal(body, &itemsOut); err != nil || itemsOut.TotalRecordCount != 0 {
+		t.Fatalf("expected 0 items for unknown TagIds, got %s", string(body))
+	}
+
+	// 4. /Users/{uid}/Items/Latest?IsPlayed=false&Limit=1 skips newer played course and returns cOld
+	resp, body = env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items/Latest?IsPlayed=false&Limit=1", nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET Latest?IsPlayed=false&Limit=1 status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	var latestOut []struct {
+		Id   string `json:"Id"`
+		Name string `json:"Name"`
+	}
+	if err := json.Unmarshal(body, &latestOut); err != nil {
+		t.Fatalf("decode Latest response: %v", err)
+	}
+	if len(latestOut) != 1 || latestOut[0].Id != cOld.ID {
+		t.Fatalf("expected Latest?IsPlayed=false&Limit=1 to return cOld (%s), got %s", cOld.ID, string(body))
+	}
+}

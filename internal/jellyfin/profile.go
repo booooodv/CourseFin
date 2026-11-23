@@ -172,7 +172,7 @@ func canTranscodeHLS(req PlaybackInfoRequest, videoCodec string) bool {
 	if req.EnableTranscoding != nil && !*req.EnableTranscoding {
 		return false
 	}
-	if videoCodec != "" && !(*media.Service)(nil).CanRemuxVideoCodec(videoCodec) {
+	if videoCodec != "" && !media.CanRemuxVideoCodec(videoCodec) {
 		return false
 	}
 	if req.DeviceProfile == nil || len(req.DeviceProfile.TranscodingProfiles) == 0 {

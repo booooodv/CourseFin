@@ -120,6 +120,9 @@ func ValidateProposal(input CourseOrganizeInput, prop *CourseOrganizeProposal) e
 		if strings.TrimSpace(ch.Title) == "" {
 			return fmt.Errorf("ai: proposal chapter %d title must not be empty", ci+1)
 		}
+		if len(ch.Lessons) == 0 {
+			return fmt.Errorf("ai: proposal chapter %d must contain at least one lesson", ci+1)
+		}
 		for li, l := range ch.Lessons {
 			if l.LessonID == "" {
 				return fmt.Errorf("ai: proposal chapter %d lesson %d has empty lesson_id", ci+1, li+1)
