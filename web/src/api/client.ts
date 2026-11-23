@@ -366,6 +366,13 @@ export const api = {
       body: JSON.stringify({ played }),
     });
   },
+  stopActiveEncoding(playSessionId: string): Promise<void> {
+    if (!playSessionId) return Promise.resolve();
+    return request<void>(
+      `/Videos/ActiveEncodings?PlaySessionId=${encodeURIComponent(playSessionId)}`,
+      { method: 'DELETE' },
+    );
+  },
 
   // Storage & Import
   listSources(): Promise<{ sources: StorageSource[] }> {

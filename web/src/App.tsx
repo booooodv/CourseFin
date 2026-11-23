@@ -2,11 +2,11 @@ import type { ReactNode } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { getToken } from './api/client';
 import Layout from './components/Layout';
+import CourseDetailPage from './pages/CourseDetailPage';
 import HomePage from './pages/HomePage';
 import SetupLoginPage from './pages/SetupLoginPage';
 import {
   CourseEditPlaceholder,
-  CoursePlayerPlaceholder,
   SettingsPlaceholder,
   StoragePlaceholder,
 } from './pages/Placeholders';
@@ -38,7 +38,7 @@ export function AppRoutes() {
         element={
           <RequireAuth>
             <Layout>
-              <CoursePlayerPlaceholder />
+              <CourseDetailPage />
             </Layout>
           </RequireAuth>
         }
