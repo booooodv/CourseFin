@@ -303,7 +303,7 @@ describe('VideoPlayer', () => {
     expect(progressCalls[1].body.position_ticks).toBe(1_200_000_000);
   });
 
-  it('initializes hls.js for hls playback mode and cleans up ActiveEncodings on unmount', async () => {
+  it('initializes hls.js for hls playback mode and cleans up ActiveEncodings with api_key without clearing token on 401', async () => {
     const deleteCalls: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -311,7 +311,7 @@ describe('VideoPlayer', () => {
         const url = typeof input === 'string' ? input : input.toString();
         if (init?.method === 'DELETE' && url.includes('/Videos/ActiveEncodings')) {
           deleteCalls.push(url);
-          return new Response(null, { status: 204 });
+          return jsonResponse({ error: 'unauthorized' }, 401);
         }
         return jsonResponse({}, 404);
       }),
@@ -337,6 +337,8 @@ describe('VideoPlayer', () => {
       expect(deleteCalls).toHaveLength(1);
     });
     expect(deleteCalls[0]).toContain('PlaySessionId=hls-sess-99');
+    expect(deleteCalls[0]).toContain('api_key=test-token-123');
+    expect(localStorage.getItem('coursefin_token')).toBe('test-token-123');
   });
 
   it('handles Space, ArrowLeft, and ArrowRight keyboard shortcuts', () => {
@@ -455,6 +457,47 @@ describe('CourseDetailPage', () => {
       expect(
         mockFetch.mock.calls.some(([u]) => String(u).endsWith('/api/v1/lessons/l2/playback')),
       ).toBe(true);
+    });
+  });
+
+  it('retries loading playback info when clicking 重新获取 after failure', async () => {
+    const course = makeCourse();
+    const playbackL1 = makePlayback({ lesson_id: 'l1' });
+    let playbackAttempts = 0;
+
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/api/v1/courses/c1')) {
+        return jsonResponse(course);
+      }
+      if (url.endsWith('/api/v1/lessons/l1/playback')) {
+        playbackAttempts += 1;
+        if (playbackAttempts === 1) {
+          return jsonResponse({ error: 'playback unavailable' }, 500);
+        }
+        return jsonResponse(playbackL1);
+      }
+      return jsonResponse({}, 404);
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/courses/c1']}>
+        <Routes>
+          <Route path="/courses/:courseId" element={<CourseDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('playback unavailable')).toBeInTheDocument();
+    const retryBtn = screen.getByRole('button', { name: '重新获取' });
+
+    const user = userEvent.setup();
+    await user.click(retryBtn);
+
+    await waitFor(() => {
+      expect(playbackAttempts).toBe(2);
+      expect(container.querySelector('video')).toBeTruthy();
     });
   });
 });

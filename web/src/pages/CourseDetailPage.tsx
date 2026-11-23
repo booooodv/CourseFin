@@ -131,6 +131,7 @@ export default function CourseDetailPage() {
   const [playback, setPlayback] = useState<LessonPlaybackInfo | null>(null);
   const [loadingPlayback, setLoadingPlayback] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [playbackRetryNonce, setPlaybackRetryNonce] = useState(0);
   const [togglingPlayed, setTogglingPlayed] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -166,10 +167,10 @@ export default function CourseDetailPage() {
     const exists = (course.chapters ?? []).some((ch) =>
       (ch.lessons ?? []).some((l) => l.id === requestedLessonId),
     );
-    if (exists && requestedLessonId !== activeLessonId) {
-      setActiveLessonId(requestedLessonId);
+    if (exists) {
+      setActiveLessonId((prev) => (prev === requestedLessonId ? prev : requestedLessonId));
     }
-  }, [course, requestedLessonId, activeLessonId]);
+  }, [course, requestedLessonId]);
 
   const flatLessons = useMemo(() => {
     if (!course) return [];
@@ -228,7 +229,7 @@ export default function CourseDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeLessonId]);
+  }, [activeLessonId, playbackRetryNonce]);
 
   const selectLesson = useCallback(
     (lessonId: string) => {
@@ -483,7 +484,7 @@ export default function CourseDetailPage() {
               {activeLessonId && (
                 <button
                   type="button"
-                  onClick={() => selectLesson(activeLessonId)}
+                  onClick={() => setPlaybackRetryNonce((n) => n + 1)}
                   className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-500 transition-colors"
                 >
                   重新获取

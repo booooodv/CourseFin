@@ -366,12 +366,16 @@ export const api = {
       body: JSON.stringify({ played }),
     });
   },
-  stopActiveEncoding(playSessionId: string): Promise<void> {
-    if (!playSessionId) return Promise.resolve();
-    return request<void>(
+  async stopActiveEncoding(playSessionId: string): Promise<void> {
+    if (!playSessionId) return;
+    const url = withApiKey(
       `/Videos/ActiveEncodings?PlaySessionId=${encodeURIComponent(playSessionId)}`,
-      { method: 'DELETE' },
     );
+    try {
+      await fetch(url, { method: 'DELETE', keepalive: true });
+    } catch {
+      // Best-effort cleanup; never trigger 401 redirect on unmount/unload
+    }
   },
 
   // Storage & Import
