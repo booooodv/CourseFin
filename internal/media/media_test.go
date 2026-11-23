@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -744,5 +745,217 @@ func TestDirectPlayAndSubtitleAndImageEdgeCases(t *testing.T) {
 		if imRec.Code != tc.wantCode {
 			t.Errorf("%s status = %d, want %d (body: %s)", tc.name, imRec.Code, tc.wantCode, imRec.Body.String())
 		}
+	}
+}
+
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for file %s", path)
+}
+
+func TestVODHLSForwardBackwardForwardSeek(t *testing.T) {
+	ffmpegBin := resolveTestFFmpeg(t)
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+	ctrlDir := t.TempDir()
+
+	mkvPath := filepath.Join(mediaRoot, "long.mkv")
+	genCmd := exec.Command(
+		ffmpegBin,
+		"-y",
+		"-f", "lavfi", "-i", "color=c=blue:size=160x120:rate=15:duration=60",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=60",
+		"-c:v", "libx264", "-preset", "ultrafast", "-g", "15",
+		"-c:a", "aac",
+		mkvPath,
+	)
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate 60s mkv failed: %v\n%s", err, string(out))
+	}
+
+	prober := scanner.NewFFmpegProber("", ffmpegBin)
+	probeRes, err := prober.Probe(context.Background(), mkvPath)
+	if err != nil {
+		t.Fatalf("probe 60s mkv failed: %v", err)
+	}
+
+	_, mediaID := seedSourceAndMedia(t, conn, "local", mediaRoot, "long.mkv", "mkv", probeRes.VideoCodec, probeRes.AudioCodec, probeRes.DurationMs, probeRes.StreamsJSON, "")
+	_, _, _, lessonID := seedCourseHierarchy(t, conn, mediaID, "", "")
+
+	logFile := filepath.Join(ctrlDir, "invocations.log")
+	holdSeg0 := filepath.Join(ctrlDir, "hold_seg0")
+	if err := os.WriteFile(holdSeg0, []byte("1"), 0o644); err != nil {
+		t.Fatalf("write hold_seg0: %v", err)
+	}
+
+	// Wrapper runs real ffmpeg for segment 9 and segment 5, while holding segment 0's process
+	// open after generating only 0.ts..1.ts so stale 9.ts remains on disk during the backward run.
+	wrapScript := fmt.Sprintf(`#!/bin/sh
+START_NUM=""
+PREV=""
+for arg in "$@"; do
+  if [ "$PREV" = "-start_number" ]; then
+    START_NUM="$arg"
+  fi
+  PREV="$arg"
+done
+echo "start_number=$START_NUM" >> %q
+if [ "$START_NUM" = "0" ] && [ -f %q ]; then
+  rm -f %q
+  ARGS=""
+  OUT=""
+  for arg in "$@"; do
+    OUT="$arg"
+  done
+  # Run real ffmpeg capped at 7s to emit 0.ts + 1.ts + live.m3u8, then keep process alive.
+  set -- "$@"
+  %q -hide_banner -loglevel error -ss 0 -i %q -t 7 -map 0:v:0 -map '0:a:0?' -c:v copy -c:a copy -f hls -hls_time 6 -start_number 0 -hls_segment_filename "$(dirname "$OUT")/%%d.ts" -hls_playlist_type event -hls_flags temp_file -output_ts_offset 0 -hls_segment_options mpegts_copyts=1 -y "$OUT"
+  exec sleep 10
+fi
+exec %q "$@"
+`, logFile, holdSeg0, holdSeg0, ffmpegBin, mkvPath, ffmpegBin)
+
+	wrapBin := filepath.Join(ctrlDir, "ffmpeg_wrap.sh")
+	if err := os.WriteFile(wrapBin, []byte(wrapScript), 0o755); err != nil {
+		t.Fatalf("write wrap script: %v", err)
+	}
+
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), wrapBin)
+	defer svc.Close()
+
+	sessionID := "seekseq"
+	sessDir := filepath.Join(dataDir, "cache", "remux", lessonID+"_"+sessionID)
+
+	// 1. Seek forward to segment 9 -> produces 9.ts on disk.
+	rec9 := httptest.NewRecorder()
+	svc.ServeHLSSegment(rec9, httptest.NewRequest(http.MethodGet, "/9.ts", nil), lessonID, sessionID, 9)
+	if rec9.Code != http.StatusOK || rec9.Body.Len() < 188 || rec9.Body.Bytes()[0] != 0x47 {
+		t.Fatalf("segment 9 failed: status=%d len=%d body=%s", rec9.Code, rec9.Body.Len(), rec9.Body.String())
+	}
+
+	// 2. Seek backward to segment 0 -> active run writes 0.ts, 1.ts, live.m3u8, while stale 9.ts stays in sessDir.
+	rec0 := httptest.NewRecorder()
+	svc.ServeHLSSegment(rec0, httptest.NewRequest(http.MethodGet, "/0.ts", nil), lessonID, sessionID, 0)
+	if rec0.Code != http.StatusOK || rec0.Body.Len() < 188 || rec0.Body.Bytes()[0] != 0x47 {
+		t.Fatalf("segment 0 failed: status=%d len=%d body=%s", rec0.Code, rec0.Body.Len(), rec0.Body.String())
+	}
+
+	// 3. Seek forward to segment 5 (5 > 1+3, between 0 and stale 9.ts).
+	// Must NOT mistake stale 9.ts for active progress; must restart FFmpeg at -ss 30 (start_number=5).
+	start := time.Now()
+	rec5 := httptest.NewRecorder()
+	svc.ServeHLSSegment(rec5, httptest.NewRequest(http.MethodGet, "/5.ts", nil), lessonID, sessionID, 5)
+	elapsed := time.Since(start)
+	if rec5.Code != http.StatusOK || rec5.Body.Len() < 188 || rec5.Body.Bytes()[0] != 0x47 {
+		t.Fatalf("segment 5 failed: status=%d len=%d body=%s", rec5.Code, rec5.Body.Len(), rec5.Body.String())
+	}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("segment 5 took too long (%v), likely stalled behind t=0 run", elapsed)
+	}
+
+	if _, err := os.Stat(filepath.Join(sessDir, "4.ts")); !os.IsNotExist(err) {
+		t.Fatalf("expected 4.ts NOT to exist when restarting at segment 5")
+	}
+
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read invocations.log: %v", err)
+	}
+	logStr := string(logBytes)
+	for _, want := range []string{"start_number=9", "start_number=0", "start_number=5"} {
+		if !strings.Contains(logStr, want) {
+			t.Fatalf("expected %q in invocations.log, got:\n%s", want, logStr)
+		}
+	}
+}
+
+func TestVODHLSConcurrentSeekReturns409(t *testing.T) {
+	ffmpegBin := resolveTestFFmpeg(t)
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+	ctrlDir := t.TempDir()
+
+	mkvPath := filepath.Join(mediaRoot, "concseek.mkv")
+	genCmd := exec.Command(
+		ffmpegBin,
+		"-y",
+		"-f", "lavfi", "-i", "color=c=red:size=160x120:rate=15:duration=50",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=50",
+		"-c:v", "libx264", "-preset", "ultrafast", "-g", "15",
+		"-c:a", "aac",
+		mkvPath,
+	)
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate 50s mkv failed: %v\n%s", err, string(out))
+	}
+
+	prober := scanner.NewFFmpegProber("", ffmpegBin)
+	probeRes, err := prober.Probe(context.Background(), mkvPath)
+	if err != nil {
+		t.Fatalf("probe 50s mkv failed: %v", err)
+	}
+
+	_, mediaID := seedSourceAndMedia(t, conn, "local", mediaRoot, "concseek.mkv", "mkv", probeRes.VideoCodec, probeRes.AudioCodec, probeRes.DurationMs, probeRes.StreamsJSON, "")
+	_, _, _, lessonID := seedCourseHierarchy(t, conn, mediaID, "", "")
+
+	holdSeg1 := filepath.Join(ctrlDir, "hold_seg1")
+	inflightSeg1 := filepath.Join(ctrlDir, "seg1_inflight")
+	if err := os.WriteFile(holdSeg1, []byte("1"), 0o644); err != nil {
+		t.Fatalf("write hold_seg1: %v", err)
+	}
+
+	wrapScript := fmt.Sprintf(`#!/bin/sh
+START_NUM=""
+PREV=""
+for arg in "$@"; do
+  if [ "$PREV" = "-start_number" ]; then
+    START_NUM="$arg"
+  fi
+  PREV="$arg"
+done
+if [ "$START_NUM" = "1" ] && [ -f %q ]; then
+  rm -f %q
+  touch %q
+  exec sleep 10
+fi
+exec %q "$@"
+`, holdSeg1, holdSeg1, inflightSeg1, ffmpegBin)
+
+	wrapBin := filepath.Join(ctrlDir, "ffmpeg_wrap.sh")
+	if err := os.WriteFile(wrapBin, []byte(wrapScript), 0o755); err != nil {
+		t.Fatalf("write wrap script: %v", err)
+	}
+
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), wrapBin)
+	defer svc.Close()
+
+	sessionID := "conc409"
+	rec1 := httptest.NewRecorder()
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		svc.ServeHLSSegment(rec1, httptest.NewRequest(http.MethodGet, "/1.ts", nil), lessonID, sessionID, 1)
+	}()
+
+	waitForFile(t, inflightSeg1, 5*time.Second)
+	// Give the waiter goroutine a moment to settle into <-done before cancelling.
+	time.Sleep(30 * time.Millisecond)
+
+	rec2 := httptest.NewRecorder()
+	svc.ServeHLSSegment(rec2, httptest.NewRequest(http.MethodGet, "/7.ts", nil), lessonID, sessionID, 7)
+	if rec2.Code != http.StatusOK || rec2.Body.Len() < 188 || rec2.Body.Bytes()[0] != 0x47 {
+		t.Fatalf("seek segment 7 failed: status=%d len=%d body=%s", rec2.Code, rec2.Body.Len(), rec2.Body.String())
+	}
+
+	<-doneCh
+	if rec1.Code != http.StatusConflict {
+		t.Fatalf("superseded segment 1 status = %d, want 409 Conflict (body: %s)", rec1.Code, rec1.Body.String())
 	}
 }

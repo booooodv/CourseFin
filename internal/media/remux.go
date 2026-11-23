@@ -43,6 +43,7 @@ type remuxSession struct {
 	generation   uint64
 	cmdCancel    context.CancelFunc
 	cmdDone      chan struct{}
+	stoppingDone chan struct{}
 	cmdErr       error
 	cmdStderr    string
 }
@@ -50,9 +51,12 @@ type remuxSession struct {
 func (rs *remuxSession) stopAndRemove() {
 	rs.mu.Lock()
 	rs.closed = true
+	rs.generation++
 	cancel := rs.cmdCancel
 	done := rs.cmdDone
+	stopping := rs.stoppingDone
 	rs.cmdCancel = nil
+	rs.cmdDone = nil
 	rs.hasActiveCmd = false
 	rs.mu.Unlock()
 
@@ -61,6 +65,9 @@ func (rs *remuxSession) stopAndRemove() {
 	}
 	if done != nil {
 		<-done
+	}
+	if stopping != nil {
+		<-stopping
 	}
 	_ = os.RemoveAll(rs.dir)
 }
@@ -364,82 +371,68 @@ func (s *Service) getOrCreateRemuxSession(lessonID, safeSession, rawSession stri
 func (s *Service) ensureSegmentReady(ctx context.Context, sess *remuxSession, absPath, audioCodec string, segmentIndex int) (string, int, error) {
 	segPath := filepath.Join(sess.dir, fmt.Sprintf("%d.ts", segmentIndex))
 
-	sess.mu.Lock()
-	if sess.closed {
-		sess.mu.Unlock()
-		return "", http.StatusServiceUnavailable, errors.New("remux session stopped")
-	}
-	sess.lastAccess = time.Now()
-
-	if segFileReady(segPath) {
-		sess.mu.Unlock()
-		return segPath, http.StatusOK, nil
-	}
-
 	var gen uint64
 	var done chan struct{}
-	needLaunch := true
 
-	if sess.hasActiveCmd {
-		currentProd := highestSegmentInDir(sess.dir, sess.startSegment)
-		if segmentIndex >= sess.startSegment && segmentIndex <= currentProd+3 {
-			needLaunch = false
-			gen = sess.generation
-			done = sess.cmdDone
-		} else {
-			cancel := sess.cmdCancel
-			oldDone := sess.cmdDone
-			sess.cmdCancel = nil
-			sess.hasActiveCmd = false
+	sess.mu.Lock()
+	for {
+		if sess.closed {
 			sess.mu.Unlock()
-
-			if cancel != nil {
-				cancel()
-			}
-			if oldDone != nil {
-				<-oldDone
-			}
-
-			sess.mu.Lock()
-			if sess.closed {
-				sess.mu.Unlock()
-				return "", http.StatusServiceUnavailable, errors.New("remux session stopped")
-			}
-			// Re-check in case another goroutine already restarted or finished the segment.
-			if segFileReady(segPath) {
-				sess.mu.Unlock()
-				return segPath, http.StatusOK, nil
-			}
-			if sess.hasActiveCmd {
-				currentProd := highestSegmentInDir(sess.dir, sess.startSegment)
-				if segmentIndex >= sess.startSegment && segmentIndex <= currentProd+3 {
-					needLaunch = false
-					gen = sess.generation
-					done = sess.cmdDone
-				}
-			}
+			return "", http.StatusServiceUnavailable, errors.New("remux session stopped")
 		}
-	}
+		sess.lastAccess = time.Now()
 
-	if needLaunch {
-		// If another caller is currently starting or stopping, wait if needed.
+		if segFileReady(segPath) {
+			sess.mu.Unlock()
+			return segPath, http.StatusOK, nil
+		}
+
+		if sess.stoppingDone != nil {
+			waitStop := sess.stoppingDone
+			sess.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return "", 499, ctx.Err()
+			case <-s.stopCh:
+				return "", http.StatusServiceUnavailable, errors.New("media service shutting down")
+			case <-waitStop:
+			}
+			sess.mu.Lock()
+			continue
+		}
+
 		if sess.hasActiveCmd {
+			currentProd := activeRunMaxSegment(sess.dir, sess.startSegment)
+			if segmentIndex >= sess.startSegment && segmentIndex <= currentProd+3 {
+				gen = sess.generation
+				done = sess.cmdDone
+				sess.mu.Unlock()
+				break
+			}
+
+			// Seek jump: supersede current generation before unlocking and cancelling so
+			// any concurrent waiter on oldDone observes curGen != gen and returns 409 Conflict.
+			sess.generation++
 			cancel := sess.cmdCancel
 			oldDone := sess.cmdDone
 			sess.cmdCancel = nil
+			sess.cmdDone = nil
 			sess.hasActiveCmd = false
+			sess.stoppingDone = oldDone
 			sess.mu.Unlock()
+
 			if cancel != nil {
 				cancel()
 			}
 			if oldDone != nil {
 				<-oldDone
 			}
+
 			sess.mu.Lock()
-			if sess.closed {
-				sess.mu.Unlock()
-				return "", http.StatusServiceUnavailable, errors.New("remux session stopped")
+			if sess.stoppingDone == oldDone {
+				sess.stoppingDone = nil
 			}
+			continue
 		}
 
 		cleanTempArtifacts(sess.dir)
@@ -454,8 +447,9 @@ func (s *Service) ensureSegmentReady(ctx context.Context, sess *remuxSession, ab
 			sess.mu.Unlock()
 			return "", http.StatusInternalServerError, err
 		}
+		sess.mu.Unlock()
+		break
 	}
-	sess.mu.Unlock()
 
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
@@ -555,6 +549,7 @@ func (s *Service) launchFFmpegRemuxLocked(sess *remuxSession, absPath, audioCode
 		if sess.generation == g {
 			sess.hasActiveCmd = false
 			sess.cmdCancel = nil
+			sess.cmdDone = nil
 			sess.cmdErr = err
 			sess.cmdStderr = buf.String()
 		}
@@ -571,31 +566,43 @@ func segFileReady(path string) bool {
 	return err == nil && !info.IsDir() && info.Size() > 0
 }
 
-func highestSegmentInDir(dir string, startSegment int) int {
+// activeRunMaxSegment returns the highest segment index >= startSegment
+// produced or currently being written by the active FFmpeg run, ignoring stale
+// finalized *.ts files from prior seek positions.
+func activeRunMaxSegment(dir string, startSegment int) int {
 	highest := startSegment
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return highest
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		var base string
-		switch {
-		case strings.HasSuffix(name, ".ts"):
-			base = strings.TrimSuffix(name, ".ts")
-		case strings.HasSuffix(name, ".ts.tmp"):
-			base = strings.TrimSuffix(name, ".ts.tmp")
-		default:
-			continue
-		}
-		n, err := strconv.Atoi(base)
-		if err == nil && n >= startSegment && n > highest {
-			highest = n
+
+	if raw, err := os.ReadFile(filepath.Join(dir, "live.m3u8")); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			base := filepath.Base(line)
+			if !strings.HasSuffix(base, ".ts") {
+				continue
+			}
+			if n, err := strconv.Atoi(strings.TrimSuffix(base, ".ts")); err == nil && n >= startSegment && n > highest {
+				highest = n
+			}
 		}
 	}
+
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".ts.tmp") {
+				continue
+			}
+			if n, err := strconv.Atoi(strings.TrimSuffix(name, ".ts.tmp")); err == nil && n >= startSegment && n > highest {
+				highest = n
+			}
+		}
+	}
+
 	return highest
 }
 
