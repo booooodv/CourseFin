@@ -16,7 +16,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"coursefin/internal/api"
 	"coursefin/internal/auth"
@@ -771,4 +773,154 @@ func TestCourseCoverUploadAndLessonFramePick(t *testing.T) {
 
 	// Ensure id package is used cleanly if needed
 	_ = id.New()
+}
+
+type blockingProber struct {
+	fakeProber
+	startedOnce sync.Once
+	startedCh   chan struct{}
+	releaseCh   chan struct{}
+}
+
+func (b *blockingProber) Probe(ctx context.Context, absPath string) (*scanner.ProbeResult, error) {
+	b.startedOnce.Do(func() {
+		close(b.startedCh)
+	})
+	select {
+	case <-b.releaseCh:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return b.fakeProber.Probe(ctx, absPath)
+}
+
+func TestAsyncScanDeterministicRunningAndConflict(t *testing.T) {
+	dataDir := t.TempDir()
+	mediaDir := t.TempDir()
+
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer conn.Close()
+
+	reg := storage.NewRegistry()
+	authSvc := auth.NewService(conn)
+	prober := &blockingProber{
+		startedCh: make(chan struct{}),
+		releaseCh: make(chan struct{}),
+	}
+	scanSvc := scanner.NewService(conn, dataDir, reg, prober)
+	catSvc := catalog.NewService(conn, dataDir)
+	catSvc.SetRegistry(reg)
+	mediaSvc := media.NewService(conn, dataDir, reg, "")
+	defer mediaSvc.Close()
+
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+	defer cancelLifecycle()
+
+	h := api.NewHandler(api.Deps{
+		DB:           conn,
+		DataDir:      dataDir,
+		Registry:     reg,
+		Auth:         authSvc,
+		Scanner:      scanSvc,
+		Catalog:      catSvc,
+		Media:        mediaSvc,
+		LifecycleCtx: lifecycleCtx,
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	if _, err := authSvc.SetupAdmin(context.Background(), "admin", "secret"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := authSvc.Login(context.Background(), "admin", "secret", auth.DeviceInfo{DeviceID: "d1"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	writeDummyFile(t, filepath.Join(mediaDir, "Course", "01.mp4"), []byte("video"))
+	src, err := catSvc.CreateSource(context.Background(), "Disk", "local", mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+
+	doReq := func(method, p string) (*http.Response, []byte) {
+		req, _ := http.NewRequest(method, ts.URL+p, nil)
+		req.Header.Set("Authorization", "Bearer "+sess.Token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, p, err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		return resp, raw
+	}
+
+	// 1. First async scan returns 202 deterministically with running: true
+	resp, raw := doReq(http.MethodPost, "/api/v1/sources/"+src.ID+"/scan?async=true")
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /scan?async=true = %d, want 202: %s", resp.StatusCode, raw)
+	}
+	var st scanner.ScanState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if !st.Running || st.StartedAt == nil {
+		t.Fatalf("expected immediate running=true and started_at in 202 response, got %s", raw)
+	}
+
+	// Wait until probe worker enters Probe (blocked on releaseCh)
+	select {
+	case <-prober.startedCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for async scan to enter Probe")
+	}
+
+	// 2. Concurrent second async scan returns 409 Conflict
+	resp2, raw2 := doReq(http.MethodPost, "/api/v1/sources/"+src.ID+"/scan?async=true")
+	if resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("second POST /scan?async=true = %d, want 409: %s", resp2.StatusCode, raw2)
+	}
+
+	// Status endpoint also shows running: true while blocked
+	respStatus, rawStatus := doReq(http.MethodGet, "/api/v1/sources/"+src.ID+"/scan/status")
+	if respStatus.StatusCode != http.StatusOK {
+		t.Fatalf("GET /scan/status = %d: %s", respStatus.StatusCode, rawStatus)
+	}
+	if err := json.Unmarshal(rawStatus, &st); err != nil || !st.Running {
+		t.Fatalf("expected running=true from /scan/status, got %s", rawStatus)
+	}
+
+	// Release prober and wait for completion
+	close(prober.releaseCh)
+	scanSvc.Wait()
+
+	finalState := scanSvc.Status(src.ID)
+	if finalState.Running || finalState.LastReport == nil || finalState.LastReport.TotalVideos != 1 {
+		t.Fatalf("expected completed scan with TotalVideos=1, got %+v", finalState)
+	}
+
+	// 3. Also test cancelling lifecycleCtx while a second async scan is blocked, then Wait() before closing DB
+	prober2 := &blockingProber{
+		startedCh: make(chan struct{}),
+		releaseCh: make(chan struct{}),
+	}
+	scanSvc2 := scanner.NewService(conn, dataDir, reg, prober2)
+	lc2, cancelLC2 := context.WithCancel(context.Background())
+	writeDummyFile(t, filepath.Join(mediaDir, "Course", "02.mp4"), []byte("video2"))
+	if _, err := scanSvc2.StartScanAsync(lc2, src.ID); err != nil {
+		t.Fatalf("StartScanAsync: %v", err)
+	}
+	select {
+	case <-prober2.startedCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for scanSvc2 probe")
+	}
+	cancelLC2()
+	scanSvc2.Wait()
+	if st2 := scanSvc2.Status(src.ID); st2.Running {
+		t.Fatalf("expected scanSvc2 not running after Wait()")
+	}
 }

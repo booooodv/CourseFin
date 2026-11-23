@@ -58,6 +58,7 @@ type Service struct {
 	workers  int
 
 	mu      sync.Mutex
+	wg      sync.WaitGroup
 	running map[string]bool
 	states  map[string]ScanState
 }
@@ -86,6 +87,11 @@ func (s *Service) Status(sourceID string) ScanState {
 		return st
 	}
 	return ScanState{SourceID: sourceID}
+}
+
+// Wait blocks until all background scans started via StartScanAsync have finished.
+func (s *Service) Wait() {
+	s.wg.Wait()
 }
 
 // StartPeriodicLoop runs ScanAllEnabled on the schedule returned by intervalFn
@@ -172,25 +178,63 @@ type probeJobResult struct {
 	errMsg    string
 }
 
-// ScanSource performs an incremental scan of a single storage source.
-func (s *Service) ScanSource(ctx context.Context, sourceID string) (*ScanReport, error) {
-	startedAt := time.Now().UTC()
-
+func (s *Service) beginScan(sourceID string, startedAt time.Time) (ScanState, ScanState, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.running[sourceID] {
-		s.mu.Unlock()
-		return nil, ErrScanInProgress
+		return ScanState{}, ScanState{}, ErrScanInProgress
 	}
 	s.running[sourceID] = true
 	prevState := s.states[sourceID]
-	s.states[sourceID] = ScanState{
+	st := ScanState{
 		SourceID:   sourceID,
 		Running:    true,
 		StartedAt:  &startedAt,
 		LastReport: prevState.LastReport,
 	}
-	s.mu.Unlock()
+	s.states[sourceID] = st
+	return st, prevState, nil
+}
 
+// StartScanAsync validates sourceID, atomically marks the scan as running, and
+// launches the scan in a tracked background goroutine bound to ctx.
+func (s *Service) StartScanAsync(ctx context.Context, sourceID string) (ScanState, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ScanState{}, err
+	}
+	src, err := s.loadSource(ctx, sourceID)
+	if err != nil {
+		return ScanState{}, err
+	}
+
+	startedAt := time.Now().UTC()
+	st, prevState, err := s.beginScan(sourceID, startedAt)
+	if err != nil {
+		return ScanState{}, err
+	}
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		_, _ = s.runScanLocked(ctx, sourceID, src, startedAt, prevState)
+	}()
+	return st, nil
+}
+
+// ScanSource performs an incremental scan of a single storage source.
+func (s *Service) ScanSource(ctx context.Context, sourceID string) (*ScanReport, error) {
+	startedAt := time.Now().UTC()
+	_, prevState, err := s.beginScan(sourceID, startedAt)
+	if err != nil {
+		return nil, err
+	}
+	return s.runScanLocked(ctx, sourceID, nil, startedAt, prevState)
+}
+
+func (s *Service) runScanLocked(ctx context.Context, sourceID string, preloadedSrc *sourceRecord, startedAt time.Time, prevState ScanState) (*ScanReport, error) {
 	var report *ScanReport
 	var scanErr error
 	defer func() {
@@ -212,10 +256,14 @@ func (s *Service) ScanSource(ctx context.Context, sourceID string) (*ScanReport,
 		s.mu.Unlock()
 	}()
 
-	src, err := s.loadSource(ctx, sourceID)
-	if err != nil {
-		scanErr = err
-		return nil, err
+	src := preloadedSrc
+	if src == nil {
+		var err error
+		src, err = s.loadSource(ctx, sourceID)
+		if err != nil {
+			scanErr = err
+			return nil, err
+		}
 	}
 
 	provider, err := s.registry.ProviderFor(src.driver, src.rootPath, src.configJSON)

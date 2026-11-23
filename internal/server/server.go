@@ -119,6 +119,9 @@ func (s *Server) Close() error {
 			s.cancel()
 		}
 		s.wg.Wait()
+		if s.scanner != nil {
+			s.scanner.Wait()
+		}
 
 		var errs []error
 		if s.media != nil {

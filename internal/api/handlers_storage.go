@@ -56,18 +56,19 @@ func (h *handler) handleScanSource(w http.ResponseWriter, r *http.Request) {
 
 	asyncRaw := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("async")))
 	if asyncRaw == "1" || asyncRaw == "true" {
-		if _, err := h.cat.GetSource(r.Context(), sourceID); err != nil {
-			writeCatalogError(w, err)
+		st, err := h.scanner.StartScanAsync(h.lifecycleCtx, sourceID)
+		if err != nil {
+			switch {
+			case errors.Is(err, scanner.ErrSourceNotFound):
+				writeError(w, http.StatusNotFound, err.Error())
+			case errors.Is(err, scanner.ErrScanInProgress):
+				writeError(w, http.StatusConflict, err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
 			return
 		}
-		if st := h.scanner.Status(sourceID); st.Running {
-			writeError(w, http.StatusConflict, scanner.ErrScanInProgress.Error())
-			return
-		}
-		go func() {
-			_, _ = h.scanner.ScanSource(h.lifecycleCtx, sourceID)
-		}()
-		writeJSON(w, http.StatusAccepted, h.scanner.Status(sourceID))
+		writeJSON(w, http.StatusAccepted, st)
 		return
 	}
 
