@@ -1045,3 +1045,112 @@ func TestPlaybackProgressSyncAndResumeNextUp(t *testing.T) {
 		t.Fatalf("expected 401 after Logout, got %d", resp.StatusCode)
 	}
 }
+
+func TestSortOrderDescendingStrictWeakOrderingAndStability(t *testing.T) {
+	env := setupTestEnv(t)
+	token, userID, _ := env.authenticate(t)
+	ctx := context.Background()
+	headers := map[string]string{"X-Emby-Token": token}
+
+	srcID := env.seedSource(t)
+	mf1 := env.seedMediaFile(t, srcID, "sort/01.mp4", "mp4", "h264", "aac", 60000, "", "")
+	mf2 := env.seedMediaFile(t, srcID, "sort/02.mp4", "mp4", "h264", "aac", 60000, "", "")
+	mf3 := env.seedMediaFile(t, srcID, "sort/03.mp4", "mp4", "h264", "aac", 60000, "", "")
+	mf4 := env.seedMediaFile(t, srcID, "sort/04.mp4", "mp4", "h264", "aac", 60000, "", "")
+
+	course, err := env.catSvc.CreateCourse(ctx, catalog.CreateCourseInput{LibraryID: env.libID, Title: "Alpha"})
+	if err != nil {
+		t.Fatalf("CreateCourse Alpha failed: %v", err)
+	}
+	l1, _ := env.catSvc.AddLesson(ctx, course.Chapters[0].ID, mf1, "L1")
+	l2, _ := env.catSvc.AddLesson(ctx, course.Chapters[0].ID, mf2, "L2")
+	l3, _ := env.catSvc.AddLesson(ctx, course.Chapters[0].ID, mf3, "L3")
+	l4, _ := env.catSvc.AddLesson(ctx, course.Chapters[0].ID, mf4, "L4")
+
+	// Set identical created_at across all 4 lessons to verify DateCreated descending stability on equal keys.
+	sameTS := "2026-11-23T00:00:00Z"
+	if _, err := env.db.Exec(`UPDATE lessons SET created_at = ? WHERE course_id = ?`, sameTS, course.ID); err != nil {
+		t.Fatalf("update lesson created_at: %v", err)
+	}
+
+	// 1. All 4 lessons unplayed -> DatePlayed descending must preserve [L1, L2, L3, L4].
+	resp, body := env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items?ParentId="+course.ID+"&Recursive=true&SortBy=DatePlayed&SortOrder=Descending", nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET Items DatePlayed desc status = %d", resp.StatusCode)
+	}
+	var res struct {
+		Items []struct {
+			Id   string `json:"Id"`
+			Name string `json:"Name"`
+		} `json:"Items"`
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		t.Fatalf("decode DatePlayed desc: %v", err)
+	}
+	gotIDs := []string{res.Items[0].Id, res.Items[1].Id, res.Items[2].Id, res.Items[3].Id}
+	wantAllUnplayed := []string{l1.ID, l2.ID, l3.ID, l4.ID}
+	for i := range wantAllUnplayed {
+		if gotIDs[i] != wantAllUnplayed[i] {
+			t.Fatalf("unplayed DatePlayed desc scrambled order: got %v, want %v", gotIDs, wantAllUnplayed)
+		}
+	}
+
+	// 2. Mark L3 played -> L3 comes first, remaining equal unplayed items stay in stable order [L1, L2, L4].
+	resp, _ = env.doJSON(t, http.MethodPost, "/Users/"+userID+"/PlayedItems/"+l3.ID, nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("mark L3 played status = %d", resp.StatusCode)
+	}
+	resp, body = env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items?ParentId="+course.ID+"&Recursive=true&SortBy=DatePlayed&SortOrder=Descending", nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET Items DatePlayed desc (mixed) status = %d", resp.StatusCode)
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		t.Fatalf("decode DatePlayed desc (mixed): %v", err)
+	}
+	gotMixed := []string{res.Items[0].Id, res.Items[1].Id, res.Items[2].Id, res.Items[3].Id}
+	wantMixed := []string{l3.ID, l1.ID, l2.ID, l4.ID}
+	for i := range wantMixed {
+		if gotMixed[i] != wantMixed[i] {
+			t.Fatalf("mixed DatePlayed desc order mismatch: got %v, want %v", gotMixed, wantMixed)
+		}
+	}
+
+	// 3. Equal DateCreated across all 4 lessons -> DateCreated descending must preserve [L1, L2, L3, L4].
+	resp, body = env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items?ParentId="+course.ID+"&Recursive=true&SortBy=DateCreated&SortOrder=Descending", nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET Items DateCreated desc status = %d", resp.StatusCode)
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		t.Fatalf("decode DateCreated desc: %v", err)
+	}
+	gotCreated := []string{res.Items[0].Id, res.Items[1].Id, res.Items[2].Id, res.Items[3].Id}
+	for i := range wantAllUnplayed {
+		if gotCreated[i] != wantAllUnplayed[i] {
+			t.Fatalf("equal DateCreated desc scrambled order: got %v, want %v", gotCreated, wantAllUnplayed)
+		}
+	}
+
+	// 4. Unequal keys reverse cleanly with SortBy=SortName&SortOrder=Descending.
+	_, err = env.catSvc.CreateCourse(ctx, catalog.CreateCourseInput{LibraryID: env.libID, Title: "Gamma"})
+	if err != nil {
+		t.Fatalf("CreateCourse Gamma failed: %v", err)
+	}
+	_, err = env.catSvc.CreateCourse(ctx, catalog.CreateCourseInput{LibraryID: env.libID, Title: "Beta"})
+	if err != nil {
+		t.Fatalf("CreateCourse Beta failed: %v", err)
+	}
+	resp, body = env.doJSON(t, http.MethodGet, "/Users/"+userID+"/Items?ParentId="+env.libID+"&IncludeItemTypes=Series&SortBy=SortName&SortOrder=Descending", nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET Series SortName desc status = %d", resp.StatusCode)
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		t.Fatalf("decode SortName desc: %v", err)
+	}
+	gotNames := []string{res.Items[0].Name, res.Items[1].Name, res.Items[2].Name}
+	wantNames := []string{"Gamma", "Beta", "Alpha"}
+	for i := range wantNames {
+		if gotNames[i] != wantNames[i] {
+			t.Fatalf("SortName desc order mismatch: got %v, want %v", gotNames, wantNames)
+		}
+	}
+}

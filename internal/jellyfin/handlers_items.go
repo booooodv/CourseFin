@@ -1522,12 +1522,10 @@ func sortItems(items []BaseItemDto, sortBy, sortOrder string) {
 	}
 
 	desc := strings.EqualFold(strings.TrimSpace(sortOrder), "Descending")
-	sort.SliceStable(items, func(i, j int) bool {
-		a, b := items[i], items[j]
-		var less bool
+	cmpLess := func(a, b BaseItemDto) bool {
 		switch primary {
 		case "name":
-			less = strings.ToLower(a.Name) < strings.ToLower(b.Name)
+			return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 		case "sortname", "seriessortname":
 			sa := a.SortName
 			if sa == "" {
@@ -1537,9 +1535,9 @@ func sortItems(items []BaseItemDto, sortBy, sortOrder string) {
 			if sb == "" {
 				sb = b.Name
 			}
-			less = strings.ToLower(sa) < strings.ToLower(sb)
+			return strings.ToLower(sa) < strings.ToLower(sb)
 		case "datecreated", "datelastcontentadded":
-			less = a.DateCreated < b.DateCreated
+			return a.DateCreated < b.DateCreated
 		case "dateplayed":
 			la, lb := "", ""
 			if a.UserData != nil && a.UserData.LastPlayedDate != nil {
@@ -1548,7 +1546,7 @@ func sortItems(items []BaseItemDto, sortBy, sortOrder string) {
 			if b.UserData != nil && b.UserData.LastPlayedDate != nil {
 				lb = *b.UserData.LastPlayedDate
 			}
-			less = la < lb
+			return la < lb
 		case "indexnumber":
 			pa, pb := 0, 0
 			ia, ib := 0, 0
@@ -1565,17 +1563,19 @@ func sortItems(items []BaseItemDto, sortBy, sortOrder string) {
 				ib = *b.IndexNumber
 			}
 			if pa != pb {
-				less = pa < pb
-			} else {
-				less = ia < ib
+				return pa < pb
 			}
+			return ia < ib
 		default:
-			less = strings.ToLower(a.Name) < strings.ToLower(b.Name)
+			return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 		}
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
 		if desc {
-			return !less
+			return cmpLess(items[j], items[i])
 		}
-		return less
+		return cmpLess(items[i], items[j])
 	})
 }
 
