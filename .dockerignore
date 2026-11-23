@@ -1,6 +1,7 @@
 .git
 .superpowers
 data
+media
 web/node_modules
 web/dist
 *.db*

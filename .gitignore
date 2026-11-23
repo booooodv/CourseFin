@@ -1,6 +1,8 @@
 .superpowers/
 /data
 data/
+/media
+media/
 web/node_modules
 web/dist
 *.db

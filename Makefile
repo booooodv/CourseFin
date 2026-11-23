@@ -1,5 +1,6 @@
 GO ?= go
 PNPM ?= pnpm
+VERSION ?= 1.0.0
 
 .PHONY: build-web sync-web build test docker-build
 
@@ -11,11 +12,11 @@ sync-web: build-web
 	cp -R web/dist/* internal/server/webdist/
 
 build: sync-web
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" -o coursefin ./cmd/coursefin
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o coursefin ./cmd/coursefin
 
 test:
 	$(GO) test -race -count=1 ./...
-	$(PNPM) --dir web test -- --run
+	$(PNPM) --dir web test
 
 docker-build:
-	docker build -t coursefin:local .
+	docker build -t coursefin:$(VERSION) -t coursefin:latest .

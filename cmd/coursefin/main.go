@@ -15,6 +15,8 @@ import (
 	"coursefin/internal/server"
 )
 
+var version = "1.0.0"
+
 func main() {
 	cfg := config.Load()
 	logger := newLogger(cfg.LogLevel)
@@ -36,7 +38,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("CourseFin listening", "addr", httpSrv.Addr, "data_dir", cfg.DataDir)
+		logger.Info("CourseFin listening", "version", version, "addr", httpSrv.Addr, "data_dir", cfg.DataDir)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

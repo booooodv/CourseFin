@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: coursefin:local
+    image: coursefin:1.0.0
     container_name: coursefin
     restart: unless-stopped
     ports:
@@ -16,7 +16,7 @@ services:
       - ./data:/data
       - ./media:/media:ro
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8096/System/Ping"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${COURSEFIN_PORT:-8096}/System/Ping || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
