@@ -1,0 +1,774 @@
+package api_test
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"coursefin/internal/api"
+	"coursefin/internal/auth"
+	"coursefin/internal/catalog"
+	"coursefin/internal/db"
+	"coursefin/internal/id"
+	"coursefin/internal/media"
+	"coursefin/internal/scanner"
+	"coursefin/internal/storage"
+)
+
+type fakeProber struct{}
+
+func (f *fakeProber) Probe(ctx context.Context, absPath string) (*scanner.ProbeResult, error) {
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(absPath)), ".")
+	res := &scanner.ProbeResult{
+		DurationMs:  120000,
+		Container:   ext,
+		VideoCodec:  "h264",
+		AudioCodec:  "aac",
+		Width:       1920,
+		Height:      1080,
+		Bitrate:     2500000,
+		StreamsJSON: `[{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"}]`,
+	}
+	if ext == "mkv" {
+		res.AudioCodec = "ac3"
+	} else if ext == "wmv" {
+		res.VideoCodec = "wmv3"
+		res.AudioCodec = "wmav2"
+	}
+	return res, nil
+}
+
+func (f *fakeProber) ExtractThumbnail(ctx context.Context, absPath string, seekSec float64, outPath string) error {
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return err
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 16, 9))
+	img.Set(1, 1, color.RGBA{R: 255, G: 100, B: 50, A: 255})
+	file, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return jpeg.Encode(file, img, &jpeg.Options{Quality: 80})
+}
+
+type apiTestEnv struct {
+	db       *sql.DB
+	dataDir  string
+	mediaDir string
+	registry *storage.Registry
+	authSvc  *auth.Service
+	scanSvc  *scanner.Service
+	catSvc   *catalog.Service
+	mediaSvc *media.Service
+	handler  http.Handler
+	server   *httptest.Server
+}
+
+func setupAPITestEnv(t *testing.T) *apiTestEnv {
+	t.Helper()
+
+	dataDir := t.TempDir()
+	mediaDir := t.TempDir()
+
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	reg := storage.NewRegistry()
+	authSvc := auth.NewService(conn)
+	scanSvc := scanner.NewService(conn, dataDir, reg, &fakeProber{})
+	catSvc := catalog.NewService(conn, dataDir)
+	catSvc.SetRegistry(reg)
+	mediaSvc := media.NewService(conn, dataDir, reg, "")
+	t.Cleanup(func() { _ = mediaSvc.Close() })
+
+	h := api.NewHandler(api.Deps{
+		DB:          conn,
+		DataDir:     dataDir,
+		BaseURLHint: "http://localhost:8096",
+		Registry:    reg,
+		Auth:        authSvc,
+		Scanner:     scanSvc,
+		Catalog:     catSvc,
+		Media:       mediaSvc,
+	})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	return &apiTestEnv{
+		db:       conn,
+		dataDir:  dataDir,
+		mediaDir: mediaDir,
+		registry: reg,
+		authSvc:  authSvc,
+		scanSvc:  scanSvc,
+		catSvc:   catSvc,
+		mediaSvc: mediaSvc,
+		handler:  h,
+		server:   srv,
+	}
+}
+
+func (e *apiTestEnv) doJSON(t *testing.T, method, path string, body any, token string) (*http.Response, []byte) {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		r = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, e.server.URL+path, r)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request %s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	return resp, raw
+}
+
+func writeDummyFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func writeDummyPNG(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	img.Set(5, 5, color.RGBA{R: 30, G: 144, B: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+}
+
+func TestAPISetupLoginAndCourseLifecycle(t *testing.T) {
+	env := setupAPITestEnv(t)
+
+	// 1. Setup status before admin creation
+	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/setup/status", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /setup/status = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	var setupStatus struct {
+		NeedsSetup bool `json:"needs_setup"`
+	}
+	if err := json.Unmarshal(raw, &setupStatus); err != nil || !setupStatus.NeedsSetup {
+		t.Fatalf("expected needs_setup=true, got %s", raw)
+	}
+
+	// Protected routes reject unauthenticated requests
+	resp, _ = env.doJSON(t, http.MethodGet, "/api/v1/courses", nil, "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET /courses = %d, want 401", resp.StatusCode)
+	}
+
+	// 2. Setup admin
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/setup", map[string]string{
+		"username":    "admin",
+		"password":    "pass1234",
+		"server_name": "My Course Server",
+	}, "")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /setup = %d, want 201: %s", resp.StatusCode, raw)
+	}
+
+	// Duplicate setup returns 409
+	resp, _ = env.doJSON(t, http.MethodPost, "/api/v1/setup", map[string]string{
+		"username": "admin2",
+		"password": "secret",
+	}, "")
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate POST /setup = %d, want 409", resp.StatusCode)
+	}
+
+	// 3. Login
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"username":    "admin",
+		"password":    "pass1234",
+		"device_id":   "web-dev-1",
+		"device_name": "Chrome",
+	}, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /auth/login = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	var loginRes struct {
+		Token string `json:"token"`
+		User  struct {
+			Username string `json:"username"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(raw, &loginRes); err != nil || loginRes.Token == "" {
+		t.Fatalf("unexpected login response: %s", raw)
+	}
+	token := loginRes.Token
+
+	// Check /auth/me with Bearer token
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/auth/me", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /auth/me = %d, want 200: %s", resp.StatusCode, raw)
+	}
+
+	// 4. Create storage source & scan
+	courseDir := filepath.Join(env.mediaDir, "Go Mastery")
+	writeDummyFile(t, filepath.Join(courseDir, "01 Intro.mp4"), []byte("video1"))
+	writeDummyFile(t, filepath.Join(courseDir, "01 Intro.srt"), []byte("1\n00:00:00,000 --> 00:00:02,000\nWelcome to Go\n"))
+	writeDummyFile(t, filepath.Join(courseDir, "Chapter 1", "02 Interfaces.mp4"), []byte("video2"))
+	writeDummyPNG(t, filepath.Join(courseDir, "cover.png"))
+
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/sources", map[string]string{
+		"name":      "Courses Disk",
+		"driver":    "local",
+		"root_path": env.mediaDir,
+	}, token)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /sources = %d, want 201: %s", resp.StatusCode, raw)
+	}
+	var src catalog.StorageSource
+	if err := json.Unmarshal(raw, &src); err != nil || src.ID == "" {
+		t.Fatalf("unmarshal source: %v (%s)", err, raw)
+	}
+
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/sources/"+src.ID+"/scan", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /sources/%s/scan = %d, want 200: %s", src.ID, resp.StatusCode, raw)
+	}
+	var rep scanner.ScanReport
+	if err := json.Unmarshal(raw, &rep); err != nil || rep.TotalVideos != 2 {
+		t.Fatalf("expected TotalVideos=2, got %s", raw)
+	}
+
+	// Browse dirs & files
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/sources/"+src.ID+"/dirs", nil, token)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "Go Mastery") {
+		t.Fatalf("GET /dirs failed (%d): %s", resp.StatusCode, raw)
+	}
+
+	// 5. Import preview & commit
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/import/preview", map[string]string{
+		"source_id":    src.ID,
+		"dir_rel_path": "Go Mastery",
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /import/preview = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	var preview catalog.ImportPreview
+	if err := json.Unmarshal(raw, &preview); err != nil || preview.TotalFiles != 2 {
+		t.Fatalf("expected preview TotalFiles=2, got %s", raw)
+	}
+
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/import/commit", catalog.CommitImportInput{
+		SourceID:     src.ID,
+		DirRelPath:   "Go Mastery",
+		Title:        "Go Mastery",
+		CoverRelPath: preview.CoverRelPath,
+	}, token)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /import/commit = %d, want 201: %s", resp.StatusCode, raw)
+	}
+	var course catalog.CourseDetail
+	if err := json.Unmarshal(raw, &course); err != nil || course.ID == "" {
+		t.Fatalf("unmarshal course: %v (%s)", err, raw)
+	}
+	if len(course.Chapters) != 2 {
+		t.Fatalf("expected 2 chapters, got %d", len(course.Chapters))
+	}
+
+	// 6. Update course title and tags
+	newTitle := "Go Mastery Revised"
+	tags := []string{"golang", "backend"}
+	resp, raw = env.doJSON(t, http.MethodPut, "/api/v1/courses/"+course.ID, catalog.UpdateCourseInput{
+		Title: &newTitle,
+		Tags:  &tags,
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /courses = %d, want 200: %s", resp.StatusCode, raw)
+	}
+
+	// 7. Reorder lessons (swap lessons across chapters or within chapter)
+	l1 := course.Chapters[0].Lessons[0]
+	l2 := course.Chapters[1].Lessons[0]
+	resp, raw = env.doJSON(t, http.MethodPut, "/api/v1/courses/"+course.ID+"/lessons/reorder", map[string]any{
+		"placements": []catalog.LessonPlacement{
+			{LessonID: l2.ID, ChapterID: course.Chapters[0].ID, SortOrder: 1},
+			{LessonID: l1.ID, ChapterID: course.Chapters[0].ID, SortOrder: 2},
+		},
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /lessons/reorder = %d, want 200: %s", resp.StatusCode, raw)
+	}
+
+	// 8. Report playback progress on l1
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/lessons/"+l1.ID+"/progress", map[string]int64{
+		"position_ticks": 300000000, // 30s
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /lessons/%s/progress = %d, want 200: %s", l1.ID, resp.StatusCode, raw)
+	}
+
+	// 9. Verify /home reflects resume, libraries, and updated course
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/home", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /home = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	var homeRes struct {
+		Resume    []catalog.LessonWithContext `json:"resume"`
+		Libraries []catalog.Library           `json:"libraries"`
+		Courses   []catalog.CourseSummary     `json:"courses"`
+	}
+	if err := json.Unmarshal(raw, &homeRes); err != nil {
+		t.Fatalf("unmarshal home: %v", err)
+	}
+	if len(homeRes.Resume) != 1 || homeRes.Resume[0].ID != l1.ID || homeRes.Resume[0].PositionTicks != 300000000 {
+		t.Fatalf("expected resume lesson %s with ticks=300000000, got %+v", l1.ID, homeRes.Resume)
+	}
+	if len(homeRes.Libraries) == 0 || len(homeRes.Courses) != 1 || homeRes.Courses[0].Title != newTitle {
+		t.Fatalf("unexpected home libraries/courses: %+v", homeRes)
+	}
+
+	// 10. Logout invalidates token
+	resp, _ = env.doJSON(t, http.MethodPost, "/api/v1/auth/logout", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /auth/logout = %d, want 200", resp.StatusCode)
+	}
+	resp, _ = env.doJSON(t, http.MethodGet, "/api/v1/auth/me", nil, token)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /auth/me after logout = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestAIOrganizeDoesNotMutateUntilApply(t *testing.T) {
+	env := setupAPITestEnv(t)
+
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret", auth.DeviceInfo{DeviceID: "d1"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	// Create media + subtitle + course
+	courseDir := filepath.Join(env.mediaDir, "Messy_Course_[1080p]")
+	writeDummyFile(t, filepath.Join(courseDir, "01_setup_1080p.mp4"), []byte("v1"))
+	writeDummyFile(t, filepath.Join(courseDir, "01_setup_1080p.srt"), []byte("1\n00:00:01,000 --> 00:00:03,000\nHello Docker setup\n"))
+	writeDummyFile(t, filepath.Join(courseDir, "02_containers_1080p.mp4"), []byte("v2"))
+
+	src, err := env.catSvc.CreateSource(context.Background(), "Disk", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	course, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "Messy_Course_[1080p]",
+	})
+	if err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+
+	l1ID := course.Chapters[0].Lessons[0].ID
+	l2ID := course.Chapters[0].Lessons[1].ID
+	origTitle := course.Title
+	origChapterTitle := course.Chapters[0].Title
+
+	// Save initial progress on lesson 1 to verify apply preserves it
+	if _, err := env.catSvc.ReportProgress(context.Background(), l1ID, 420000000); err != nil {
+		t.Fatalf("ReportProgress: %v", err)
+	}
+
+	// Mock OpenAI server
+	var seenAuthHeader string
+	var seenPromptBody string
+	mockAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuthHeader = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		seenPromptBody = string(b)
+
+		var respText string
+		if strings.Contains(seenPromptBody, "Reply with ok.") {
+			respText = "ok"
+		} else {
+			prop := map[string]any{
+				"title":    "Clean Docker Course",
+				"overview": "Learn Docker from scratch.",
+				"tags":     []string{"docker", "devops"},
+				"chapters": []map[string]any{
+					{
+						"title": "Getting Started",
+						"lessons": []map[string]any{
+							{"lesson_id": l1ID, "title": "Environment Setup"},
+						},
+					},
+					{
+						"title": "Core Concepts",
+						"lessons": []map[string]any{
+							{"lesson_id": l2ID, "title": "Containers Deep Dive"},
+						},
+					},
+				},
+			}
+			pb, _ := json.Marshal(prop)
+			respText = string(pb)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": respText}},
+			},
+		})
+	}))
+	defer mockAI.Close()
+
+	// Save settings with API key
+	resp, raw := env.doJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url":          mockAI.URL + "/v1",
+		"ai_api_key":           "sk-secret-12345",
+		"ai_model":             "gpt-4o-mini",
+		"ai_max_subtitle_chars": 2000,
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /settings = %d, want 200: %s", resp.StatusCode, raw)
+	}
+
+	// GET /settings masks API key
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/settings", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /settings = %d: %s", resp.StatusCode, raw)
+	}
+	var settingsView map[string]any
+	if err := json.Unmarshal(raw, &settingsView); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	if settingsView["ai_api_key"] == "sk-secret-12345" || settingsView["ai_api_key_set"] != true {
+		t.Fatalf("expected masked ai_api_key and ai_api_key_set=true, got %s", raw)
+	}
+
+	// PUT /settings with masked placeholder preserves existing key
+	resp, _ = env.doJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"server_name": "Updated Server",
+		"ai_api_key":  settingsView["ai_api_key"],
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /settings preserve key = %d", resp.StatusCode)
+	}
+
+	// Test AI connection
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/settings/ai/test", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /settings/ai/test = %d: %s", resp.StatusCode, raw)
+	}
+	if seenAuthHeader != "Bearer sk-secret-12345" {
+		t.Fatalf("expected preserved API key in Authorization header, got %q", seenAuthHeader)
+	}
+
+	// Call /ai/organize -> preview only, MUST NOT mutate DB
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/ai/organize", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /ai/organize = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(seenPromptBody, "Hello Docker setup") {
+		t.Fatalf("expected sidecar subtitle excerpt in AI prompt, got: %s", seenPromptBody)
+	}
+
+	afterOrganize, err := env.catSvc.GetCourseDetail(context.Background(), course.ID)
+	if err != nil {
+		t.Fatalf("GetCourseDetail: %v", err)
+	}
+	if afterOrganize.Title != origTitle || len(afterOrganize.Chapters) != 1 || afterOrganize.Chapters[0].Title != origChapterTitle {
+		t.Fatalf("DB mutated during /ai/organize! got title=%q chapters=%d", afterOrganize.Title, len(afterOrganize.Chapters))
+	}
+
+	// Call /ai/apply with selective toggles: apply_title=true, apply_chapters=false
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/ai/apply", map[string]any{
+		"apply_title":    true,
+		"apply_overview": false,
+		"apply_tags":     false,
+		"apply_chapters": false,
+		"title":          "Clean Docker Course",
+		"overview":       "Learn Docker from scratch.",
+		"tags":           []string{"docker", "devops"},
+		"chapters": []map[string]any{
+			{
+				"title":   "Getting Started",
+				"lessons": []map[string]any{{"lesson_id": l1ID, "title": "Environment Setup"}},
+			},
+			{
+				"title":   "Core Concepts",
+				"lessons": []map[string]any{{"lesson_id": l2ID, "title": "Containers Deep Dive"}},
+			},
+		},
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /ai/apply (title only) = %d, want 200: %s", resp.StatusCode, raw)
+	}
+
+	afterTitleApply, err := env.catSvc.GetCourseDetail(context.Background(), course.ID)
+	if err != nil {
+		t.Fatalf("GetCourseDetail: %v", err)
+	}
+	if afterTitleApply.Title != "Clean Docker Course" {
+		t.Fatalf("expected title updated, got %q", afterTitleApply.Title)
+	}
+	if afterTitleApply.Overview != "" || len(afterTitleApply.Tags) != 0 || len(afterTitleApply.Chapters) != 1 {
+		t.Fatalf("expected overview/tags/chapters untouched, got overview=%q tags=%v chapters=%d",
+			afterTitleApply.Overview, afterTitleApply.Tags, len(afterTitleApply.Chapters))
+	}
+
+	// Now apply chapters and tags and verify playback progress on l1ID is preserved
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/ai/apply", map[string]any{
+		"apply_title":    false,
+		"apply_overview": true,
+		"apply_tags":     true,
+		"apply_chapters": true,
+		"overview":       "Learn Docker from scratch.",
+		"tags":           []string{"docker", "devops"},
+		"chapters": []map[string]any{
+			{
+				"title":   "Getting Started",
+				"lessons": []map[string]any{{"lesson_id": l1ID, "title": "Environment Setup"}},
+			},
+			{
+				"title":   "Core Concepts",
+				"lessons": []map[string]any{{"lesson_id": l2ID, "title": "Containers Deep Dive"}},
+			},
+		},
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /ai/apply (chapters) = %d, want 200: %s", resp.StatusCode, raw)
+	}
+
+	afterFullApply, err := env.catSvc.GetCourseDetail(context.Background(), course.ID)
+	if err != nil {
+		t.Fatalf("GetCourseDetail: %v", err)
+	}
+	if len(afterFullApply.Chapters) != 2 || afterFullApply.Chapters[0].Lessons[0].Title != "Environment Setup" {
+		t.Fatalf("expected 2 reorganized chapters, got %+v", afterFullApply.Chapters)
+	}
+	if afterFullApply.Chapters[0].Lessons[0].PositionTicks != 420000000 {
+		t.Fatalf("expected lesson progress preserved after chapter reorganization, got %d", afterFullApply.Chapters[0].Lessons[0].PositionTicks)
+	}
+}
+
+func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
+	env := setupAPITestEnv(t)
+
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret", auth.DeviceInfo{DeviceID: "d1"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	courseDir := filepath.Join(env.mediaDir, "Codecs")
+	writeDummyFile(t, filepath.Join(courseDir, "01_direct.mp4"), []byte("mp4"))
+	writeDummyFile(t, filepath.Join(courseDir, "01_direct.zh.srt"), []byte("1\n00:00:00,000 --> 00:00:01,000\n你好\n"))
+	writeDummyFile(t, filepath.Join(courseDir, "02_hls.mkv"), []byte("mkv"))
+	writeDummyFile(t, filepath.Join(courseDir, "03_legacy.wmv"), []byte("wmv"))
+
+	src, err := env.catSvc.CreateSource(context.Background(), "Disk", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	course, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "Codecs",
+	})
+	if err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+
+	lessons := course.Chapters[0].Lessons
+	if len(lessons) != 3 {
+		t.Fatalf("expected 3 lessons, got %d", len(lessons))
+	}
+
+	type playbackResp struct {
+		Mode       string `json:"mode"`
+		StreamURL  string `json:"stream_url"`
+		VideoCodec string `json:"video_codec"`
+		AudioCodec string `json:"audio_codec"`
+		Container  string `json:"container"`
+		Subtitles  []struct {
+			Language string `json:"language"`
+			URL      string `json:"url"`
+		} `json:"subtitles"`
+	}
+
+	// 1. MP4 (h264/aac) -> direct
+	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[0].ID+"/playback", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET playback direct = %d: %s", resp.StatusCode, raw)
+	}
+	var p1 playbackResp
+	if err := json.Unmarshal(raw, &p1); err != nil {
+		t.Fatalf("unmarshal p1: %v", err)
+	}
+	if p1.Mode != "direct" || !strings.Contains(p1.StreamURL, "/Videos/"+lessons[0].ID+"/stream.mp4") || !strings.Contains(p1.StreamURL, "Static=true") {
+		t.Fatalf("expected direct mode and stream.mp4 URL, got %+v", p1)
+	}
+	if len(p1.Subtitles) != 1 || !strings.Contains(p1.Subtitles[0].URL, "Stream.vtt") {
+		t.Fatalf("expected 1 VTT subtitle URL, got %+v", p1.Subtitles)
+	}
+
+	// 2. MKV (h264/ac3) -> hls
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[1].ID+"/playback", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET playback hls = %d: %s", resp.StatusCode, raw)
+	}
+	var p2 playbackResp
+	if err := json.Unmarshal(raw, &p2); err != nil {
+		t.Fatalf("unmarshal p2: %v", err)
+	}
+	if p2.Mode != "hls" || !strings.Contains(p2.StreamURL, "/Videos/"+lessons[1].ID+"/master.m3u8") || !strings.Contains(p2.StreamURL, "PlaySessionId=") {
+		t.Fatalf("expected hls mode and master.m3u8 URL, got %+v", p2)
+	}
+
+	// 3. WMV (wmv3/wmav2) -> unsupported
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[2].ID+"/playback", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET playback unsupported = %d: %s", resp.StatusCode, raw)
+	}
+	var p3 playbackResp
+	if err := json.Unmarshal(raw, &p3); err != nil {
+		t.Fatalf("unmarshal p3: %v", err)
+	}
+	if p3.Mode != "unsupported" || p3.StreamURL != "" {
+		t.Fatalf("expected unsupported mode with empty stream_url, got %+v", p3)
+	}
+}
+
+func TestCourseCoverUploadAndLessonFramePick(t *testing.T) {
+	env := setupAPITestEnv(t)
+
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret", auth.DeviceInfo{DeviceID: "d1"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	courseDir := filepath.Join(env.mediaDir, "CoverCourse")
+	writeDummyFile(t, filepath.Join(courseDir, "01.mp4"), []byte("mp4"))
+	src, err := env.catSvc.CreateSource(context.Background(), "Disk", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	course, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "CoverCourse",
+	})
+	if err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+	lessonID := course.Chapters[0].Lessons[0].ID
+
+	// 1. Pick lesson thumbnail frame as cover
+	resp, raw := env.doJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/cover", map[string]string{
+		"lesson_id": lessonID,
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /cover lesson_id = %d: %s", resp.StatusCode, raw)
+	}
+	var updated catalog.CourseDetail
+	if err := json.Unmarshal(raw, &updated); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if updated.CoverPath == "" {
+		t.Fatalf("expected non-empty cover_path after frame pick")
+	}
+	if _, err := os.Stat(filepath.Join(env.dataDir, "covers", updated.CoverPath)); err != nil {
+		t.Fatalf("expected cover file in dataDir/covers: %v", err)
+	}
+
+	// 2. Upload multipart PNG cover
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("file", "poster.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
+	_ = png.Encode(fw, img)
+	_ = mw.Close()
+
+	req, err := http.NewRequest(http.MethodPost, env.server.URL+"/api/v1/courses/"+course.ID+"/cover", &body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+	upResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("upload cover: %v", err)
+	}
+	defer upResp.Body.Close()
+	upRaw, _ := io.ReadAll(upResp.Body)
+	if upResp.StatusCode != http.StatusOK {
+		t.Fatalf("multipart POST /cover = %d: %s", upResp.StatusCode, upRaw)
+	}
+	if err := json.Unmarshal(upRaw, &updated); err != nil {
+		t.Fatalf("unmarshal upload resp: %v", err)
+	}
+	if !strings.HasSuffix(updated.CoverPath, ".png") {
+		t.Fatalf("expected .png cover_path, got %q", updated.CoverPath)
+	}
+
+	// Ensure id package is used cleanly if needed
+	_ = id.New()
+}
