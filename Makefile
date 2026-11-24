@@ -19,4 +19,4 @@ test:
 	$(PNPM) --dir web test
 
 docker-build:
-	docker build -t coursefin:$(VERSION) -t coursefin:latest .
+	docker build --build-arg VERSION=$(VERSION) -t coursefin:$(VERSION) -t coursefin:latest .
