@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { StrictMode, useState } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -740,5 +740,209 @@ describe('UpdateContext & Update API client', () => {
     });
     expect(screen.getByTestId('applying-err')).toHaveTextContent('false');
     expect(screen.getByTestId('phase-err')).toHaveTextContent('idle');
+  });
+
+  it('loads initial authenticated status cleanly inside React StrictMode', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          return jsonResponse(makeStatus({ current_version: '1.0.1', latest_version: '1.0.2' }));
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <StrictMode>
+        <UpdateProvider>
+          <UpdateHarness />
+        </UpdateProvider>
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('current-version')).toHaveTextContent('1.0.1');
+    });
+    expect(screen.getByTestId('latest-version')).toHaveTextContent('1.0.2');
+    expect(screen.getByTestId('loading')).toHaveTextContent('false');
+  });
+
+  it('allows refreshStatus() to update status after timeout or rolled_back', async () => {
+    let phase: 'timeout_run' | 'after_timeout' | 'rollback_run' | 'after_rollback' = 'timeout_run';
+    let statusPolls = 0;
+    let healthPolls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          statusPolls += 1;
+          if (phase === 'timeout_run') {
+            if (statusPolls === 1) {
+              return jsonResponse(makeStatus({ state: 'idle' }));
+            }
+            return jsonResponse(makeStatus({ state: 'restarting', target_version: '1.0.2' }));
+          }
+          if (phase === 'after_timeout') {
+            return jsonResponse(
+              makeStatus({
+                current_version: '1.0.2',
+                latest_version: '1.0.2',
+                update_available: false,
+                state: 'idle',
+              }),
+            );
+          }
+          if (phase === 'rollback_run') {
+            return jsonResponse({ error: 'bad gateway' }, 502);
+          }
+          return jsonResponse(
+            makeStatus({
+              current_version: '1.0.1',
+              latest_version: '1.0.3',
+              update_available: true,
+              state: 'idle',
+            }),
+          );
+        }
+
+        if (url === '/health' && method === 'GET') {
+          healthPolls += 1;
+          if (phase === 'timeout_run') {
+            if (healthPolls === 1) {
+              return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-1' });
+            }
+            throw new TypeError('Failed to fetch');
+          }
+          if (phase === 'rollback_run') {
+            if (healthPolls === 2) {
+              return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-1' });
+            }
+            return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-2' });
+          }
+          return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-2' });
+        }
+
+        if (url === '/api/v1/system/update/apply' && method === 'POST') {
+          return jsonResponse(
+            makeStatus({ state: 'downloading', target_version: '1.0.2' }),
+            202,
+          );
+        }
+
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <UpdateProvider pollIntervalMs={15} healthPollIntervalMs={15} restartTimeoutMs={70}>
+        <UpdateHarness />
+      </UpdateProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('current-version')).toHaveTextContent('1.0.1');
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '开始更新' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-phase')).toHaveTextContent('timeout');
+    });
+
+    phase = 'after_timeout';
+    await user.click(screen.getByRole('button', { name: '刷新状态' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('current-version')).toHaveTextContent('1.0.2');
+    });
+    expect(screen.getByTestId('action-result')).toHaveTextContent('refresh:idle');
+
+    // Now test refreshStatus() after rolled_back
+    phase = 'rollback_run';
+    healthPolls = 1;
+    await user.click(screen.getByRole('button', { name: '开始更新' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-phase')).toHaveTextContent('rolled_back');
+    });
+
+    phase = 'after_rollback';
+    await user.click(screen.getByRole('button', { name: '刷新状态' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('latest-version')).toHaveTextContent('1.0.3');
+    });
+    expect(screen.getByTestId('action-result')).toHaveTextContent('refresh:idle');
+  });
+
+  it('does not let a late pre-restart /health probe overwrite initialBootIdRef when resuming an active update', async () => {
+    let statusPolls = 0;
+    let healthCalls = 0;
+    let resolveLateHealth!: (res: Response) => void;
+    const lateHealthPromise = new Promise<Response>((resolve) => {
+      resolveLateHealth = resolve;
+    });
+    const onReload = vi.fn();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          statusPolls += 1;
+          if (statusPolls === 1) {
+            return jsonResponse(
+              makeStatus({ state: 'downloading', target_version: '1.0.2', progress_percent: 50 }),
+            );
+          }
+          return jsonResponse({ error: 'bad gateway' }, 502);
+        }
+
+        if (url === '/health' && method === 'GET') {
+          healthCalls += 1;
+          if (healthCalls === 1) {
+            return lateHealthPromise;
+          }
+          return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-rolled-back-2' });
+        }
+
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <UpdateProvider
+        pollIntervalMs={15}
+        healthPollIntervalMs={30}
+        restartTimeoutMs={150}
+        onReload={onReload}
+      >
+        <UpdateHarness />
+      </UpdateProvider>,
+    );
+
+    // Wait until status poll hits 502 and transitions to restartPhase === 'waiting'
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-phase')).toHaveTextContent('waiting');
+    });
+
+    // Late pre-restart /health resolves AFTER restart waiting already started,
+    // returning the new rolled-back boot_id. It must NOT overwrite initialBootIdRef.
+    resolveLateHealth(
+      jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-rolled-back-2' }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-phase')).toHaveTextContent('rolled_back');
+    });
+    expect(onReload).not.toHaveBeenCalled();
+    expect(screen.getByTestId('restart-error').textContent).toMatch(/回滚.*1\.0\.1/);
   });
 });

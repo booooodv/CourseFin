@@ -116,6 +116,7 @@ export function UpdateProvider({
   const applyingRef = useRef(false);
   const restartPhaseRef = useRef<RestartPhase>('idle');
   const refreshPromiseRef = useRef<Promise<UpdateStatus | null> | null>(null);
+  const refreshPromiseRunIdRef = useRef<number>(-1);
 
   const runIdRef = useRef(0);
   const initialBootIdRef = useRef<string | null>(null);
@@ -431,12 +432,16 @@ export function UpdateProvider({
   );
 
   const refreshStatus = useCallback(async (): Promise<UpdateStatus | null> => {
-    if (refreshPromiseRef.current) {
+    if (
+      refreshPromiseRef.current &&
+      refreshPromiseRunIdRef.current === runIdRef.current
+    ) {
       return refreshPromiseRef.current;
     }
 
-    const promise = (async (): Promise<UpdateStatus | null> => {
-      const runIdAtStart = runIdRef.current;
+    const runIdAtStart = runIdRef.current;
+    let promise: Promise<UpdateStatus | null> | null = null;
+    promise = (async (): Promise<UpdateStatus | null> => {
       if (mountedRef.current) {
         setLoading(true);
       }
@@ -446,7 +451,8 @@ export function UpdateProvider({
           !mountedRef.current ||
           runIdRef.current !== runIdAtStart ||
           applyingRef.current ||
-          restartPhaseRef.current !== 'idle'
+          restartPhaseRef.current === 'waiting' ||
+          restartPhaseRef.current === 'succeeded'
         ) {
           return statusRef.current;
         }
@@ -454,29 +460,34 @@ export function UpdateProvider({
 
         if (isActiveUpdateState(next.state)) {
           const runId = ++runIdRef.current;
+          initialBootIdRef.current = null;
+          sawDisconnectRef.current = false;
           targetVersionRef.current = normalizeVersion(
             next.target_version || next.latest_version || '',
           );
           applyingRef.current = true;
+          restartPhaseRef.current = 'idle';
           setApplying(true);
+          setRestartPhase('idle');
+          setRestartError(null);
 
           if (next.state === 'restarting') {
             enterRestartWaiting(runId);
           } else {
-            if (!initialBootIdRef.current) {
-              void api
-                .getHealth()
-                .then((health) => {
-                  if (
-                    mountedRef.current &&
-                    runIdRef.current === runId &&
-                    !initialBootIdRef.current
-                  ) {
-                    initialBootIdRef.current = health.boot_id || null;
-                  }
-                })
-                .catch(() => {});
-            }
+            void api
+              .getHealth()
+              .then((health) => {
+                if (
+                  mountedRef.current &&
+                  runIdRef.current === runId &&
+                  restartPhaseRef.current === 'idle' &&
+                  !sawDisconnectRef.current &&
+                  !initialBootIdRef.current
+                ) {
+                  initialBootIdRef.current = health.boot_id || null;
+                }
+              })
+              .catch(() => {});
             scheduleActivePoll(runId);
           }
         }
@@ -485,14 +496,18 @@ export function UpdateProvider({
       } catch {
         return null;
       } finally {
-        refreshPromiseRef.current = null;
-        if (mountedRef.current) {
-          setLoading(false);
+        if (promise && refreshPromiseRef.current === promise) {
+          refreshPromiseRef.current = null;
+          refreshPromiseRunIdRef.current = -1;
+          if (mountedRef.current) {
+            setLoading(false);
+          }
         }
       }
     })();
 
     refreshPromiseRef.current = promise;
+    refreshPromiseRunIdRef.current = runIdAtStart;
     return promise;
   }, [enterRestartWaiting, scheduleActivePoll]);
 
@@ -590,6 +605,8 @@ export function UpdateProvider({
     return () => {
       mountedRef.current = false;
       runIdRef.current += 1;
+      refreshPromiseRef.current = null;
+      refreshPromiseRunIdRef.current = -1;
       clearAllTimers();
     };
   }, [clearAllTimers]);
