@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Folder,
   FolderInput,
+  FolderOpen,
   HardDrive,
   Loader2,
   Plus,
@@ -17,7 +18,10 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../api/client';
+import DirectoryPickerModal from '../components/DirectoryPickerModal';
 import ImportCourseModal from '../components/ImportCourseModal';
+import { useToast } from '../components/Toast';
+import Tooltip from '../components/Tooltip';
 import type {
   CourseDetail,
   IndexedDir,
@@ -39,7 +43,15 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
+function basenameFromPath(absPath: string): string {
+  const cleaned = absPath.trim().replace(/[\\/]+$/, '');
+  if (!cleaned || /^[A-Za-z]:$/.test(cleaned)) return '';
+  const parts = cleaned.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] ?? '';
+}
+
 export default function StoragePage() {
+  const { toast } = useToast();
   const [sources, setSources] = useState<StorageSource[]>([]);
   const [libraries, setLibraries] = useState<Library[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,6 +60,7 @@ export default function StoragePage() {
 
   // Add source form
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showDirPicker, setShowDirPicker] = useState(false);
   const [sourceName, setSourceName] = useState('');
   const [sourceRootPath, setSourceRootPath] = useState('');
   const [creatingSource, setCreatingSource] = useState(false);
@@ -228,10 +241,13 @@ export default function StoragePage() {
         setScanStates((prev) => ({ ...prev, [sourceId]: res }));
         if (res.running) {
           startPolling(sourceId);
+          toast.info('已启动后台扫描，正在索引视频与字幕');
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '触发扫描失败');
+      const msg = err instanceof Error ? err.message : '触发扫描失败';
+      setError(msg);
+      toast.error(msg);
     }
   }
 
@@ -252,9 +268,12 @@ export default function StoragePage() {
       setShowAddForm(false);
       setSelectedSourceId(created.id);
       setCurrentPrefix('');
+      toast.success(`已添加存储源「${created.name}」`);
       await loadBrowseData(created.id, '', fileStatusFilter, fileSearch);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '添加存储源失败');
+      const msg = err instanceof Error ? err.message : '添加存储源失败';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setCreatingSource(false);
     }
@@ -262,11 +281,13 @@ export default function StoragePage() {
 
   async function handleDeleteSource(sourceId: string) {
     setError(null);
+    const targetName = sources.find((s) => s.id === sourceId)?.name;
     stopPolling(sourceId);
     try {
       await api.deleteSource(sourceId);
       const remaining = sources.filter((s) => s.id !== sourceId);
       setSources(remaining);
+      toast.success(targetName ? `已删除存储源「${targetName}」` : '已删除存储源');
       if (selectedSourceId === sourceId) {
         const nextId = remaining[0]?.id ?? '';
         setSelectedSourceId(nextId);
@@ -274,8 +295,21 @@ export default function StoragePage() {
         await loadBrowseData(nextId, '', fileStatusFilter, fileSearch);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除存储源失败');
+      const msg = err instanceof Error ? err.message : '删除存储源失败';
+      setError(msg);
+      toast.error(msg);
     }
+  }
+
+  function handleDirectorySelected(selectedPath: string) {
+    setSourceRootPath(selectedPath);
+    if (!sourceName.trim()) {
+      const guessed = basenameFromPath(selectedPath);
+      if (guessed) {
+        setSourceName(guessed);
+      }
+    }
+    toast.info(`已选择目录：${selectedPath}`);
   }
 
   async function handleSelectSource(sourceId: string) {
@@ -323,22 +357,26 @@ export default function StoragePage() {
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setShowAddForm((v) => !v)}
-          className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
-        >
-          <Plus className="h-4 w-4" />
-          <span>添加存储源</span>
-        </button>
+        <Tooltip content="新增一个本地媒体目录用于扫描和导入课程">
+          <button
+            type="button"
+            onClick={() => setShowAddForm((v) => !v)}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
+          >
+            <Plus className="h-4 w-4" />
+            <span>添加存储源</span>
+          </button>
+        </Tooltip>
       </div>
 
       {error && (
         <div className="flex items-center justify-between rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-sm text-rose-200">
           <span>{error}</span>
-          <button type="button" onClick={() => setError(null)} className="text-rose-300 hover:text-white">
-            <X className="h-4 w-4" />
-          </button>
+          <Tooltip content="关闭错误提示">
+            <button type="button" onClick={() => setError(null)} className="text-rose-300 hover:text-white">
+              <X className="h-4 w-4" />
+            </button>
+          </Tooltip>
         </div>
       )}
 
@@ -392,15 +430,27 @@ export default function StoragePage() {
               <label htmlFor="source-path-input" className="block text-xs font-medium text-slate-300">
                 本地目录绝对路径
               </label>
-              <input
-                id="source-path-input"
-                type="text"
-                value={sourceRootPath}
-                onChange={(e) => setSourceRootPath(e.target.value)}
-                placeholder="/Users/name/Courses"
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
-                required
-              />
+              <div className="flex items-center gap-2">
+                <input
+                  id="source-path-input"
+                  type="text"
+                  value={sourceRootPath}
+                  onChange={(e) => setSourceRootPath(e.target.value)}
+                  placeholder="/Users/name/Courses"
+                  className="flex-1 min-w-0 rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                  required
+                />
+                <Tooltip content="浏览服务器上的本地目录并选择绝对路径">
+                  <button
+                    type="button"
+                    onClick={() => setShowDirPicker(true)}
+                    className="shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition-colors"
+                  >
+                    <FolderOpen className="h-4 w-4 text-indigo-400" />
+                    <span>浏览目录</span>
+                  </button>
+                </Tooltip>
+              </div>
             </div>
           </div>
           <div className="flex justify-end gap-2">
@@ -411,13 +461,15 @@ export default function StoragePage() {
             >
               取消
             </button>
-            <button
-              type="submit"
-              disabled={creatingSource}
-              className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
-            >
-              {creatingSource ? '保存中...' : '确认添加'}
-            </button>
+            <Tooltip content="保存此存储源配置，随后可执行扫描">
+              <button
+                type="submit"
+                disabled={creatingSource}
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {creatingSource ? '保存中...' : '确认添加'}
+              </button>
+            </Tooltip>
           </div>
         </form>
       )}
@@ -465,24 +517,28 @@ export default function StoragePage() {
                     </button>
 
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        disabled={isRunning}
-                        onClick={() => void handleStartScan(src.id)}
-                        className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20 disabled:opacity-60 transition-colors"
-                      >
-                        <RefreshCw className={`h-3.5 w-3.5 ${isRunning ? 'animate-spin' : ''}`} />
-                        <span>{isRunning ? '扫描中...' : '扫描'}</span>
-                      </button>
+                      <Tooltip content="扫描该目录下的视频与字幕文件并更新索引">
+                        <button
+                          type="button"
+                          disabled={isRunning}
+                          onClick={() => void handleStartScan(src.id)}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20 disabled:opacity-60 transition-colors"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${isRunning ? 'animate-spin' : ''}`} />
+                          <span>{isRunning ? '扫描中...' : '扫描'}</span>
+                        </button>
+                      </Tooltip>
 
-                      <button
-                        type="button"
-                        aria-label={`删除存储源 ${src.name}`}
-                        onClick={() => void handleDeleteSource(src.id)}
-                        className="rounded-xl p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300 transition-colors"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      <Tooltip content="删除此存储源配置（不删除本地文件）">
+                        <button
+                          type="button"
+                          aria-label={`删除存储源 ${src.name}`}
+                          onClick={() => void handleDeleteSource(src.id)}
+                          className="rounded-xl p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300 transition-colors"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </Tooltip>
                     </div>
                   </div>
 
@@ -548,16 +604,18 @@ export default function StoragePage() {
             </div>
 
             {(currentPrefix || files.length > 0) && (
-              <button
-                type="button"
-                onClick={() =>
-                  setImportTarget({ sourceId: selectedSource.id, dirRelPath: currentPrefix })
-                }
-                className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
-              >
-                <FolderInput className="h-3.5 w-3.5" />
-                <span>导入当前目录</span>
-              </button>
+              <Tooltip content="将当前浏览的目录解析并导入为一门课程">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setImportTarget({ sourceId: selectedSource.id, dirRelPath: currentPrefix })
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+                >
+                  <FolderInput className="h-3.5 w-3.5" />
+                  <span>导入当前目录</span>
+                </button>
+              </Tooltip>
             )}
           </div>
 
@@ -598,16 +656,18 @@ export default function StoragePage() {
                           </div>
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setImportTarget({ sourceId: selectedSource.id, dirRelPath: dir.rel_path })
-                          }
-                          className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600/90 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
-                        >
-                          <FolderInput className="h-3.5 w-3.5" />
-                          <span>一键导入为课程</span>
-                        </button>
+                        <Tooltip content="预览该目录结构并导入为课程">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setImportTarget({ sourceId: selectedSource.id, dirRelPath: dir.rel_path })
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600/90 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
+                          >
+                            <FolderInput className="h-3.5 w-3.5" />
+                            <span>一键导入为课程</span>
+                          </button>
+                        </Tooltip>
                       </div>
                     ))}
                   </div>
@@ -633,23 +693,24 @@ export default function StoragePage() {
                     <div className="inline-flex rounded-xl border border-slate-800 bg-slate-950 p-0.5 text-xs">
                       {(
                         [
-                          { id: 'all', label: '全部' },
-                          { id: 'active', label: '正常' },
-                          { id: 'missing', label: '缺失' },
+                          { id: 'all', label: '全部', tip: '显示所有状态的媒体文件' },
+                          { id: 'active', label: '正常', tip: '仅显示磁盘上存在的有效文件' },
+                          { id: 'missing', label: '缺失', tip: '仅显示扫描时未找到的缺失文件' },
                         ] as const
                       ).map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => void handleFilterChange(opt.id)}
-                          className={`rounded-lg px-2.5 py-1 transition-colors ${
-                            fileStatusFilter === opt.id
-                              ? 'bg-indigo-600 text-white font-medium'
-                              : 'text-slate-400 hover:text-white'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
+                        <Tooltip key={opt.id} content={opt.tip}>
+                          <button
+                            type="button"
+                            onClick={() => void handleFilterChange(opt.id)}
+                            className={`rounded-lg px-2.5 py-1 transition-colors ${
+                              fileStatusFilter === opt.id
+                                ? 'bg-indigo-600 text-white font-medium'
+                                : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        </Tooltip>
                       ))}
                     </div>
 
@@ -706,6 +767,14 @@ export default function StoragePage() {
         </section>
       )}
 
+      {/* Server Directory Picker Modal */}
+      <DirectoryPickerModal
+        isOpen={showDirPicker}
+        initialPath={sourceRootPath}
+        onClose={() => setShowDirPicker(false)}
+        onSelect={handleDirectorySelected}
+      />
+
       {/* Import Course Modal */}
       {importTarget && (
         <ImportCourseModal
@@ -717,6 +786,7 @@ export default function StoragePage() {
           onLibraryCreated={(lib) => setLibraries((prev) => [...prev, lib])}
           onImported={(course) => {
             setImportedCourse(course);
+            toast.success(`已成功导入课程「${course.title}」`);
           }}
         />
       )}
