@@ -28,6 +28,9 @@ interface ImportCourseModalProps {
   onLibraryCreated?: (lib: Library) => void;
 }
 
+const FIELD_INPUT_CLASS =
+  'w-full rounded-xl border border-default bg-subtle/60 px-3.5 py-2 text-sm text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors';
+
 function formatDuration(durationMs: number): string {
   if (!durationMs || durationMs <= 0) return '';
   const totalSec = Math.round(durationMs / 1000);
@@ -106,6 +109,17 @@ export default function ImportCourseModal({
     if (!isOpen) return;
     void loadPreview();
   }, [isOpen, loadPreview]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !submitting) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, submitting, onClose]);
 
   if (!isOpen) return null;
 
@@ -203,26 +217,26 @@ export default function ImportCourseModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="import-course-modal-title"
     >
       <form
         onSubmit={handleSubmit}
-        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl"
+        className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-subtle bg-popover shadow-float"
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-500/15 text-indigo-400">
+        <div className="flex items-center justify-between border-b border-subtle px-6 py-4">
+          <div className="flex items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-ink">
               <FolderInput className="h-4 w-4" />
             </span>
             <div>
-              <h2 id="import-course-modal-title" className="text-base font-bold text-white">
+              <h2 id="import-course-modal-title" className="text-base font-bold text-ink-primary">
                 导入为课程
               </h2>
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-ink-muted">
                 目录：{dirRelPath || '（存储根目录）'}
               </p>
             </div>
@@ -232,8 +246,9 @@ export default function ImportCourseModal({
             <button
               type="button"
               aria-label="关闭"
+              disabled={submitting}
               onClick={onClose}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+              className="rounded-lg p-1.5 text-ink-muted hover:bg-subtle hover:text-ink-primary transition-colors disabled:opacity-50 cursor-pointer"
             >
               <X className="h-5 w-5" />
             </button>
@@ -243,14 +258,14 @@ export default function ImportCourseModal({
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
           {loading && (
-            <div className="flex flex-col items-center justify-center py-16 text-slate-300 gap-3">
-              <Loader2 className="h-8 w-8 animate-spin text-indigo-400" />
-              <p className="text-sm">正在解析目录结构与视频文件...</p>
+            <div className="flex flex-col items-center justify-center py-16 text-ink-secondary gap-3">
+              <Loader2 className="h-8 w-8 animate-spin text-accent" />
+              <p className="text-sm font-medium">正在解析目录结构与视频文件...</p>
             </div>
           )}
 
           {error && (
-            <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3.5 text-sm text-rose-200">
+            <div className="rounded-2xl border border-status-danger/30 bg-status-danger-soft p-3.5 text-sm text-status-danger-ink">
               {error}
             </div>
           )}
@@ -259,7 +274,7 @@ export default function ImportCourseModal({
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor="import-course-title" className="block text-xs font-medium text-slate-300">
+                  <label htmlFor="import-course-title" className="block text-xs font-medium text-ink-secondary">
                     课程标题
                   </label>
                   <input
@@ -267,21 +282,21 @@ export default function ImportCourseModal({
                     type="text"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                    className={FIELD_INPUT_CLASS}
                     required
                   />
                 </div>
 
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <label htmlFor="import-library-id" className="block text-xs font-medium text-slate-300">
+                    <label htmlFor="import-library-id" className="block text-xs font-medium text-ink-secondary">
                       所属媒体库
                     </label>
                     <Tooltip content="在此快速新建一个目标媒体库">
                       <button
                         type="button"
                         onClick={() => setShowNewLib((v) => !v)}
-                        className="inline-flex items-center gap-1 text-[11px] text-indigo-300 hover:text-indigo-200"
+                        className="inline-flex items-center gap-1 text-[11px] font-medium text-accent-ink hover:opacity-80 cursor-pointer"
                       >
                         <Plus className="h-3 w-3" />
                         <span>新建媒体库</span>
@@ -292,7 +307,7 @@ export default function ImportCourseModal({
                     id="import-library-id"
                     value={libraryId}
                     onChange={(e) => setLibraryId(e.target.value)}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                    className={FIELD_INPUT_CLASS}
                   >
                     {localLibraries.length === 0 && <option value="">请先创建媒体库</option>}
                     {localLibraries.map((lib) => (
@@ -309,13 +324,13 @@ export default function ImportCourseModal({
                         value={creatingLibName}
                         onChange={(e) => setCreatingLibName(e.target.value)}
                         placeholder="新媒体库名称"
-                        className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                        className="flex-1 rounded-xl border border-default bg-subtle/60 px-3 py-1.5 text-xs text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
                       />
                       <button
                         type="button"
                         onClick={() => void handleCreateInlineLibrary()}
                         disabled={creatingLib}
-                        className="rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                        className="rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
                       >
                         创建
                       </button>
@@ -324,7 +339,7 @@ export default function ImportCourseModal({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label htmlFor="import-instructor" className="block text-xs font-medium text-slate-300">
+                  <label htmlFor="import-instructor" className="block text-xs font-medium text-ink-secondary">
                     讲师（可选）
                   </label>
                   <input
@@ -333,12 +348,12 @@ export default function ImportCourseModal({
                     value={instructor}
                     onChange={(e) => setInstructor(e.target.value)}
                     placeholder="例如：张老师"
-                    className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                    className={FIELD_INPUT_CLASS}
                   />
                 </div>
 
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor="import-overview" className="block text-xs font-medium text-slate-300">
+                  <label htmlFor="import-overview" className="block text-xs font-medium text-ink-secondary">
                     课程简介（可选）
                   </label>
                   <textarea
@@ -347,32 +362,34 @@ export default function ImportCourseModal({
                     value={overview}
                     onChange={(e) => setOverview(e.target.value)}
                     placeholder="课程介绍或学习目标..."
-                    className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                    className={FIELD_INPUT_CLASS}
                   />
                 </div>
 
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor="import-tag-input" className="block text-xs font-medium text-slate-300">
+                  <label htmlFor="import-tag-input" className="block text-xs font-medium text-ink-secondary">
                     标签（可选）
                   </label>
-                  <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
-                    {tags.map((t) => (
-                      <span
-                        key={t}
-                        className="inline-flex items-center gap-1 rounded-full border border-indigo-500/30 bg-indigo-500/15 px-2.5 py-0.5 text-xs text-indigo-200"
-                      >
-                        {t}
-                        <button
-                          type="button"
-                          aria-label={`移除标签 ${t}`}
-                          onClick={() => setTags((prev) => prev.filter((item) => item !== t))}
-                          className="hover:text-white"
+                  {tags.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
+                      {tags.map((t) => (
+                        <span
+                          key={t}
+                          className="inline-flex items-center gap-1 rounded-full border border-accent-ring bg-accent-soft px-2.5 py-0.5 text-xs font-medium text-accent-ink"
                         >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
+                          {t}
+                          <button
+                            type="button"
+                            aria-label={`移除标签 ${t}`}
+                            onClick={() => setTags((prev) => prev.filter((item) => item !== t))}
+                            className="hover:opacity-75 cursor-pointer"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <input
                       id="import-tag-input"
@@ -386,13 +403,13 @@ export default function ImportCourseModal({
                         }
                       }}
                       placeholder="输入标签后按回车或点击添加"
-                      className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                      className="flex-1 rounded-xl border border-default bg-subtle/60 px-3 py-1.5 text-xs text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
                     />
                     <Tooltip content="将输入的标签添加到课程中">
                       <button
                         type="button"
                         onClick={handleAddTag}
-                        className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+                        className="rounded-xl border border-default bg-subtle px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors cursor-pointer"
                       >
                         添加标签
                       </button>
@@ -403,12 +420,12 @@ export default function ImportCourseModal({
 
               {/* Inferred Chapters & Lessons */}
               <div className="space-y-3">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span className="font-semibold text-slate-200">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-muted">
+                  <span className="font-semibold text-ink-primary">
                     识别到的章节与课时（共 {preview.total_files} 个视频）
                   </span>
                   {preview.cover_rel_path && (
-                    <span className="text-emerald-300">
+                    <span className="font-medium text-status-success-ink">
                       已自动检测封面：{preview.cover_rel_path}
                     </span>
                   )}
@@ -420,16 +437,18 @@ export default function ImportCourseModal({
                     return (
                       <div
                         key={`ch-${chIdx}`}
-                        className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2.5"
+                        className="rounded-2xl border border-subtle bg-subtle p-4 space-y-2.5"
                       >
                         <div className="flex items-center gap-2">
-                          <span className="text-xs text-slate-500 shrink-0">第 {chIdx + 1} 章</span>
+                          <span className="text-xs font-medium text-ink-muted shrink-0">
+                            第 {chIdx + 1} 章
+                          </span>
                           <input
                             type="text"
                             aria-label={`第 ${chIdx + 1} 章标题`}
                             value={ch.title}
                             onChange={(e) => updateChapterTitle(chIdx, e.target.value)}
-                            className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-sm font-semibold text-white focus:border-indigo-500 focus:outline-none"
+                            className="flex-1 rounded-xl border border-default bg-card px-3 py-1.5 text-sm font-semibold text-ink-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
                           />
                         </div>
 
@@ -439,16 +458,16 @@ export default function ImportCourseModal({
                             const durationText = orig ? formatDuration(orig.duration_ms) : '';
                             return (
                               <div key={lesson.media_file_id} className="flex items-center gap-2">
-                                <Video className="h-3.5 w-3.5 text-slate-500 shrink-0" />
+                                <Video className="h-3.5 w-3.5 text-ink-muted shrink-0" />
                                 <input
                                   type="text"
                                   aria-label={`课时 ${lIdx + 1} 标题`}
                                   value={lesson.title}
                                   onChange={(e) => updateLessonTitle(chIdx, lIdx, e.target.value)}
-                                  className="flex-1 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1 text-xs text-slate-200 focus:border-indigo-500 focus:outline-none"
+                                  className="flex-1 rounded-xl border border-subtle bg-card px-2.5 py-1 text-xs text-ink-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
                                 />
                                 {durationText && (
-                                  <span className="text-[11px] tabular-nums text-slate-500 shrink-0">
+                                  <span className="text-[11px] tabular-nums text-ink-muted shrink-0">
                                     {durationText}
                                   </span>
                                 )}
@@ -466,12 +485,12 @@ export default function ImportCourseModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2.5 border-t border-slate-800 px-6 py-4 bg-slate-900/95">
+        <div className="flex items-center justify-end gap-2.5 border-t border-subtle bg-subtle/40 px-6 py-4">
           <button
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="rounded-xl border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800 transition-colors"
+            className="rounded-xl border border-default bg-card px-4 py-2 text-sm font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary disabled:opacity-50 transition-colors cursor-pointer"
           >
             取消
           </button>
@@ -479,7 +498,7 @@ export default function ImportCourseModal({
             <button
               type="submit"
               disabled={loading || submitting || !preview}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
             >
               {submitting ? (
                 <Loader2 className="h-4 w-4 animate-spin" />

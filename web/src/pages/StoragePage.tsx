@@ -22,6 +22,7 @@ import DirectoryPickerModal from '../components/DirectoryPickerModal';
 import ImportCourseModal from '../components/ImportCourseModal';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
+import { useLibrary } from '../contexts/LibraryContext';
 import type {
   CourseDetail,
   IndexedDir,
@@ -30,6 +31,9 @@ import type {
   ScanState,
   StorageSource,
 } from '../types/coursefin';
+
+const FIELD_INPUT_CLASS =
+  'w-full rounded-xl border border-default bg-subtle/60 px-3.5 py-2 text-sm text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors';
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 B';
@@ -52,8 +56,10 @@ function basenameFromPath(absPath: string): string {
 
 export default function StoragePage() {
   const { toast } = useToast();
+  const libCtx = useLibrary();
+
   const [sources, setSources] = useState<StorageSource[]>([]);
-  const [libraries, setLibraries] = useState<Library[]>([]);
+  const [localLibraries, setLocalLibraries] = useState<Library[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [importedCourse, setImportedCourse] = useState<CourseDetail | null>(null);
@@ -96,6 +102,8 @@ export default function StoragePage() {
   const [importTarget, setImportTarget] = useState<{ sourceId: string; dirRelPath: string } | null>(
     null,
   );
+
+  const libraries = libCtx.isProvided ? libCtx.libraries : localLibraries;
 
   // Cleanup all polling timers on unmount
   useEffect(() => {
@@ -195,10 +203,17 @@ export default function StoragePage() {
     setLoading(true);
     setError(null);
     try {
-      const [srcRes, libRes] = await Promise.all([api.listSources(), api.listLibraries()]);
-      const srcList = srcRes.sources ?? [];
+      let srcList: StorageSource[] = [];
+      if (libCtx.isProvided) {
+        const srcRes = await api.listSources();
+        srcList = srcRes.sources ?? [];
+      } else {
+        const [srcRes, libRes] = await Promise.all([api.listSources(), api.listLibraries()]);
+        srcList = srcRes.sources ?? [];
+        setLocalLibraries(libRes.libraries ?? []);
+      }
+
       setSources(srcList);
-      setLibraries(libRes.libraries ?? []);
       if (srcList.length > 0) {
         const initialId = srcList[0].id;
         setSelectedSourceId(initialId);
@@ -227,7 +242,7 @@ export default function StoragePage() {
     } finally {
       setLoading(false);
     }
-  }, [loadBrowseData, startPolling]);
+  }, [libCtx.isProvided, loadBrowseData, startPolling]);
 
   useEffect(() => {
     void loadInitial();
@@ -339,9 +354,9 @@ export default function StoragePage() {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3">
-        <Loader2 className="h-7 w-7 animate-spin text-indigo-400" />
-        <p className="text-sm">正在加载存储源与索引目录...</p>
+      <div className="flex flex-col items-center justify-center py-24 text-ink-muted gap-3">
+        <Loader2 className="h-7 w-7 animate-spin text-accent" />
+        <p className="text-sm font-medium">正在加载存储源与索引目录...</p>
       </div>
     );
   }
@@ -351,8 +366,8 @@ export default function StoragePage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-white">存储与导入</h1>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <h1 className="text-2xl font-bold tracking-tight text-ink-primary">存储与导入</h1>
+          <p className="text-xs text-ink-muted mt-1">
             配置本地媒体目录、运行视频扫描并一键导入为结构化课程。
           </p>
         </div>
@@ -361,7 +376,7 @@ export default function StoragePage() {
           <button
             type="button"
             onClick={() => setShowAddForm((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover transition-colors cursor-pointer"
           >
             <Plus className="h-4 w-4" />
             <span>添加存储源</span>
@@ -370,10 +385,14 @@ export default function StoragePage() {
       </div>
 
       {error && (
-        <div className="flex items-center justify-between rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-sm text-rose-200">
+        <div className="flex items-center justify-between rounded-2xl border border-status-danger/30 bg-status-danger-soft px-4 py-3 text-sm text-status-danger-ink">
           <span>{error}</span>
           <Tooltip content="关闭错误提示">
-            <button type="button" onClick={() => setError(null)} className="text-rose-300 hover:text-white">
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="rounded-lg p-1 text-status-danger-ink hover:bg-card/60 transition-colors cursor-pointer"
+            >
               <X className="h-4 w-4" />
             </button>
           </Tooltip>
@@ -381,22 +400,22 @@ export default function StoragePage() {
       )}
 
       {importedCourse && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
-          <span className="flex items-center gap-2">
-            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-status-success/30 bg-status-success-soft px-4 py-3 text-sm text-status-success-ink">
+          <span className="flex items-center gap-2 font-medium">
+            <CheckCircle2 className="h-4 w-4 text-status-success-ink shrink-0" />
             已成功导入课程「{importedCourse.title}」
           </span>
           <div className="flex items-center gap-3 text-xs font-semibold">
-            <Link to={`/courses/${importedCourse.id}`} className="text-white underline hover:text-indigo-200">
+            <Link to={`/courses/${importedCourse.id}`} className="text-ink-primary underline hover:text-accent-ink">
               去播放
             </Link>
-            <Link to={`/courses/${importedCourse.id}/edit`} className="text-indigo-300 underline hover:text-white">
+            <Link to={`/courses/${importedCourse.id}/edit`} className="text-accent-ink underline hover:opacity-80">
               编辑课程
             </Link>
             <button
               type="button"
               onClick={() => setImportedCourse(null)}
-              className="text-emerald-300 hover:text-white"
+              className="text-status-success-ink hover:opacity-80 cursor-pointer"
             >
               关闭
             </button>
@@ -408,12 +427,12 @@ export default function StoragePage() {
       {showAddForm && (
         <form
           onSubmit={handleCreateSource}
-          className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 space-y-4"
+          className="rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-4"
         >
-          <h2 className="text-sm font-semibold text-white">添加本地目录存储源</h2>
+          <h2 className="text-sm font-semibold text-ink-primary">添加本地目录存储源</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
-              <label htmlFor="source-name-input" className="block text-xs font-medium text-slate-300">
+              <label htmlFor="source-name-input" className="block text-xs font-medium text-ink-secondary">
                 存储源名称
               </label>
               <input
@@ -422,12 +441,12 @@ export default function StoragePage() {
                 value={sourceName}
                 onChange={(e) => setSourceName(e.target.value)}
                 placeholder="例如：我的课程硬盘"
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                className={FIELD_INPUT_CLASS}
                 required
               />
             </div>
             <div className="space-y-1.5">
-              <label htmlFor="source-path-input" className="block text-xs font-medium text-slate-300">
+              <label htmlFor="source-path-input" className="block text-xs font-medium text-ink-secondary">
                 本地目录绝对路径
               </label>
               <div className="flex items-center gap-2">
@@ -437,16 +456,16 @@ export default function StoragePage() {
                   value={sourceRootPath}
                   onChange={(e) => setSourceRootPath(e.target.value)}
                   placeholder="/Users/name/Courses"
-                  className="flex-1 min-w-0 rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                  className={`flex-1 min-w-0 ${FIELD_INPUT_CLASS}`}
                   required
                 />
                 <Tooltip content="浏览服务器上的本地目录并选择绝对路径">
                   <button
                     type="button"
                     onClick={() => setShowDirPicker(true)}
-                    className="shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 hover:text-white transition-colors"
+                    className="shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-3.5 py-2 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors cursor-pointer"
                   >
-                    <FolderOpen className="h-4 w-4 text-indigo-400" />
+                    <FolderOpen className="h-4 w-4 text-accent-ink" />
                     <span>浏览目录</span>
                   </button>
                 </Tooltip>
@@ -457,7 +476,7 @@ export default function StoragePage() {
             <button
               type="button"
               onClick={() => setShowAddForm(false)}
-              className="rounded-xl border border-slate-700 px-3.5 py-2 text-xs text-slate-300 hover:bg-slate-800"
+              className="rounded-xl border border-default bg-card px-4 py-2 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary transition-colors cursor-pointer"
             >
               取消
             </button>
@@ -465,7 +484,7 @@ export default function StoragePage() {
               <button
                 type="submit"
                 disabled={creatingSource}
-                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+                className="rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
               >
                 {creatingSource ? '保存中...' : '确认添加'}
               </button>
@@ -476,9 +495,9 @@ export default function StoragePage() {
 
       {/* Sources List */}
       <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-slate-200">已配置存储源</h2>
+        <h2 className="text-sm font-semibold text-ink-primary">已配置存储源</h2>
         {sources.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center text-sm text-slate-400">
+          <div className="rounded-3xl border border-dashed border-default bg-card/60 p-10 text-center text-sm text-ink-muted">
             暂未配置任何存储源，请先点击右上角“添加存储源”。
           </div>
         ) : (
@@ -491,25 +510,31 @@ export default function StoragePage() {
               return (
                 <div
                   key={src.id}
-                  className={`rounded-2xl border p-4 space-y-3 transition-colors ${
+                  className={`relative overflow-hidden rounded-3xl border bg-card p-5 space-y-3.5 shadow-card transition-all ${
                     isSelected
-                      ? 'border-indigo-500/60 bg-slate-900'
-                      : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'
+                      ? 'border-accent/40 ring-2 ring-accent-ring shadow-card-hover'
+                      : 'border-subtle hover:border-default hover:shadow-card-hover'
                   }`}
                 >
+                  {isSelected && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute left-0 top-5 bottom-5 w-1 rounded-r-full bg-accent"
+                    />
+                  )}
                   <div className="flex items-start justify-between gap-3">
                     <button
                       type="button"
                       onClick={() => void handleSelectSource(src.id)}
-                      className="flex items-start gap-3 text-left min-w-0 flex-1"
+                      className="flex items-start gap-3 text-left min-w-0 flex-1 cursor-pointer"
                     >
-                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-500/15 text-indigo-400">
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-accent-soft text-accent-ink">
                         <HardDrive className="h-4 w-4" />
                       </span>
                       <div className="min-w-0">
-                        <p className="text-sm font-semibold text-white truncate">{src.name}</p>
-                        <p className="text-xs text-slate-400 truncate">{src.root_path}</p>
-                        <p className="text-[11px] text-slate-500 mt-1">
+                        <p className="text-sm font-semibold text-ink-primary truncate">{src.name}</p>
+                        <p className="text-xs text-ink-secondary truncate">{src.root_path}</p>
+                        <p className="text-[11px] text-ink-muted mt-1">
                           已索引 {src.media_count} 个视频
                           {src.last_scanned_at ? ` · 上次扫描 ${src.last_scanned_at}` : ''}
                         </p>
@@ -522,7 +547,7 @@ export default function StoragePage() {
                           type="button"
                           disabled={isRunning}
                           onClick={() => void handleStartScan(src.id)}
-                          className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20 disabled:opacity-60 transition-colors"
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-accent-ring bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent-ink hover:bg-accent hover:text-ink-inverse disabled:opacity-60 transition-colors cursor-pointer"
                         >
                           <RefreshCw className={`h-3.5 w-3.5 ${isRunning ? 'animate-spin' : ''}`} />
                           <span>{isRunning ? '扫描中...' : '扫描'}</span>
@@ -534,7 +559,7 @@ export default function StoragePage() {
                           type="button"
                           aria-label={`删除存储源 ${src.name}`}
                           onClick={() => void handleDeleteSource(src.id)}
-                          className="rounded-xl p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300 transition-colors"
+                          className="rounded-xl p-2 text-ink-muted hover:bg-status-danger-soft hover:text-status-danger-ink transition-colors cursor-pointer"
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
@@ -543,12 +568,14 @@ export default function StoragePage() {
                   </div>
 
                   {st?.last_report && !isRunning && (
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-[11px] text-slate-300 flex flex-wrap gap-x-4 gap-y-1">
+                    <div className="rounded-2xl border border-subtle bg-subtle px-3.5 py-2 text-[11px] text-ink-secondary flex flex-wrap gap-x-4 gap-y-1">
                       <span>总视频：{st.last_report.total_videos}</span>
-                      <span className="text-emerald-300">新增：{st.last_report.added_videos}</span>
+                      <span className="font-medium text-status-success-ink">
+                        新增：{st.last_report.added_videos}
+                      </span>
                       <span>字幕：{st.last_report.total_subtitles}</span>
                       {st.last_report.missing_videos > 0 && (
-                        <span className="text-amber-300">
+                        <span className="font-medium text-status-warning-ink">
                           缺失：{st.last_report.missing_videos}
                         </span>
                       )}
@@ -556,7 +583,7 @@ export default function StoragePage() {
                   )}
 
                   {st?.last_error && (
-                    <p className="text-xs text-rose-400">扫描出错：{st.last_error}</p>
+                    <p className="text-xs text-status-danger-ink">扫描出错：{st.last_error}</p>
                   )}
                 </div>
               );
@@ -567,17 +594,17 @@ export default function StoragePage() {
 
       {/* Directory & File Browser */}
       {selectedSource && (
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/75 p-5 space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+        <section className="rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-subtle pb-4">
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
-              <span className="font-semibold text-white mr-1">目录浏览：</span>
+              <span className="font-semibold text-ink-primary mr-1">目录浏览：</span>
               <button
                 type="button"
                 onClick={() => void handleNavigatePrefix('')}
-                className={`rounded-lg px-2 py-1 transition-colors ${
+                className={`rounded-full px-3 py-1 transition-colors cursor-pointer ${
                   currentPrefix === ''
-                    ? 'bg-indigo-500/20 text-indigo-200 font-semibold'
-                    : 'text-slate-400 hover:text-white'
+                    ? 'bg-accent-soft text-accent-ink font-semibold'
+                    : 'text-ink-secondary hover:bg-subtle hover:text-ink-primary'
                 }`}
               >
                 {selectedSource.name}
@@ -586,14 +613,14 @@ export default function StoragePage() {
                 const targetPrefix = prefixParts.slice(0, idx + 1).join('/');
                 return (
                   <span key={targetPrefix} className="inline-flex items-center gap-1">
-                    <ChevronRight className="h-3.5 w-3.5 text-slate-600" />
+                    <ChevronRight className="h-3.5 w-3.5 text-ink-muted" />
                     <button
                       type="button"
                       onClick={() => void handleNavigatePrefix(targetPrefix)}
-                      className={`rounded-lg px-2 py-1 transition-colors ${
+                      className={`rounded-full px-3 py-1 transition-colors cursor-pointer ${
                         targetPrefix === currentPrefix
-                          ? 'bg-indigo-500/20 text-indigo-200 font-semibold'
-                          : 'text-slate-400 hover:text-white'
+                          ? 'bg-accent-soft text-accent-ink font-semibold'
+                          : 'text-ink-secondary hover:bg-subtle hover:text-ink-primary'
                       }`}
                     >
                       {part}
@@ -610,7 +637,7 @@ export default function StoragePage() {
                   onClick={() =>
                     setImportTarget({ sourceId: selectedSource.id, dirRelPath: currentPrefix })
                   }
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-accent px-3.5 py-1.5 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover transition-colors cursor-pointer"
                 >
                   <FolderInput className="h-3.5 w-3.5" />
                   <span>导入当前目录</span>
@@ -620,37 +647,39 @@ export default function StoragePage() {
           </div>
 
           {loadingBrowse ? (
-            <div className="flex items-center justify-center py-12 text-slate-400 gap-2 text-xs">
-              <Loader2 className="h-5 w-5 animate-spin text-indigo-400" />
+            <div className="flex items-center justify-center py-12 text-ink-muted gap-2 text-xs">
+              <Loader2 className="h-5 w-5 animate-spin text-accent" />
               <span>正在加载目录内容...</span>
             </div>
           ) : (
             <div className="space-y-6">
               {/* Subdirectories */}
-              <div className="space-y-2">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              <div className="space-y-2.5">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
                   子目录 ({dirs.length})
                 </h3>
                 {dirs.length === 0 ? (
-                  <p className="text-xs text-slate-500 py-2">当前路径下无子目录。</p>
+                  <p className="text-xs text-ink-muted py-2">当前路径下无子目录。</p>
                 ) : (
-                  <div className="divide-y divide-slate-800/80 rounded-xl border border-slate-800 bg-slate-950/60">
+                  <div className="divide-y divide-subtle rounded-2xl border border-subtle bg-subtle/40 overflow-hidden">
                     {dirs.map((dir) => (
                       <div
                         key={dir.rel_path}
-                        className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+                        className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-subtle/80 transition-colors"
                       >
                         <button
                           type="button"
                           onClick={() => void handleNavigatePrefix(dir.rel_path)}
-                          className="flex items-center gap-3 text-left min-w-0 flex-1 group"
+                          className="flex items-center gap-3 text-left min-w-0 flex-1 group cursor-pointer"
                         >
-                          <Folder className="h-4 w-4 text-amber-400 shrink-0" />
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-status-warning-soft text-status-warning-ink">
+                            <Folder className="h-4 w-4" />
+                          </span>
                           <div className="min-w-0">
-                            <p className="text-sm font-medium text-slate-100 group-hover:text-indigo-300 truncate">
+                            <p className="text-sm font-medium text-ink-primary group-hover:text-accent-ink truncate">
                               {dir.name}
                             </p>
-                            <p className="text-[11px] text-slate-500">
+                            <p className="text-[11px] text-ink-muted">
                               共 {dir.file_count} 个视频 · 直属 {dir.direct_files} 个
                             </p>
                           </div>
@@ -662,7 +691,7 @@ export default function StoragePage() {
                             onClick={() =>
                               setImportTarget({ sourceId: selectedSource.id, dirRelPath: dir.rel_path })
                             }
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600/90 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
+                            className="inline-flex items-center gap-1.5 rounded-full bg-accent px-3.5 py-1.5 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover transition-colors cursor-pointer"
                           >
                             <FolderInput className="h-3.5 w-3.5" />
                             <span>一键导入为课程</span>
@@ -678,11 +707,11 @@ export default function StoragePage() {
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
                       媒体文件 ({files.length})
                     </h3>
                     {missingCount > 0 && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-300">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-status-warning/30 bg-status-warning-soft px-2.5 py-0.5 text-[11px] font-medium text-status-warning-ink">
                         <AlertTriangle className="h-3 w-3" />
                         <span>{missingCount} 个文件缺失</span>
                       </span>
@@ -690,7 +719,7 @@ export default function StoragePage() {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="inline-flex rounded-xl border border-slate-800 bg-slate-950 p-0.5 text-xs">
+                    <div className="inline-flex rounded-xl border border-subtle bg-muted p-0.5 text-xs">
                       {(
                         [
                           { id: 'all', label: '全部', tip: '显示所有状态的媒体文件' },
@@ -702,10 +731,10 @@ export default function StoragePage() {
                           <button
                             type="button"
                             onClick={() => void handleFilterChange(opt.id)}
-                            className={`rounded-lg px-2.5 py-1 transition-colors ${
+                            className={`rounded-lg px-2.5 py-1 transition-all cursor-pointer ${
                               fileStatusFilter === opt.id
-                                ? 'bg-indigo-600 text-white font-medium'
-                                : 'text-slate-400 hover:text-white'
+                                ? 'bg-card text-ink-primary font-semibold shadow-card'
+                                : 'text-ink-secondary hover:text-ink-primary'
                             }`}
                           >
                             {opt.label}
@@ -715,45 +744,45 @@ export default function StoragePage() {
                     </div>
 
                     <form onSubmit={handleFileSearchSubmit} className="relative">
-                      <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+                      <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-ink-muted" />
                       <input
                         type="search"
                         value={fileSearch}
                         onChange={(e) => setFileSearch(e.target.value)}
                         placeholder="搜索文件名..."
-                        className="rounded-xl border border-slate-800 bg-slate-950 pl-8 pr-3 py-1 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                        className="rounded-full border border-default bg-subtle/60 pl-8 pr-3.5 py-1.5 text-xs text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
                       />
                     </form>
                   </div>
                 </div>
 
                 {files.length === 0 ? (
-                  <p className="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-800 rounded-xl">
+                  <p className="text-xs text-ink-muted py-6 text-center border border-dashed border-default rounded-2xl">
                     暂无匹配的媒体文件。
                   </p>
                 ) : (
-                  <div className="divide-y divide-slate-800/70 rounded-xl border border-slate-800 bg-slate-950/60 max-h-80 overflow-y-auto">
+                  <div className="divide-y divide-subtle rounded-2xl border border-subtle bg-subtle/40 max-h-80 overflow-y-auto">
                     {files.map((file) => (
                       <div
                         key={file.id}
-                        className="flex items-center justify-between gap-3 px-4 py-2.5 text-xs"
+                        className="flex items-center justify-between gap-3 px-4 py-2.5 text-xs hover:bg-subtle/70 transition-colors"
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <Video className="h-4 w-4 text-slate-500 shrink-0" />
+                          <Video className="h-4 w-4 text-ink-muted shrink-0" />
                           <div className="min-w-0">
-                            <p className="text-slate-200 font-medium truncate">{file.file_name}</p>
-                            <p className="text-[11px] text-slate-500 truncate">
+                            <p className="text-ink-primary font-medium truncate">{file.file_name}</p>
+                            <p className="text-[11px] text-ink-muted truncate">
                               {file.relative_path} · {formatBytes(file.file_size)}
                             </p>
                           </div>
                         </div>
 
                         {file.status === 'missing' ? (
-                          <span className="shrink-0 rounded-full border border-rose-500/40 bg-rose-500/15 px-2.5 py-0.5 text-[11px] font-medium text-rose-300">
+                          <span className="shrink-0 rounded-full border border-status-danger/30 bg-status-danger-soft px-2.5 py-0.5 text-[11px] font-medium text-status-danger-ink">
                             缺失
                           </span>
                         ) : (
-                          <span className="shrink-0 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] text-emerald-300">
+                          <span className="shrink-0 rounded-full border border-status-success/30 bg-status-success-soft px-2.5 py-0.5 text-[11px] font-medium text-status-success-ink">
                             正常
                           </span>
                         )}
@@ -783,9 +812,15 @@ export default function StoragePage() {
           dirRelPath={importTarget.dirRelPath}
           libraries={libraries}
           onClose={() => setImportTarget(null)}
-          onLibraryCreated={(lib) => setLibraries((prev) => [...prev, lib])}
+          onLibraryCreated={(lib) => {
+            if (!libCtx.isProvided) {
+              setLocalLibraries((prev) => [...prev, lib]);
+            }
+            libCtx.registerLibrary(lib);
+          }}
           onImported={(course) => {
             setImportedCourse(course);
+            libCtx.bumpCatalogVersion();
             toast.success(`已成功导入课程「${course.title}」`);
           }}
         />

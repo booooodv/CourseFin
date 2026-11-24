@@ -3,7 +3,9 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast';
+import Layout from '../components/Layout';
 import DirectoryPickerModal from '../components/DirectoryPickerModal';
+import { LibraryProvider } from '../contexts/LibraryContext';
 import HomePage from '../pages/HomePage';
 import SettingsPage from '../pages/SettingsPage';
 import StoragePage from '../pages/StoragePage';
@@ -288,6 +290,307 @@ describe('DirectoryPickerModal & StoragePage', () => {
     expect(await within(dialog2).findByText('服务器暂时不可用')).toBeInTheDocument();
     expect(within(dialog2).queryByText('StaleFolder')).not.toBeInTheDocument();
     expect(within(dialog2).getByRole('button', { name: '选择此目录' })).toBeDisabled();
+  });
+
+  it('syncs newly created libraries and imported courses from ImportCourseModal to LibraryProvider sidebar', async () => {
+    let libraries = [
+      {
+        id: 'lib-1',
+        name: '基础课程',
+        cover_path: '',
+        sort_order: 1,
+        course_count: 2,
+        created_at: '2026-11-24T00:00:00Z',
+        updated_at: '2026-11-24T00:00:00Z',
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/auth/me') && method === 'GET') {
+          return jsonResponse({
+            user: { id: 'u1', username: 'admin', created_at: '', updated_at: '' },
+            session: {
+              token: 'test-token',
+              user_id: 'u1',
+              device_id: 'web',
+              device_name: 'Web',
+              client_name: 'CourseFin Web',
+              client_version: '0.1.0',
+              last_active_at: '',
+              created_at: '',
+            },
+          });
+        }
+        if (url.endsWith('/api/v1/sources') && method === 'GET') {
+          return jsonResponse({
+            sources: [
+              {
+                id: 'src-1',
+                name: '主存储盘',
+                driver: 'local',
+                root_path: '/data/courses',
+                config_json: '{}',
+                enabled: true,
+                media_count: 3,
+                created_at: '2026-11-24T00:00:00Z',
+                updated_at: '2026-11-24T00:00:00Z',
+              },
+            ],
+          });
+        }
+        if (url.endsWith('/api/v1/sources/src-1/scan/status') && method === 'GET') {
+          return jsonResponse({ source_id: 'src-1', running: false });
+        }
+        if (url.includes('/api/v1/sources/src-1/dirs') && method === 'GET') {
+          return jsonResponse({
+            dirs: [
+              {
+                rel_path: 'rust-course',
+                name: 'rust-course',
+                file_count: 3,
+                direct_files: 3,
+                has_subdirs: false,
+              },
+            ],
+          });
+        }
+        if (url.includes('/api/v1/sources/src-1/files') && method === 'GET') {
+          return jsonResponse({ files: [] });
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries });
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'POST') {
+          const body = JSON.parse(String(init?.body)) as { name: string };
+          const createdLib = {
+            id: 'lib-rust',
+            name: body.name,
+            cover_path: '',
+            sort_order: 2,
+            course_count: 0,
+            created_at: '2026-11-24T00:00:00Z',
+            updated_at: '2026-11-24T00:00:00Z',
+          };
+          libraries = [...libraries, createdLib];
+          return jsonResponse(createdLib, 201);
+        }
+        if (url.endsWith('/api/v1/import/preview') && method === 'POST') {
+          return jsonResponse({
+            source_id: 'src-1',
+            dir_rel_path: 'rust-course',
+            course_title: 'rust-course',
+            total_files: 1,
+            chapters: [
+              {
+                title: '正片',
+                sort_order: 1,
+                lessons: [
+                  {
+                    media_file_id: 'mf-1',
+                    relative_path: 'rust-course/01.mp4',
+                    file_name: '01.mp4',
+                    title: '01',
+                    duration_ms: 120000,
+                    sort_order: 1,
+                  },
+                ],
+              },
+            ],
+          });
+        }
+        if (url.endsWith('/api/v1/import/commit') && method === 'POST') {
+          const body = JSON.parse(String(init?.body)) as { library_id: string; title: string };
+          libraries = libraries.map((lib) =>
+            lib.id === body.library_id ? { ...lib, course_count: lib.course_count + 1 } : lib,
+          );
+          return jsonResponse(
+            {
+              id: 'course-rust',
+              library_id: body.library_id,
+              title: body.title,
+              sort_title: body.title,
+              overview: '',
+              instructor: '',
+              cover_path: '',
+              backdrop_path: '',
+              source_id: 'src-1',
+              source_root_path: '/data/courses',
+              tags: [],
+              chapter_count: 1,
+              lesson_count: 1,
+              played_count: 0,
+              unplayed_item_count: 1,
+              played_percentage: 0,
+              played: false,
+              total_duration_ms: 120000,
+              first_lesson_id: 'lesson-1',
+              created_at: '2026-11-24T00:00:00Z',
+              updated_at: '2026-11-24T00:00:00Z',
+              chapters: [],
+            },
+            201,
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <LibraryProvider>
+          <MemoryRouter initialEntries={['/storage']}>
+            <Layout>
+              <StoragePage />
+            </Layout>
+          </MemoryRouter>
+        </LibraryProvider>
+      </ToastProvider>,
+    );
+
+    const sidebar = screen.getByRole('complementary', { name: '主侧边栏' });
+    expect(await within(sidebar).findByRole('group', { name: '媒体库 基础课程' })).toBeInTheDocument();
+    expect(await screen.findByText('rust-course')).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /一键导入为课程/ }));
+
+    const dialog = await screen.findByRole('dialog', { name: /导入为课程/ });
+    await within(dialog).findByLabelText(/课程标题/);
+
+    // Create a new library inline inside ImportCourseModal
+    await user.click(within(dialog).getByRole('button', { name: '新建媒体库' }));
+    await user.type(within(dialog).getByPlaceholderText('新媒体库名称'), 'Rust 专题');
+    await user.click(within(dialog).getByRole('button', { name: '创建' }));
+
+    // Immediately reflected in the left sidebar via LibraryContext.registerLibrary
+    const newLibGroup = await within(sidebar).findByRole('group', { name: '媒体库 Rust 专题' });
+    expect(within(newLibGroup).getByText('0')).toBeInTheDocument();
+
+    // Commit import and verify sidebar course count refreshes via bumpCatalogVersion
+    await user.click(within(dialog).getByRole('button', { name: /确认导入/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    const mainArea = screen.getByRole('main');
+    expect(await within(mainArea).findByText(/已成功导入课程「rust-course」/)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(within(newLibGroup).getByText('1')).toBeInTheDocument();
+    });
+
+    // Dual-theme check: no legacy dark-only palette classes in StoragePage main content
+    expect(mainArea.innerHTML).not.toMatch(
+      /\b(?:bg|text|border|ring|from|to|via)-(?:slate|indigo|rose|emerald|amber|sky)-/,
+    );
+  });
+
+  it('closes ImportCourseModal and DirectoryPickerModal on Escape and uses semantic dual-theme classes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/v1/sources') && method === 'GET') {
+          return jsonResponse({
+            sources: [
+              {
+                id: 'src-1',
+                name: '主存储盘',
+                driver: 'local',
+                root_path: '/data/courses',
+                config_json: '{}',
+                enabled: true,
+                media_count: 1,
+                created_at: '2026-11-24T00:00:00Z',
+                updated_at: '2026-11-24T00:00:00Z',
+              },
+            ],
+          });
+        }
+        if (url.endsWith('/api/v1/sources/src-1/scan/status') && method === 'GET') {
+          return jsonResponse({ source_id: 'src-1', running: false });
+        }
+        if (url.includes('/api/v1/sources/src-1/dirs') && method === 'GET') {
+          return jsonResponse({
+            dirs: [
+              {
+                rel_path: 'ts-course',
+                name: 'ts-course',
+                file_count: 1,
+                direct_files: 1,
+                has_subdirs: false,
+              },
+            ],
+          });
+        }
+        if (url.includes('/api/v1/sources/src-1/files') && method === 'GET') {
+          return jsonResponse({ files: [] });
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries: [] });
+        }
+        if (url.startsWith('/api/v1/fs/dirs') && method === 'GET') {
+          return jsonResponse({
+            current_path: '/data',
+            parent_path: '/',
+            entries: [{ name: 'courses', path: '/data/courses' }],
+            roots: [{ label: '根目录 (/)', path: '/' }],
+          });
+        }
+        if (url.endsWith('/api/v1/import/preview') && method === 'POST') {
+          return jsonResponse({
+            source_id: 'src-1',
+            dir_rel_path: 'ts-course',
+            course_title: 'ts-course',
+            total_files: 1,
+            chapters: [],
+          });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const { container } = render(
+      <ToastProvider>
+        <MemoryRouter>
+          <StoragePage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText('ts-course')).toBeInTheDocument();
+    const user = userEvent.setup();
+
+    // Open DirectoryPickerModal and verify semantic classes + Escape close
+    await user.click(screen.getByRole('button', { name: /添加存储源/ }));
+    await user.click(screen.getByRole('button', { name: /浏览目录/ }));
+    const dirDialog = await screen.findByRole('dialog', { name: /选择本地目录/ });
+    expect(dirDialog.className).toContain('bg-overlay');
+    expect(container.innerHTML).not.toMatch(
+      /\b(?:bg|text|border|ring|from|to|via)-(?:slate|indigo|rose|emerald|amber|sky)-/,
+    );
+    await user.keyboard('{Escape}');
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: /选择本地目录/ })).not.toBeInTheDocument();
+    });
+
+    // Open ImportCourseModal and verify semantic classes + Escape close
+    await user.click(screen.getByRole('button', { name: /一键导入为课程/ }));
+    const importDialog = await screen.findByRole('dialog', { name: /导入为课程/ });
+    await within(importDialog).findByLabelText(/课程标题/);
+    expect(importDialog.className).toContain('bg-overlay');
+    expect(container.innerHTML).not.toMatch(
+      /\b(?:bg|text|border|ring|from|to|via)-(?:slate|indigo|rose|emerald|amber|sky)-/,
+    );
+    await user.keyboard('{Escape}');
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: /导入为课程/ })).not.toBeInTheDocument();
+    });
   });
 });
 
