@@ -1501,6 +1501,13 @@ describe('SystemUpdate UI — Layout & SettingsPage', () => {
 
     expect(await screen.findByText(/等待服务重启超时/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '立即刷新' })).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.queryByText(/正在优雅停机并热重启服务/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /检查更新/ })).toBeEnabled();
+    expect(screen.getByLabelText(/自动检查更新/)).toBeEnabled();
+    expect(screen.getByLabelText(/检查间隔/)).toBeEnabled();
+    expect(screen.getByLabelText(/GitHub 加速代理前缀/)).toBeEnabled();
+    expect(screen.getByRole('button', { name: '保存更新配置' })).toBeEnabled();
   });
 
   it('displays rollback banner on restart failure and degrades safely when rendered without UpdateProvider on 404', async () => {
@@ -1562,6 +1569,12 @@ describe('SystemUpdate UI — Layout & SettingsPage', () => {
     await user.click(within(dialog).getByRole('button', { name: /确认更新/ }));
 
     expect(await screen.findByText(/已自动回滚至 v1\.0\.1/)).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /检查更新/ })).toBeEnabled();
+    expect(screen.getByLabelText(/自动检查更新/)).toBeEnabled();
+    expect(screen.getByLabelText(/检查间隔/)).toBeEnabled();
+    expect(screen.getByLabelText(/GitHub 加速代理前缀/)).toBeEnabled();
+    expect(screen.getByRole('button', { name: '保存更新配置' })).toBeEnabled();
     firstRender.unmount();
 
     // Standalone SettingsPage without UpdateProvider when update endpoint returns 404

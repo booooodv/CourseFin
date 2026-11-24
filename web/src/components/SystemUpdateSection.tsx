@@ -218,10 +218,14 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
     return DEFAULT_INTERVAL_OPTIONS;
   }, [checkIntervalHours]);
 
+  const hasActiveApplyStage =
+    (restartPhase === 'idle' || restartPhase === 'waiting') &&
+    isActiveApplyState(status?.state);
+
   const isUpdateBusy =
     applying ||
     restartPhase === 'waiting' ||
-    isActiveApplyState(status?.state) ||
+    hasActiveApplyStage ||
     status?.state === 'checking';
 
   const safeReleaseUrl = useMemo(() => getSafeHttpUrl(status?.release_url), [status?.release_url]);
@@ -341,7 +345,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
   const currentVersionLabel = formatVersionLabel(status?.current_version);
   const latestVersionLabel = formatVersionLabel(status?.latest_version);
   const progressPercent = clampPercent(status?.progress_percent ?? 0);
-  const showProgressPanel = isActiveApplyState(status?.state);
+  const showProgressPanel = hasActiveApplyStage;
   const displayError =
     restartPhase === 'rolled_back' || restartPhase === 'timeout'
       ? null
