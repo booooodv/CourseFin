@@ -4,10 +4,26 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import AIOrganizeModal from '../components/AIOrganizeModal';
 import ImportCourseModal from '../components/ImportCourseModal';
+import { ToastProvider } from '../components/Toast';
+import { LibraryProvider, useLibrary } from '../contexts/LibraryContext';
 import CourseEditorPage, { resolveDragReorder } from '../pages/CourseEditorPage';
 import StoragePage from '../pages/StoragePage';
 import SettingsPage from '../pages/SettingsPage';
 import type { CourseDetail, Library } from '../types/coursefin';
+
+const LEGACY_CLASS_REGEX = /\b(?:bg|text|border|ring|from|to|via)-(?:slate|indigo|rose|emerald|sky)-/;
+
+function LibraryObserver() {
+  const { catalogVersion, libraries } = useLibrary();
+  return (
+    <div>
+      <span data-testid="catalog-version">{catalogVersion}</span>
+      <span data-testid="library-counts">
+        {libraries.map((lib) => `${lib.id}:${lib.course_count}`).join(',')}
+      </span>
+    </div>
+  );
+}
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -267,6 +283,45 @@ describe('AIOrganizeModal', () => {
       ],
     });
     expect(onApplied).toHaveBeenCalledTimes(1);
+  });
+
+  it('AIOrganizeModal renders dual-theme semantic surfaces without legacy dark-only classes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/course-1/ai/organize') && init?.method === 'POST') {
+          return jsonResponse({
+            title: 'Go 语言并发编程实战',
+            overview: '系统讲解 Go 并发原语',
+            tags: ['Go'],
+            chapters: [
+              {
+                title: '第一章：并发基础',
+                lessons: [{ lesson_id: 'lesson-1', title: '第 1 节：导学' }],
+              },
+            ],
+          });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const { container } = render(
+      <MemoryRouter>
+        <AIOrganizeModal
+          course={sampleCourse}
+          isOpen={true}
+          onClose={vi.fn()}
+          onApplied={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Go 语言并发编程实战')).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.className).toContain('bg-overlay');
+    expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
   });
 });
 
@@ -586,6 +641,193 @@ describe('CourseEditorPage', () => {
     expect(lessonToChapter?.type).toBe('lesson');
     expect(lessonToChapter?.chapters[0].lessons).toHaveLength(0);
     expect(lessonToChapter?.chapters[1].lessons.map((l) => l.id)).toEqual(['lesson-2', 'lesson-1']);
+  });
+
+  it('renders sticky studio top bar without legacy classes and notifies LibraryProvider when library_id changes', async () => {
+    let currentCourse: CourseDetail = structuredClone(sampleCourse);
+    let currentLibraries: Library[] = structuredClone(sampleLibraries);
+    let listLibrariesCalls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/courses/course-1') && method === 'GET') {
+          return jsonResponse(currentCourse);
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          listLibrariesCalls += 1;
+          return jsonResponse({ libraries: currentLibraries });
+        }
+        if (url.endsWith('/api/v1/auth/me') && method === 'GET') {
+          return jsonResponse({
+            user: { id: 'u1', username: 'admin', created_at: '', updated_at: '' },
+            session: {
+              token: 'test-token',
+              user_id: 'u1',
+              device_id: 'web',
+              device_name: 'Web',
+              client_name: 'CourseFin Web',
+              client_version: '0.1.0',
+              last_active_at: '',
+              created_at: '',
+            },
+          });
+        }
+        if (url.endsWith('/api/v1/courses/course-1') && method === 'PUT') {
+          const body = JSON.parse(String(init?.body)) as {
+            title: string;
+            instructor: string;
+            library_id: string;
+            overview: string;
+            tags: string[];
+          };
+          if (body.library_id !== currentCourse.library_id) {
+            currentLibraries = currentLibraries.map((lib) => {
+              if (lib.id === currentCourse.library_id) {
+                return { ...lib, course_count: Math.max(0, lib.course_count - 1) };
+              }
+              if (lib.id === body.library_id) {
+                return { ...lib, course_count: lib.course_count + 1 };
+              }
+              return lib;
+            });
+          }
+          currentCourse = { ...currentCourse, ...body };
+          return jsonResponse(currentCourse);
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const { container } = render(
+      <ToastProvider>
+        <LibraryProvider>
+          <MemoryRouter initialEntries={['/courses/course-1/edit']}>
+            <LibraryObserver />
+            <Routes>
+              <Route path="/courses/:courseId/edit" element={<CourseEditorPage />} />
+            </Routes>
+          </MemoryRouter>
+        </LibraryProvider>
+      </ToastProvider>,
+    );
+
+    const titleInput = await screen.findByLabelText(/课程标题/);
+    expect(titleInput).toHaveValue('原始 Go 视频合集');
+    await waitFor(() => {
+      expect(screen.getByTestId('library-counts')).toHaveTextContent('lib-1:1,lib-2:0');
+    });
+
+    // Verify sticky studio top bar and zero legacy dark-only classes
+    const backLink = screen.getByRole('link', { name: /返回课程播放/ });
+    const stickyBar = backLink.closest('header');
+    expect(stickyBar).not.toBeNull();
+    expect(stickyBar!.className).toContain('sticky');
+    expect(stickyBar!.className).toContain('top-0');
+    expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
+
+    const user = userEvent.setup();
+
+    // Saving metadata without changing library_id does not trigger redundant library catalog refresh
+    const callsBeforeTitleSave = listLibrariesCalls;
+    await user.clear(titleInput);
+    await user.type(titleInput, 'Go 课程精修');
+    await user.click(screen.getByRole('button', { name: /保存元数据/ }));
+    await waitFor(() => {
+      expect(currentCourse.title).toBe('Go 课程精修');
+    });
+    expect(screen.getByTestId('catalog-version')).toHaveTextContent('0');
+    expect(listLibrariesCalls).toBe(callsBeforeTitleSave);
+
+    // Changing 所属媒体库 and saving triggers LibraryProvider bumpCatalogVersion & library refresh
+    const librarySelect = screen.getByLabelText(/所属媒体库/);
+    await user.selectOptions(librarySelect, 'lib-2');
+    await user.click(screen.getByRole('button', { name: /保存元数据/ }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('catalog-version')).toHaveTextContent('1');
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('library-counts')).toHaveTextContent('lib-1:0,lib-2:1');
+    });
+  });
+
+  it('notifies LibraryProvider and navigates home after deleting a course', async () => {
+    let currentLibraries: Library[] = structuredClone(sampleLibraries);
+    let deleteCalled = false;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/courses/course-1') && method === 'GET') {
+          return jsonResponse(structuredClone(sampleCourse));
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries: currentLibraries });
+        }
+        if (url.endsWith('/api/v1/auth/me') && method === 'GET') {
+          return jsonResponse({
+            user: { id: 'u1', username: 'admin', created_at: '', updated_at: '' },
+            session: {
+              token: 'test-token',
+              user_id: 'u1',
+              device_id: 'web',
+              device_name: 'Web',
+              client_name: 'CourseFin Web',
+              client_version: '0.1.0',
+              last_active_at: '',
+              created_at: '',
+            },
+          });
+        }
+        if (url.endsWith('/api/v1/courses/course-1') && method === 'DELETE') {
+          deleteCalled = true;
+          currentLibraries = currentLibraries.map((lib) =>
+            lib.id === 'lib-1' ? { ...lib, course_count: 0 } : lib,
+          );
+          return jsonResponse({ ok: true });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <LibraryProvider>
+          <MemoryRouter initialEntries={['/courses/course-1/edit']}>
+            <LibraryObserver />
+            <Routes>
+              <Route path="/" element={<div>已返回课程库首页</div>} />
+              <Route path="/courses/:courseId/edit" element={<CourseEditorPage />} />
+            </Routes>
+          </MemoryRouter>
+        </LibraryProvider>
+      </ToastProvider>,
+    );
+
+    await screen.findByLabelText(/课程标题/);
+    await waitFor(() => {
+      expect(screen.getByTestId('library-counts')).toHaveTextContent('lib-1:1,lib-2:0');
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /删除课程/ }));
+    await user.click(screen.getByRole('button', { name: '确认' }));
+
+    await waitFor(() => {
+      expect(deleteCalled).toBe(true);
+    });
+    expect(await screen.findByText('已返回课程库首页')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId('catalog-version')).toHaveTextContent('1');
+      expect(screen.getByTestId('library-counts')).toHaveTextContent('lib-1:0,lib-2:0');
+    });
   });
 });
 

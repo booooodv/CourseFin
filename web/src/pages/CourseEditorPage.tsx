@@ -46,6 +46,7 @@ import {
 import AIOrganizeModal from '../components/AIOrganizeModal';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
+import { useLibrary } from '../contexts/LibraryContext';
 import type {
   ChapterDetail,
   CourseDetail,
@@ -55,6 +56,18 @@ import type {
   MediaFile,
   StorageSource,
 } from '../types/coursefin';
+
+const FIELD_INPUT_CLASS =
+  'w-full rounded-xl border border-default bg-subtle/60 px-3.5 py-2 text-sm text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors';
+
+const ICON_ACTION_BTN_CLASS =
+  'rounded-lg p-1.5 text-ink-muted hover:bg-card hover:text-ink-primary disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer';
+
+const DANGER_ICON_BTN_CLASS =
+  'rounded-lg p-1.5 text-ink-muted hover:bg-status-danger-soft hover:text-status-danger-ink transition-colors cursor-pointer';
+
+const SECONDARY_BTN_CLASS =
+  'inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors';
 
 function formatDuration(durationMs: number): string {
   if (!durationMs || durationMs <= 0) return '';
@@ -254,10 +267,10 @@ function SortableLessonRow({
     <div
       ref={setNodeRef}
       style={style}
-      className={`rounded-xl border px-3 py-2.5 transition-colors ${
+      className={`rounded-2xl border px-3.5 py-2.5 transition-all ${
         isDragging
-          ? 'border-indigo-500 bg-indigo-500/10 shadow-lg'
-          : 'border-slate-800/90 bg-slate-950/60 hover:border-slate-700'
+          ? 'border-accent bg-accent-soft ring-2 ring-accent shadow-card-hover'
+          : 'border-subtle bg-subtle/40 hover:bg-subtle hover:border-default'
       }`}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -265,7 +278,7 @@ function SortableLessonRow({
           <button
             type="button"
             aria-label={`拖拽排序课时 ${lesson.title}`}
-            className="cursor-grab text-slate-500 hover:text-slate-300 p-1"
+            className="cursor-grab rounded-lg p-1 text-ink-muted hover:bg-card/60 hover:text-ink-primary transition-colors"
             {...attributes}
             {...listeners}
           >
@@ -273,7 +286,7 @@ function SortableLessonRow({
           </button>
         </Tooltip>
 
-        <Video className="h-4 w-4 text-indigo-400 shrink-0" />
+        <Video className="h-4 w-4 text-accent-ink shrink-0" />
 
         {editing ? (
           <div className="flex flex-1 items-center gap-2 min-w-[180px]">
@@ -291,13 +304,13 @@ function SortableLessonRow({
                   setEditing(false);
                 }
               }}
-              className="flex-1 rounded-lg border border-indigo-500/60 bg-slate-900 px-2.5 py-1 text-xs text-white focus:outline-none"
+              className="flex-1 rounded-xl border border-accent bg-card px-2.5 py-1 text-xs text-ink-primary focus:outline-none focus:ring-2 focus:ring-accent-ring"
             />
             <button
               type="button"
               disabled={saving}
               onClick={() => void saveTitle()}
-              className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500"
+              className="rounded-xl bg-accent px-2.5 py-1 text-xs font-semibold text-ink-inverse hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
             >
               保存
             </button>
@@ -307,34 +320,36 @@ function SortableLessonRow({
                 setDraftTitle(lesson.title);
                 setEditing(false);
               }}
-              className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+              className="rounded-xl border border-default bg-card px-2.5 py-1 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary transition-colors cursor-pointer"
             >
               取消
             </button>
           </div>
         ) : (
           <div className="flex-1 min-w-0">
-            <p className="text-xs sm:text-sm font-medium text-slate-100 truncate">
+            <p className="text-xs sm:text-sm font-medium text-ink-primary truncate">
               {lesson.title}
             </p>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
-              {lesson.duration_ms > 0 && <span>{formatDuration(lesson.duration_ms)}</span>}
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-ink-muted">
+              {lesson.duration_ms > 0 && (
+                <span className="tabular-nums">{formatDuration(lesson.duration_ms)}</span>
+              )}
               {lesson.video_codec && <span>{lesson.video_codec.toUpperCase()}</span>}
               {lesson.media_status === 'missing' && (
-                <span className="rounded bg-rose-500/20 border border-rose-500/30 px-1.5 py-0.5 text-rose-300">
+                <span className="rounded-md border border-status-danger/30 bg-status-danger-soft px-1.5 py-0.5 font-medium text-status-danger-ink">
                   文件缺失
                 </span>
               )}
               {subtitles.length > 0 && (
-                <span className="inline-flex items-center gap-1 text-sky-300">
-                  <Subtitles className="h-3 w-3" />
+                <span className="inline-flex flex-wrap items-center gap-1 text-accent-ink">
+                  <Subtitles className="h-3 w-3 shrink-0" />
                   {subtitles.map((sub) => (
                     <span
                       key={sub.id}
-                      className={`rounded border px-1.5 py-0.5 ${
+                      className={`rounded-md border px-1.5 py-0.5 font-medium ${
                         sub.status === 'missing'
-                          ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
-                          : 'border-sky-500/30 bg-sky-500/10 text-sky-200'
+                          ? 'border-status-danger/30 bg-status-danger-soft text-status-danger-ink'
+                          : 'border-accent-ring bg-accent-soft text-accent-ink'
                       }`}
                     >
                       {sub.title || sub.language || '字幕'} ({sub.format})
@@ -352,7 +367,7 @@ function SortableLessonRow({
               aria-label={`移动课时 ${lesson.title} 到章节`}
               value={chapterId}
               onChange={(e) => void onMoveToChapter(lesson.id, e.target.value)}
-              className="rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 focus:border-indigo-500 focus:outline-none"
+              className="rounded-xl border border-default bg-card px-2 py-1 text-[11px] text-ink-secondary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring"
             >
               {chapters.map((ch) => (
                 <option key={ch.id} value={ch.id}>
@@ -368,7 +383,7 @@ function SortableLessonRow({
               aria-label={`上移课时 ${lesson.title}`}
               disabled={lessonIdx === 0}
               onClick={() => void onMoveStep(chapterId, lessonIdx, -1)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
+              className={ICON_ACTION_BTN_CLASS}
             >
               <ArrowUp className="h-3.5 w-3.5" />
             </button>
@@ -379,7 +394,7 @@ function SortableLessonRow({
               aria-label={`下移课时 ${lesson.title}`}
               disabled={lessonIdx === totalLessonsInChapter - 1}
               onClick={() => void onMoveStep(chapterId, lessonIdx, 1)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
+              className={ICON_ACTION_BTN_CLASS}
             >
               <ArrowDown className="h-3.5 w-3.5" />
             </button>
@@ -389,7 +404,7 @@ function SortableLessonRow({
               type="button"
               aria-label={`重命名课时 ${lesson.title}`}
               onClick={() => setEditing(true)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+              className={ICON_ACTION_BTN_CLASS}
             >
               <Pencil className="h-3.5 w-3.5" />
             </button>
@@ -399,7 +414,7 @@ function SortableLessonRow({
               type="button"
               aria-label={`删除课时 ${lesson.title}`}
               onClick={() => void onDelete(lesson.id)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
+              className={DANGER_ICON_BTN_CLASS}
             >
               <Trash2 className="h-3.5 w-3.5" />
             </button>
@@ -485,19 +500,17 @@ function SortableChapterCard({
     <div
       ref={setNodeRef}
       style={style}
-      className={`rounded-2xl border p-4 space-y-3 transition-colors ${
-        isDragging
-          ? 'border-indigo-500 bg-slate-900 shadow-xl'
-          : 'border-slate-800 bg-slate-900/75'
+      className={`rounded-3xl bg-card border shadow-card overflow-hidden transition-all ${
+        isDragging ? 'border-accent ring-2 ring-accent shadow-card-hover' : 'border-subtle'
       }`}
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-subtle bg-subtle/60 px-5 py-3.5">
         <div className="flex items-center gap-2 flex-1 min-w-0">
           <Tooltip content="按住拖拽调整章节顺序">
             <button
               type="button"
               aria-label={`拖拽排序章节 ${chapter.title}`}
-              className="cursor-grab text-slate-500 hover:text-slate-300 p-1"
+              className="cursor-grab rounded-lg p-1 text-ink-muted hover:bg-card/60 hover:text-ink-primary transition-colors"
               {...attributes}
               {...listeners}
             >
@@ -521,13 +534,13 @@ function SortableChapterCard({
                     setEditing(false);
                   }
                 }}
-                className="flex-1 rounded-lg border border-indigo-500/60 bg-slate-950 px-2.5 py-1 text-sm text-white focus:outline-none"
+                className="flex-1 rounded-xl border border-accent bg-card px-2.5 py-1 text-sm text-ink-primary focus:outline-none focus:ring-2 focus:ring-accent-ring"
               />
               <button
                 type="button"
                 disabled={saving}
                 onClick={() => void saveChapterTitle()}
-                className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500"
+                className="rounded-xl bg-accent px-2.5 py-1 text-xs font-semibold text-ink-inverse hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
               >
                 保存
               </button>
@@ -537,17 +550,19 @@ function SortableChapterCard({
                   setDraftTitle(chapter.title);
                   setEditing(false);
                 }}
-                className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                className="rounded-xl border border-default bg-card px-2.5 py-1 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary transition-colors cursor-pointer"
               >
                 取消
               </button>
             </div>
           ) : (
             <div className="flex items-center gap-2 min-w-0">
-              <h3 className="text-sm sm:text-base font-semibold text-white truncate">
+              <h3 className="text-sm sm:text-base font-bold text-ink-primary truncate">
                 {chapter.title}
               </h3>
-              <span className="text-xs text-slate-500 shrink-0">({lessons.length} 节)</span>
+              <span className="rounded-full border border-subtle bg-card px-2 py-0.5 text-[11px] font-medium text-ink-muted tabular-nums shrink-0">
+                {lessons.length} 节
+              </span>
             </div>
           )}
         </div>
@@ -557,7 +572,7 @@ function SortableChapterCard({
             <button
               type="button"
               onClick={() => onOpenAddVideo(chapter.id)}
-              className="inline-flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
+              className="inline-flex items-center gap-1 rounded-xl border border-default bg-card px-2.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary transition-colors cursor-pointer"
             >
               <Plus className="h-3.5 w-3.5" />
               <span>从存储添加视频</span>
@@ -570,7 +585,7 @@ function SortableChapterCard({
               aria-label={`上移章节 ${chapter.title}`}
               disabled={chapterIdx === 0}
               onClick={() => void onMoveChapterStep(chapterIdx, -1)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
+              className={ICON_ACTION_BTN_CLASS}
             >
               <ArrowUp className="h-4 w-4" />
             </button>
@@ -581,7 +596,7 @@ function SortableChapterCard({
               aria-label={`下移章节 ${chapter.title}`}
               disabled={chapterIdx === totalChapters - 1}
               onClick={() => void onMoveChapterStep(chapterIdx, 1)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
+              className={ICON_ACTION_BTN_CLASS}
             >
               <ArrowDown className="h-4 w-4" />
             </button>
@@ -591,7 +606,7 @@ function SortableChapterCard({
               type="button"
               aria-label={`重命名章节 ${chapter.title}`}
               onClick={() => setEditing(true)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+              className={ICON_ACTION_BTN_CLASS}
             >
               <Pencil className="h-4 w-4" />
             </button>
@@ -601,7 +616,7 @@ function SortableChapterCard({
               type="button"
               aria-label={`删除章节 ${chapter.title}`}
               onClick={() => void onDeleteChapter(chapter.id)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
+              className={DANGER_ICON_BTN_CLASS}
             >
               <Trash2 className="h-4 w-4" />
             </button>
@@ -609,33 +624,35 @@ function SortableChapterCard({
         </div>
       </div>
 
-      {lessons.length === 0 ? (
-        <p className="py-4 text-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl">
-          本章节暂无课时，可点击“从存储添加视频”或从其他章节拖拽移入。
-        </p>
-      ) : (
-        <SortableContext
-          items={lessons.map((l) => `lesson-${l.id}`)}
-          strategy={verticalListSortingStrategy}
-        >
-          <div className="space-y-2">
-            {lessons.map((lesson, lIdx) => (
-              <SortableLessonRow
-                key={lesson.id}
-                lesson={lesson}
-                chapterId={chapter.id}
-                chapters={chapters}
-                lessonIdx={lIdx}
-                totalLessonsInChapter={lessons.length}
-                onRename={onRenameLesson}
-                onDelete={onDeleteLesson}
-                onMoveStep={onMoveLessonStep}
-                onMoveToChapter={onMoveLessonToChapter}
-              />
-            ))}
-          </div>
-        </SortableContext>
-      )}
+      <div className="p-4">
+        {lessons.length === 0 ? (
+          <p className="py-5 text-center text-xs text-ink-muted border border-dashed border-default bg-subtle/30 rounded-2xl">
+            本章节暂无课时，可点击“从存储添加视频”或从其他章节拖拽移入。
+          </p>
+        ) : (
+          <SortableContext
+            items={lessons.map((l) => `lesson-${l.id}`)}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="space-y-2">
+              {lessons.map((lesson, lIdx) => (
+                <SortableLessonRow
+                  key={lesson.id}
+                  lesson={lesson}
+                  chapterId={chapter.id}
+                  chapters={chapters}
+                  lessonIdx={lIdx}
+                  totalLessonsInChapter={lessons.length}
+                  onRename={onRenameLesson}
+                  onDelete={onDeleteLesson}
+                  onMoveStep={onMoveLessonStep}
+                  onMoveToChapter={onMoveLessonToChapter}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        )}
+      </div>
     </div>
   );
 }
@@ -644,9 +661,10 @@ export default function CourseEditorPage() {
   const { courseId } = useParams<{ courseId: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const libCtx = useLibrary();
 
   const [course, setCourse] = useState<CourseDetail | null>(null);
-  const [libraries, setLibraries] = useState<Library[]>([]);
+  const [localLibraries, setLocalLibraries] = useState<Library[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -711,22 +729,40 @@ export default function CourseEditorPage() {
     setLoading(true);
     setError(null);
     try {
-      const [courseData, libsData] = await Promise.all([
-        api.getCourse(courseId),
-        api.listLibraries(),
-      ]);
-      syncFormFromCourse(courseData);
-      setLibraries(libsData.libraries ?? []);
+      if (libCtx.isProvided) {
+        const courseData = await api.getCourse(courseId);
+        syncFormFromCourse(courseData);
+      } else {
+        const [courseData, libsData] = await Promise.all([
+          api.getCourse(courseId),
+          api.listLibraries(),
+        ]);
+        syncFormFromCourse(courseData);
+        setLocalLibraries(libsData.libraries ?? []);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载课程编辑数据失败');
     } finally {
       setLoading(false);
     }
-  }, [courseId, syncFormFromCourse]);
+  }, [courseId, libCtx.isProvided, syncFormFromCourse]);
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!addVideoChapterId) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setAddVideoChapterId(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [addVideoChapterId]);
+
+  const libraries = libCtx.isProvided ? libCtx.libraries : localLibraries;
 
   const allLessons = useMemo(() => {
     if (!course) return [];
@@ -760,6 +796,7 @@ export default function CourseEditorPage() {
       setError('课程标题不能为空');
       return;
     }
+    const previousLibraryId = course.library_id;
     setSavingMeta(true);
     setError(null);
     try {
@@ -771,6 +808,9 @@ export default function CourseEditorPage() {
         tags,
       });
       syncFormFromCourse(updated);
+      if (updated.library_id !== previousLibraryId || libraryId !== previousLibraryId) {
+        libCtx.bumpCatalogVersion();
+      }
       showNotice('课程元数据已保存');
     } catch (err) {
       showError(err instanceof Error ? err.message : '保存元数据失败');
@@ -835,6 +875,7 @@ export default function CourseEditorPage() {
     setError(null);
     try {
       await api.deleteCourse(course.id);
+      libCtx.bumpCatalogVersion();
       toast.success(`已删除课程「${course.title}」`);
       navigate('/', { replace: true });
     } catch (err) {
@@ -1144,10 +1185,13 @@ export default function CourseEditorPage() {
     }
   }
 
-  if (loading) {
+  const effectiveLoading =
+    loading || (libCtx.isProvided && libCtx.loading && libCtx.libraries.length === 0);
+
+  if (effectiveLoading) {
     return (
-      <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3">
-        <Loader2 className="h-7 w-7 animate-spin text-indigo-400" />
+      <div className="flex flex-col items-center justify-center py-24 text-ink-secondary gap-3">
+        <Loader2 className="h-7 w-7 animate-spin text-accent" />
         <p className="text-sm">正在加载课程编辑器...</p>
       </div>
     );
@@ -1155,11 +1199,11 @@ export default function CourseEditorPage() {
 
   if (!course) {
     return (
-      <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-6 text-center max-w-lg mx-auto my-12 space-y-4">
-        <p className="text-rose-200 font-medium">{error ?? '未找到课程'}</p>
+      <div className="rounded-3xl border border-status-danger/30 bg-status-danger-soft p-6 text-center max-w-lg mx-auto my-12 space-y-4 shadow-card">
+        <p className="text-status-danger-ink font-medium">{error ?? '未找到课程'}</p>
         <Link
           to="/"
-          className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-200 hover:bg-slate-700"
+          className="inline-flex items-center gap-1.5 rounded-full border border-default bg-card px-4 py-2 text-sm font-medium text-ink-primary hover:bg-subtle transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
           <span>返回课程库</span>
@@ -1172,95 +1216,100 @@ export default function CourseEditorPage() {
 
   return (
     <div className="space-y-6">
-      {/* Top Action Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <Tooltip content="返回课程播放页面">
-            <Link
-              to={`/courses/${course.id}`}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-white transition-colors"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              <span>返回课程播放</span>
-            </Link>
-          </Tooltip>
-          <span className="text-slate-700">/</span>
-          <h1 className="text-lg font-bold text-white truncate max-w-md">{course.title}</h1>
-        </div>
+      {/* Sticky Top Studio Bar */}
+      <header className="sticky top-0 z-20 -mx-4 px-4 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 py-3 bg-canvas/85 backdrop-blur-md border-b border-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <Tooltip content="返回课程播放页面">
+              <Link
+                to={`/courses/${course.id}`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-subtle bg-card px-3.5 py-1.5 text-xs font-medium text-ink-secondary hover:border-default hover:text-ink-primary shadow-card transition-colors shrink-0"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                <span>返回课程播放</span>
+              </Link>
+            </Tooltip>
+            <span className="text-ink-muted/40 hidden sm:inline">/</span>
+            <h1 className="text-base sm:text-lg font-bold text-ink-primary tracking-tight truncate max-w-full sm:max-w-md">
+              {course.title}
+            </h1>
+          </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Tooltip content="扫描原导入目录，发现新增视频并增量追加">
-            <button
-              type="button"
-              onClick={() => void handleCheckNewFiles()}
-              disabled={checkingNewFiles}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800/80 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-colors"
-            >
-              {checkingNewFiles ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <FolderSearch className="h-3.5 w-3.5" />
-              )}
-              <span>检查新文件</span>
-            </button>
-          </Tooltip>
-
-          <Tooltip content="用 AI 自动生成课程简介、标签与清晰章节结构（预览后应用）">
-            <button
-              type="button"
-              onClick={() => setShowAIModal(true)}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-sky-600 px-3.5 py-2 text-xs font-semibold text-white shadow hover:from-indigo-500 hover:to-sky-500 transition-colors"
-            >
-              <Sparkles className="h-3.5 w-3.5" />
-              <span>AI 智能整理</span>
-            </button>
-          </Tooltip>
-
-          {!confirmDeleteCourse ? (
-            <Tooltip content="删除此课程记录（不删除本地视频文件）">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <Tooltip content="扫描原导入目录，发现新增视频并增量追加">
               <button
                 type="button"
-                onClick={() => setConfirmDeleteCourse(true)}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 hover:bg-rose-500/20 transition-colors"
+                onClick={() => void handleCheckNewFiles()}
+                disabled={checkingNewFiles}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-default bg-card px-3.5 py-2 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary disabled:opacity-50 shadow-card transition-colors cursor-pointer"
               >
-                <Trash2 className="h-3.5 w-3.5" />
-                <span>删除课程</span>
+                {checkingNewFiles ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <FolderSearch className="h-3.5 w-3.5" />
+                )}
+                <span>检查新文件</span>
               </button>
             </Tooltip>
-          ) : (
-            <div className="inline-flex items-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-950/80 px-2.5 py-1">
-              <span className="text-xs text-rose-200">确认删除?</span>
-              <button
-                type="button"
-                disabled={deletingCourse}
-                onClick={() => void handleDeleteCourse()}
-                className="rounded-lg bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-500"
-              >
-                {deletingCourse ? '删除中...' : '确认'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmDeleteCourse(false)}
-                className="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
-              >
-                取消
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
 
-      {/* Feedback banners */}
+            <Tooltip content="用 AI 自动生成课程简介、标签与清晰章节结构（预览后应用）">
+              <button
+                type="button"
+                onClick={() => setShowAIModal(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-accent px-3.5 py-2 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover transition-colors cursor-pointer"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                <span>AI 智能整理</span>
+              </button>
+            </Tooltip>
+
+            {!confirmDeleteCourse ? (
+              <Tooltip content="删除此课程记录（不删除本地视频文件）">
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteCourse(true)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-status-danger/30 bg-status-danger-soft px-3 py-2 text-xs font-medium text-status-danger-ink hover:opacity-90 transition-opacity cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>删除课程</span>
+                </button>
+              </Tooltip>
+            ) : (
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-status-danger/35 bg-status-danger-soft px-3 py-1">
+                <span className="text-xs font-medium text-status-danger-ink">确认删除?</span>
+                <button
+                  type="button"
+                  disabled={deletingCourse}
+                  onClick={() => void handleDeleteCourse()}
+                  className="rounded-full bg-status-danger px-2.5 py-1 text-xs font-semibold text-ink-inverse hover:opacity-90 disabled:opacity-50 transition-opacity cursor-pointer"
+                >
+                  {deletingCourse ? '删除中...' : '确认'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteCourse(false)}
+                  className="rounded-full px-2.5 py-1 text-xs font-medium text-ink-secondary hover:bg-card hover:text-ink-primary transition-colors cursor-pointer"
+                >
+                  取消
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* Feedback Banners */}
       {statusMessage && (
-        <div className="flex items-center justify-between rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5 text-sm text-emerald-200">
-          <span className="flex items-center gap-2">
-            <Check className="h-4 w-4 text-emerald-400" />
+        <div className="flex items-center justify-between rounded-2xl border border-status-success/30 bg-status-success-soft px-4 py-3 text-sm text-status-success-ink shadow-card">
+          <span className="flex items-center gap-2 font-medium">
+            <Check className="h-4 w-4 text-status-success-ink shrink-0" />
             {statusMessage}
           </span>
           <button
             type="button"
+            aria-label="关闭通知"
             onClick={() => setStatusMessage(null)}
-            className="text-emerald-300 hover:text-white"
+            className="rounded-lg p-1 text-status-success-ink hover:bg-card/60 transition-colors cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
@@ -1268,9 +1317,14 @@ export default function CourseEditorPage() {
       )}
 
       {error && (
-        <div className="flex items-center justify-between rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-sm text-rose-200">
-          <span>{error}</span>
-          <button type="button" onClick={() => setError(null)} className="text-rose-300 hover:text-white">
+        <div className="flex items-center justify-between rounded-2xl border border-status-danger/30 bg-status-danger-soft px-4 py-3 text-sm text-status-danger-ink shadow-card">
+          <span className="font-medium">{error}</span>
+          <button
+            type="button"
+            aria-label="关闭错误提示"
+            onClick={() => setError(null)}
+            className="rounded-lg p-1 text-status-danger-ink hover:bg-card/60 transition-colors cursor-pointer"
+          >
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -1278,32 +1332,32 @@ export default function CourseEditorPage() {
 
       {/* New Files Sync Panel */}
       {newFiles !== null && (
-        <section className="rounded-2xl border border-sky-500/30 bg-sky-500/5 p-5 space-y-3">
+        <section className="rounded-2xl border border-accent-ring bg-accent-soft p-5 space-y-3 shadow-card">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <FilePlus2 className="h-4 w-4 text-sky-400" />
-              <h2 className="text-sm font-semibold text-white">
+              <FilePlus2 className="h-4 w-4 text-accent-ink" />
+              <h2 className="text-sm font-semibold text-ink-primary">
                 新文件检查结果（{newFiles.length} 个未导入视频）
               </h2>
             </div>
             <button
               type="button"
               onClick={() => setNewFiles(null)}
-              className="text-xs text-slate-400 hover:text-white"
+              className="rounded-lg px-2 py-1 text-xs font-medium text-ink-secondary hover:bg-card hover:text-ink-primary transition-colors cursor-pointer"
             >
               关闭
             </button>
           </div>
 
           {newFiles.length === 0 ? (
-            <p className="text-xs text-slate-400">当前关联目录中没有发现未导入的新视频文件。</p>
+            <p className="text-xs text-ink-secondary">当前关联目录中没有发现未导入的新视频文件。</p>
           ) : (
             <>
               <div className="max-h-56 overflow-y-auto space-y-1.5">
                 {newFiles.map((file) => (
                   <label
                     key={file.id}
-                    className="flex items-center gap-2.5 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2 text-xs text-slate-200 cursor-pointer"
+                    className="flex items-center gap-2.5 rounded-xl border border-subtle bg-card px-3 py-2 text-xs text-ink-primary cursor-pointer hover:border-default transition-colors"
                   >
                     <input
                       type="checkbox"
@@ -1314,10 +1368,10 @@ export default function CourseEditorPage() {
                           [file.id]: e.target.checked,
                         }))
                       }
-                      className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-800 text-indigo-500"
+                      className="h-3.5 w-3.5 rounded border-default bg-card text-accent focus:ring-2 focus:ring-accent-ring"
                     />
                     <span className="font-medium">{file.file_name}</span>
-                    <span className="text-slate-500 truncate">{file.relative_path}</span>
+                    <span className="text-ink-muted truncate">{file.relative_path}</span>
                   </label>
                 ))}
               </div>
@@ -1326,7 +1380,7 @@ export default function CourseEditorPage() {
                   type="button"
                   disabled={appendingNewFiles}
                   onClick={() => void handleAppendNewFiles()}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-sky-600 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
                 >
                   {appendingNewFiles ? '正在追加...' : '追加到课程'}
                 </button>
@@ -1336,18 +1390,21 @@ export default function CourseEditorPage() {
         </section>
       )}
 
-      {/* Main Editor Grid: Metadata + Cover/Backdrop */}
+      {/* Section 1: Metadata + Cover & Backdrop */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Metadata Form */}
         <form
           onSubmit={handleSaveMetadata}
-          className="lg:col-span-2 rounded-2xl border border-slate-800 bg-slate-900/75 p-5 space-y-4"
+          className="lg:col-span-2 rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-5"
         >
-          <h2 className="text-base font-semibold text-white">课程元数据</h2>
+          <h2 className="text-base font-bold text-ink-primary">课程元数据</h2>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5 sm:col-span-2">
-              <label htmlFor="editor-course-title" className="block text-xs font-medium text-slate-300">
+              <label
+                htmlFor="editor-course-title"
+                className="block text-xs font-medium text-ink-secondary"
+              >
                 课程标题
               </label>
               <input
@@ -1355,13 +1412,16 @@ export default function CourseEditorPage() {
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                className={FIELD_INPUT_CLASS}
                 required
               />
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="editor-instructor" className="block text-xs font-medium text-slate-300">
+              <label
+                htmlFor="editor-instructor"
+                className="block text-xs font-medium text-ink-secondary"
+              >
                 讲师
               </label>
               <input
@@ -1370,19 +1430,22 @@ export default function CourseEditorPage() {
                 value={instructor}
                 onChange={(e) => setInstructor(e.target.value)}
                 placeholder="讲师姓名"
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                className={FIELD_INPUT_CLASS}
               />
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="editor-library" className="block text-xs font-medium text-slate-300">
+              <label
+                htmlFor="editor-library"
+                className="block text-xs font-medium text-ink-secondary"
+              >
                 所属媒体库
               </label>
               <select
                 id="editor-library"
                 value={libraryId}
                 onChange={(e) => setLibraryId(e.target.value)}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                className={FIELD_INPUT_CLASS}
               >
                 {libraries.map((lib) => (
                   <option key={lib.id} value={lib.id}>
@@ -1393,7 +1456,10 @@ export default function CourseEditorPage() {
             </div>
 
             <div className="space-y-1.5 sm:col-span-2">
-              <label htmlFor="editor-overview" className="block text-xs font-medium text-slate-300">
+              <label
+                htmlFor="editor-overview"
+                className="block text-xs font-medium text-ink-secondary"
+              >
                 课程简介
               </label>
               <textarea
@@ -1401,26 +1467,29 @@ export default function CourseEditorPage() {
                 rows={4}
                 value={overview}
                 onChange={(e) => setOverview(e.target.value)}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                className={FIELD_INPUT_CLASS}
               />
             </div>
 
             <div className="space-y-2 sm:col-span-2">
-              <label htmlFor="editor-tag-input" className="block text-xs font-medium text-slate-300">
+              <label
+                htmlFor="editor-tag-input"
+                className="block text-xs font-medium text-ink-secondary"
+              >
                 课程标签
               </label>
               <div className="flex flex-wrap gap-1.5">
                 {tags.map((t) => (
                   <span
                     key={t}
-                    className="inline-flex items-center gap-1 rounded-full border border-indigo-500/30 bg-indigo-500/15 px-2.5 py-0.5 text-xs text-indigo-200"
+                    className="inline-flex items-center gap-1 rounded-full border border-accent-ring bg-accent-soft px-2.5 py-0.5 text-xs font-medium text-accent-ink"
                   >
                     {t}
                     <button
                       type="button"
                       aria-label={`移除标签 ${t}`}
                       onClick={() => setTags((prev) => prev.filter((x) => x !== t))}
-                      className="hover:text-white"
+                      className="rounded-full p-0.5 hover:bg-card/60 transition-colors cursor-pointer"
                     >
                       <X className="h-3 w-3" />
                     </button>
@@ -1440,13 +1509,13 @@ export default function CourseEditorPage() {
                     }
                   }}
                   placeholder="输入标签后按回车或点击添加"
-                  className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                  className="flex-1 rounded-xl border border-default bg-subtle/60 px-3 py-1.5 text-xs text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
                 />
                 <Tooltip content="将输入的标签添加到课程中">
                   <button
                     type="button"
                     onClick={handleAddTag}
-                    className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                    className="rounded-xl border border-default bg-subtle px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors cursor-pointer"
                   >
                     添加标签
                   </button>
@@ -1460,7 +1529,7 @@ export default function CourseEditorPage() {
               <button
                 type="submit"
                 disabled={savingMeta}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
               >
                 {savingMeta ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -1474,10 +1543,10 @@ export default function CourseEditorPage() {
         </form>
 
         {/* Cover & Backdrop Panel */}
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/75 p-5 space-y-5">
+        <div className="rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-5">
           <div className="space-y-3">
-            <h2 className="text-base font-semibold text-white">课程封面</h2>
-            <div className="aspect-[16/10] w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950 flex items-center justify-center">
+            <h2 className="text-base font-bold text-ink-primary">课程封面</h2>
+            <div className="aspect-[16/10] w-full overflow-hidden rounded-2xl border border-subtle bg-subtle flex items-center justify-center">
               {(course.cover_path || course.first_lesson_id) && !coverFailed ? (
                 <img
                   src={itemPrimaryImageUrl(course.id, course.updated_at)}
@@ -1486,13 +1555,13 @@ export default function CourseEditorPage() {
                   className="h-full w-full object-cover"
                 />
               ) : (
-                <span className="text-xs text-slate-500">暂无封面</span>
+                <span className="text-xs text-ink-muted">暂无封面</span>
               )}
             </div>
 
             <div className="flex flex-wrap gap-2">
               <Tooltip content="从本地上传图片作为课程封面">
-                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition-colors">
+                <label className={`cursor-pointer ${SECONDARY_BTN_CLASS}`}>
                   <Upload className="h-3.5 w-3.5" />
                   <span>{uploadingCover ? '上传中...' : '上传封面'}</span>
                   <input
@@ -1510,7 +1579,7 @@ export default function CourseEditorPage() {
                   type="button"
                   disabled={allLessons.length === 0 || uploadingCover}
                   onClick={() => setShowFramePicker((v) => !v)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20 disabled:opacity-50 transition-colors"
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-accent-ring bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent-ink hover:bg-accent hover:text-ink-inverse disabled:opacity-50 transition-colors cursor-pointer"
                 >
                   <ImagePlus className="h-3.5 w-3.5" />
                   <span>从课时帧选取封面</span>
@@ -1519,8 +1588,8 @@ export default function CourseEditorPage() {
             </div>
 
             {showFramePicker && (
-              <div className="rounded-xl border border-slate-800 bg-slate-950/90 p-3 space-y-2 max-h-48 overflow-y-auto">
-                <p className="text-[11px] font-medium text-slate-400">
+              <div className="rounded-2xl border border-subtle bg-subtle/60 p-3 space-y-2 max-h-48 overflow-y-auto">
+                <p className="text-[11px] font-medium text-ink-muted">
                   点击下方课时，将使用其视频截图作为课程封面：
                 </p>
                 {allLessons.map((lesson) => (
@@ -1528,19 +1597,21 @@ export default function CourseEditorPage() {
                     key={lesson.id}
                     type="button"
                     onClick={() => void handlePickCoverFromLesson(lesson.id)}
-                    className="w-full flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1.5 text-left text-xs text-slate-200 hover:border-indigo-500/50 hover:text-white transition-colors"
+                    className="w-full flex items-center justify-between rounded-xl border border-subtle bg-card px-2.5 py-1.5 text-left text-xs text-ink-primary hover:border-accent-ring hover:bg-accent-soft transition-colors cursor-pointer"
                   >
                     <span className="truncate">{lesson.title}</span>
-                    <span className="text-[10px] text-indigo-300 shrink-0 ml-2">设为封面</span>
+                    <span className="text-[10px] font-medium text-accent-ink shrink-0 ml-2">
+                      设为封面
+                    </span>
                   </button>
                 ))}
               </div>
             )}
           </div>
 
-          <div className="border-t border-slate-800 pt-4 space-y-3">
-            <h3 className="text-sm font-semibold text-white">背景横幅（Backdrop）</h3>
-            <div className="aspect-video w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950 flex items-center justify-center">
+          <div className="border-t border-subtle pt-5 space-y-3">
+            <h3 className="text-sm font-bold text-ink-primary">背景横幅（Backdrop）</h3>
+            <div className="aspect-video w-full overflow-hidden rounded-2xl border border-subtle bg-subtle flex items-center justify-center">
               {course.backdrop_path && !backdropFailed ? (
                 <img
                   src={itemBackdropImageUrl(course.id, course.updated_at)}
@@ -1549,11 +1620,11 @@ export default function CourseEditorPage() {
                   className="h-full w-full object-cover"
                 />
               ) : (
-                <span className="text-xs text-slate-500">暂无背景图</span>
+                <span className="text-xs text-ink-muted">暂无背景图</span>
               )}
             </div>
             <Tooltip content="上传宽屏背景横幅图（Jellyfin 详情页展示）">
-              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition-colors">
+              <label className={`cursor-pointer ${SECONDARY_BTN_CLASS}`}>
                 <Upload className="h-3.5 w-3.5" />
                 <span>{uploadingBackdrop ? '上传中...' : '上传背景图'}</span>
                 <input
@@ -1569,12 +1640,12 @@ export default function CourseEditorPage() {
         </div>
       </div>
 
-      {/* Chapter & Lesson Organizer */}
+      {/* Section 2: Chapter & Lesson Organizer */}
       <section className="space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold text-white">章节与课时结构</h2>
-            <p className="text-xs text-slate-400">
+            <h2 className="text-base font-bold text-ink-primary">章节与课时结构</h2>
+            <p className="text-xs text-ink-muted">
               支持拖拽或使用上下箭头调整章节与课时顺序，也可跨章节移动课时或查看字幕信息。
             </p>
           </div>
@@ -1586,13 +1657,13 @@ export default function CourseEditorPage() {
               onChange={(e) => setNewChapterTitle(e.target.value)}
               placeholder="输入新章节名称..."
               aria-label="新章节名称"
-              className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+              className="rounded-xl border border-default bg-card px-3.5 py-2 text-xs text-ink-primary placeholder:text-ink-muted shadow-card focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
             />
             <Tooltip content="在课程末尾新增一个章节分组">
               <button
                 type="submit"
                 disabled={addingChapter || !newChapterTitle.trim()}
-                className="inline-flex items-center gap-1 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+                className="inline-flex items-center gap-1 rounded-xl bg-accent px-3.5 py-2 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
               >
                 <Plus className="h-3.5 w-3.5" />
                 <span>添加章节</span>
@@ -1602,7 +1673,7 @@ export default function CourseEditorPage() {
         </div>
 
         {chapters.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-10 text-center text-sm text-slate-400">
+          <div className="rounded-3xl border border-dashed border-default bg-card/60 p-10 text-center text-sm text-ink-muted shadow-card">
             暂无章节，请先添加一个章节后再从存储源添加视频课时。
           </div>
         ) : (
@@ -1642,20 +1713,25 @@ export default function CourseEditorPage() {
       {/* Add Video From Storage Modal */}
       {addVideoChapterId && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm p-4"
           role="dialog"
           aria-modal="true"
           aria-label="从存储添加视频"
         >
-          <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
-              <h3 className="text-base font-bold text-white">从存储添加视频到章节</h3>
+          <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-subtle bg-popover shadow-float">
+            <div className="flex items-center justify-between border-b border-subtle px-5 py-4">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-accent-soft text-accent-ink">
+                  <Video className="h-4 w-4" />
+                </span>
+                <h3 className="text-base font-bold text-ink-primary">从存储添加视频到章节</h3>
+              </div>
               <Tooltip content="关闭弹窗">
                 <button
                   type="button"
                   aria-label="关闭"
                   onClick={() => setAddVideoChapterId(null)}
-                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                  className="rounded-lg p-1.5 text-ink-muted hover:bg-subtle hover:text-ink-primary transition-colors cursor-pointer"
                 >
                   <X className="h-5 w-5" />
                 </button>
@@ -1668,7 +1744,7 @@ export default function CourseEditorPage() {
                   aria-label="选择存储源"
                   value={selectedSourceId}
                   onChange={(e) => void handleSourceChangeInPicker(e.target.value)}
-                  className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                  className="rounded-xl border border-default bg-subtle/60 px-3 py-2 text-xs text-ink-primary focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
                 >
                   {sources.map((src) => (
                     <option key={src.id} value={src.id}>
@@ -1683,11 +1759,11 @@ export default function CourseEditorPage() {
                     value={storageSearch}
                     onChange={(e) => setStorageSearch(e.target.value)}
                     placeholder="按文件名或路径搜索..."
-                    className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                    className="flex-1 rounded-xl border border-default bg-subtle/60 px-3 py-2 text-xs text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors"
                   />
                   <button
                     type="submit"
-                    className="rounded-xl bg-slate-800 border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                    className="rounded-xl border border-default bg-card px-3 py-2 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary transition-colors cursor-pointer"
                   >
                     筛选
                   </button>
@@ -1695,12 +1771,12 @@ export default function CourseEditorPage() {
               </div>
 
               {loadingStorageFiles ? (
-                <div className="flex items-center justify-center py-10 text-slate-400 gap-2 text-xs">
-                  <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
+                <div className="flex items-center justify-center py-10 text-ink-secondary gap-2 text-xs">
+                  <Loader2 className="h-4 w-4 animate-spin text-accent" />
                   <span>加载文件列表...</span>
                 </div>
               ) : storageFiles.length === 0 ? (
-                <p className="py-8 text-center text-xs text-slate-500">
+                <p className="py-8 text-center text-xs text-ink-muted">
                   未找到可用的视频文件，请先在“存储与导入”中扫描存储源。
                 </p>
               ) : (
@@ -1708,18 +1784,18 @@ export default function CourseEditorPage() {
                   {storageFiles.map((file) => (
                     <div
                       key={file.id}
-                      className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2"
+                      className="flex items-center justify-between gap-3 rounded-2xl border border-subtle bg-subtle/50 px-3.5 py-2.5 hover:border-default transition-colors"
                     >
                       <div className="min-w-0">
-                        <p className="text-xs font-medium text-slate-100 truncate">
+                        <p className="text-xs font-medium text-ink-primary truncate">
                           {file.file_name}
                         </p>
-                        <p className="text-[11px] text-slate-500 truncate">{file.relative_path}</p>
+                        <p className="text-[11px] text-ink-muted truncate">{file.relative_path}</p>
                       </div>
                       <button
                         type="button"
                         onClick={() => void handleAddLessonFromStorage(file)}
-                        className="shrink-0 rounded-lg bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-500"
+                        className="shrink-0 rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover transition-colors cursor-pointer"
                       >
                         添加
                       </button>
