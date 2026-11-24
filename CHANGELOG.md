@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.0 (2026-11-24)
+
+内置自更新模块与自动化多架构发版：
+
+- **自动版本检测与安全自更新**：新增零外部依赖的 `internal/updater` 模块，支持启动延迟检查与定时检查 GitHub Releases（默认每 6 小时，支持 `ETag` 节流、忽略预发布版本及可选下载加速代理前缀并严格隔离 `COURSEFIN_GITHUB_TOKEN`）；下载阶段强制执行 `checksums.txt` `SHA-256` 常量时间校验、安全 `tar.gz` 解包与目标目录 `--version` 预检，通过 `.bak` 原子备份与 Unix `syscall.Exec` 原地热重启完成升级。
+- **Docker 持久更新与防变砖回滚**：新增版本感知启动脚本 `scripts/docker-entrypoint.sh`，在镜像内 `/usr/local/bin/coursefin` 与持久卷 `/data/updates/bin/coursefin` 间按语义版本号择新以 PID 1 运行（无需挂载 `docker.sock`），并配合 `.pending_update` 启动确认标记在启动崩溃时自动回滚至 `.bak` 或镜像内置版本；`Dockerfile` 与 `docker-compose.yml` 同步注入构建版本号。
+- **管理 API、健康元数据与 Web 更新中心**：新增管理员鉴权接口 `GET /api/v1/system/update`、`PUT /api/v1/system/update/config`、`POST /api/v1/system/update/check`、`POST /api/v1/system/update/apply`，扩展 `GET /health` 返回 `version` 与 `boot_id`；Web 端顶栏新增非侵入式新版本提示胶囊与移动端红点，设置页新增「系统版本与更新」卡片（纯文本安全渲染 Release Notes、二次确认弹窗、实时进度条、断连后 `/health` 轮询等待重载、自动回滚识别及更新偏好配置）。
+- **自动化多架构发布流水线**：新增 `.github/workflows/release.yml`，推送 `v*` 标签即可自动构建内嵌前端并交叉编译 `linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64` 压缩包与 `checksums.txt` 发布至 GitHub Releases（自动为预发布标签设置 `prerelease: true`）。
+
 ## v1.0.1 (2026-11-24)
 
 Web 管理端易用性与交互优化：

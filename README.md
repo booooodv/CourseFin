@@ -1,6 +1,6 @@
 # CourseFin
 
-![Version](https://img.shields.io/badge/version-v1.0.1-indigo)
+![Version](https://img.shields.io/badge/version-v1.1.0-indigo)
 ![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)
 ![React](https://img.shields.io/badge/Web-React%2019%20%2B%20TypeScript-61DAFB?logo=react&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-Single%20Container-2496ED?logo=docker&logoColor=white)
