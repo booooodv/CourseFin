@@ -74,7 +74,15 @@ func (h *handler) handleUpdateLibrary(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
 	libID := normalizeID(chi.URLParam(r, "id"))
-	if err := h.cat.DeleteLibrary(r.Context(), libID); err != nil {
+	q := r.URL.Query()
+	moveTo := strings.TrimSpace(q.Get("move_to_library_id"))
+	forceRaw := strings.ToLower(strings.TrimSpace(q.Get("force")))
+	force := forceRaw == "true" || forceRaw == "1"
+
+	if err := h.cat.DeleteLibraryWithOptions(r.Context(), libID, catalog.DeleteLibraryOptions{
+		MoveToLibraryID: moveTo,
+		Force:           force,
+	}); err != nil {
 		writeCatalogError(w, err)
 		return
 	}

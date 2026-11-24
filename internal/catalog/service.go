@@ -348,18 +348,118 @@ func (s *Service) UpdateLibrary(ctx context.Context, libraryID, name string) (*L
 	return &lib, nil
 }
 
+type DeleteLibraryOptions struct {
+	MoveToLibraryID string
+	Force           bool
+}
+
 func (s *Service) DeleteLibrary(ctx context.Context, libraryID string) error {
+	return s.DeleteLibraryWithOptions(ctx, libraryID, DeleteLibraryOptions{})
+}
+
+func (s *Service) DeleteLibraryWithOptions(ctx context.Context, libraryID string, opts DeleteLibraryOptions) error {
 	libraryID = normalizeOrRaw(libraryID)
-	res, err := s.db.ExecContext(ctx, `DELETE FROM libraries WHERE id = ?`, libraryID)
-	if err != nil {
-		if isConstraintErr(err) {
-			return fmt.Errorf("%w: library contains courses", ErrConflict)
+	moveToID := normalizeOrRaw(opts.MoveToLibraryID)
+
+	if moveToID != "" && opts.Force {
+		return fmt.Errorf("%w: move_to_library_id and force cannot be used together", ErrInvalidInput)
+	}
+
+	if moveToID == "" && !opts.Force {
+		res, err := s.db.ExecContext(ctx, `DELETE FROM libraries WHERE id = ?`, libraryID)
+		if err != nil {
+			if isConstraintErr(err) {
+				return fmt.Errorf("%w: library contains courses", ErrConflict)
+			}
+			return fmt.Errorf("delete library: %w", err)
 		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	}
+
+	if moveToID != "" && moveToID == libraryID {
+		return fmt.Errorf("%w: target library must differ from library being deleted", ErrInvalidInput)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete library tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM libraries WHERE id = ?`, libraryID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("check source library: %w", err)
+	}
+
+	var coversToClean []string
+
+	if moveToID != "" {
+		var targetExists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM libraries WHERE id = ?`, moveToID).Scan(&targetExists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: target library not found", ErrNotFound)
+			}
+			return fmt.Errorf("check target library: %w", err)
+		}
+		now := nowUTC()
+		if _, err := tx.ExecContext(ctx, `UPDATE courses SET library_id = ?, updated_at = ? WHERE library_id = ?`, moveToID, now, libraryID); err != nil {
+			return fmt.Errorf("migrate library courses: %w", err)
+		}
+	} else if opts.Force {
+		rows, err := tx.QueryContext(ctx, `SELECT cover_path, backdrop_path FROM courses WHERE library_id = ?`, libraryID)
+		if err != nil {
+			return fmt.Errorf("query library course covers: %w", err)
+		}
+		for rows.Next() {
+			var coverPath, backdropPath string
+			if err := rows.Scan(&coverPath, &backdropPath); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan library course covers: %w", err)
+			}
+			if coverPath != "" {
+				coversToClean = append(coversToClean, coverPath)
+			}
+			if backdropPath != "" {
+				coversToClean = append(coversToClean, backdropPath)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate library course covers: %w", err)
+		}
+		rows.Close()
+
+		if _, err := tx.ExecContext(ctx, `DELETE FROM courses WHERE library_id = ?`, libraryID); err != nil {
+			return fmt.Errorf("delete library courses: %w", err)
+		}
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM libraries WHERE id = ?`, libraryID)
+	if err != nil {
 		return fmt.Errorf("delete library: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete library: %w", err)
+	}
+
+	// Clean up app-managed cover/backdrop artifacts inside dataDir/covers only (never touch media volumes).
+	if s.dataDir != "" && len(coversToClean) > 0 {
+		coversDir := filepath.Join(s.dataDir, "covers")
+		for _, p := range coversToClean {
+			_ = os.Remove(filepath.Join(coversDir, filepath.Base(p)))
+		}
 	}
 	return nil
 }

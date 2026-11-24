@@ -1188,3 +1188,67 @@ func TestBrowseFSDirs(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteLibraryAPIModes(t *testing.T) {
+	env := setupAPITestEnv(t)
+
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "lib-del"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	lib1, err := env.catSvc.CreateLibrary(context.Background(), "后端")
+	if err != nil {
+		t.Fatalf("CreateLibrary 1: %v", err)
+	}
+	lib2, err := env.catSvc.CreateLibrary(context.Background(), "全栈")
+	if err != nil {
+		t.Fatalf("CreateLibrary 2: %v", err)
+	}
+	course, err := env.catSvc.CreateCourse(context.Background(), catalog.CreateCourseInput{
+		LibraryID: lib1.ID,
+		Title:     "分布式系统",
+	})
+	if err != nil {
+		t.Fatalf("CreateCourse: %v", err)
+	}
+
+	// 1. Default delete with courses -> 409 Conflict
+	resp, raw := env.doJSON(t, http.MethodDelete, "/api/v1/libraries/"+lib1.ID, nil, token)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("DELETE non-empty library = %d, want 409: %s", resp.StatusCode, raw)
+	}
+
+	// 2. Both move_to_library_id & force=true -> 400 Bad Request
+	resp, raw = env.doJSON(t, http.MethodDelete, "/api/v1/libraries/"+lib1.ID+"?move_to_library_id="+lib2.ID+"&force=true", nil, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("DELETE move+force = %d, want 400: %s", resp.StatusCode, raw)
+	}
+
+	// 3. Migrate courses to lib2 and delete lib1 -> 200
+	resp, raw = env.doJSON(t, http.MethodDelete, "/api/v1/libraries/"+lib1.ID+"?move_to_library_id="+lib2.ID, nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE move_to_library_id = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	moved, err := env.catSvc.GetCourseDetail(context.Background(), course.ID)
+	if err != nil {
+		t.Fatalf("GetCourseDetail after migrate: %v", err)
+	}
+	if moved.LibraryID != lib2.ID {
+		t.Fatalf("moved.LibraryID = %q, want %q", moved.LibraryID, lib2.ID)
+	}
+
+	// 4. Force delete lib2 -> 200 and course removed
+	resp, raw = env.doJSON(t, http.MethodDelete, "/api/v1/libraries/"+lib2.ID+"?force=true", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE force=true = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	resp, _ = env.doJSON(t, http.MethodGet, "/api/v1/courses/"+course.ID, nil, token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET course after force delete = %d, want 404", resp.StatusCode)
+	}
+}

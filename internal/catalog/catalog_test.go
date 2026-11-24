@@ -3,6 +3,7 @@ package catalog_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -579,5 +580,120 @@ func TestProgressAutoCompleteAt90PercentAndNextUp(t *testing.T) {
 	}
 	if pReplayDone.PlayCount != 2 {
 		t.Fatalf("expected PlayCount=2 after genuine replay, got %+v", pReplayDone)
+	}
+}
+
+func TestDeleteLibraryWithOptions(t *testing.T) {
+	ctx := context.Background()
+	svc, conn, dataDir := setupTestCatalog(t)
+
+	// 1. Empty library deletes cleanly with default options
+	emptyLib, err := svc.CreateLibrary(ctx, "空库")
+	if err != nil {
+		t.Fatalf("CreateLibrary empty: %v", err)
+	}
+	if err := svc.DeleteLibraryWithOptions(ctx, emptyLib.ID, catalog.DeleteLibraryOptions{}); err != nil {
+		t.Fatalf("DeleteLibraryWithOptions empty: %v", err)
+	}
+
+	// Setup media source, two libraries, and a course with chapter + lesson + cover
+	mediaRoot := t.TempDir()
+	src, err := svc.CreateSource(ctx, "Disk", "local", mediaRoot)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	mfID := seedMediaFile(t, conn, src.ID, "go/01.mp4", 60000)
+
+	libA, err := svc.CreateLibrary(ctx, "库A")
+	if err != nil {
+		t.Fatalf("CreateLibrary A: %v", err)
+	}
+	libB, err := svc.CreateLibrary(ctx, "库B")
+	if err != nil {
+		t.Fatalf("CreateLibrary B: %v", err)
+	}
+
+	course, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{
+		LibraryID: libA.ID,
+		Title:     "Go 课程",
+	})
+	if err != nil {
+		t.Fatalf("CreateCourse: %v", err)
+	}
+	ch, err := svc.CreateChapter(ctx, course.ID, "第一章")
+	if err != nil {
+		t.Fatalf("CreateChapter: %v", err)
+	}
+	if _, err := svc.AddLesson(ctx, ch.ID, mfID, "第1节"); err != nil {
+		t.Fatalf("AddLesson: %v", err)
+	}
+
+	// 2. Non-empty library returns ErrConflict with default options
+	if err := svc.DeleteLibraryWithOptions(ctx, libA.ID, catalog.DeleteLibraryOptions{}); !errors.Is(err, catalog.ErrConflict) {
+		t.Fatalf("default delete non-empty err = %v, want ErrConflict", err)
+	}
+
+	// 3. Conflicting options (MoveToLibraryID + Force) returns ErrInvalidInput
+	if err := svc.DeleteLibraryWithOptions(ctx, libA.ID, catalog.DeleteLibraryOptions{
+		MoveToLibraryID: libB.ID,
+		Force:           true,
+	}); !errors.Is(err, catalog.ErrInvalidInput) {
+		t.Fatalf("move+force err = %v, want ErrInvalidInput", err)
+	}
+
+	// 4. Self-migration returns ErrInvalidInput; nonexistent target returns ErrNotFound
+	if err := svc.DeleteLibraryWithOptions(ctx, libA.ID, catalog.DeleteLibraryOptions{
+		MoveToLibraryID: libA.ID,
+	}); !errors.Is(err, catalog.ErrInvalidInput) {
+		t.Fatalf("self move err = %v, want ErrInvalidInput", err)
+	}
+	if err := svc.DeleteLibraryWithOptions(ctx, libA.ID, catalog.DeleteLibraryOptions{
+		MoveToLibraryID: "nonexistent-lib",
+	}); !errors.Is(err, catalog.ErrNotFound) {
+		t.Fatalf("missing target move err = %v, want ErrNotFound", err)
+	}
+
+	// 5. Valid MoveToLibraryID moves courses & preserves chapters/lessons, deletes libA
+	if err := svc.DeleteLibraryWithOptions(ctx, libA.ID, catalog.DeleteLibraryOptions{
+		MoveToLibraryID: libB.ID,
+	}); err != nil {
+		t.Fatalf("move delete libA: %v", err)
+	}
+	moved, err := svc.GetCourseDetail(ctx, course.ID)
+	if err != nil {
+		t.Fatalf("GetCourseDetail after move: %v", err)
+	}
+	if moved.LibraryID != libB.ID {
+		t.Fatalf("moved.LibraryID = %q, want %q", moved.LibraryID, libB.ID)
+	}
+	if moved.ChapterCount != 2 || moved.LessonCount != 1 {
+		t.Fatalf("expected chapters/lessons preserved (default + created chapter), got ch=%d l=%d", moved.ChapterCount, moved.LessonCount)
+	}
+
+	// 6. Force delete removes library + courses + app-managed covers, leaves media_files intact
+	coversDir := filepath.Join(dataDir, "covers")
+	if err := os.MkdirAll(coversDir, 0o755); err != nil {
+		t.Fatalf("mkdir covers: %v", err)
+	}
+	coverName := course.ID + "_cover.jpg"
+	coverFull := filepath.Join(coversDir, coverName)
+	if err := os.WriteFile(coverFull, []byte("fakejpg"), 0o644); err != nil {
+		t.Fatalf("write cover: %v", err)
+	}
+	if _, err := svc.UpdateCourse(ctx, course.ID, catalog.UpdateCourseInput{CoverPath: &coverName}); err != nil {
+		t.Fatalf("UpdateCourse cover: %v", err)
+	}
+
+	if err := svc.DeleteLibraryWithOptions(ctx, libB.ID, catalog.DeleteLibraryOptions{Force: true}); err != nil {
+		t.Fatalf("force delete libB: %v", err)
+	}
+	if _, err := svc.GetCourseDetail(ctx, course.ID); !errors.Is(err, catalog.ErrNotFound) {
+		t.Fatalf("expected course deleted after force library delete, got %v", err)
+	}
+	if _, err := os.Stat(coverFull); !os.IsNotExist(err) {
+		t.Fatalf("expected cover file removed on force delete, stat err = %v", err)
+	}
+	if _, err := svc.GetMediaFile(ctx, mfID); err != nil {
+		t.Fatalf("expected media_file intact after force library delete, got %v", err)
 	}
 }
