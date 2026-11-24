@@ -108,13 +108,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           className="pointer-events-none fixed top-4 right-4 z-[60] flex w-full max-w-sm flex-col gap-2 px-4 sm:px-0"
         >
           {items.map((item) => {
-            const tone =
-              item.variant === 'success'
-                ? 'border-emerald-500/40 bg-slate-900/95 text-emerald-100 shadow-emerald-950/40'
-                : item.variant === 'error'
-                  ? 'border-rose-500/40 bg-slate-900/95 text-rose-100 shadow-rose-950/40'
-                  : 'border-indigo-500/40 bg-slate-900/95 text-indigo-100 shadow-indigo-950/40';
-
             const Icon =
               item.variant === 'success'
                 ? CheckCircle2
@@ -122,26 +115,30 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                   ? AlertCircle
                   : Info;
 
-            const iconColor =
+            const iconPillClass =
               item.variant === 'success'
-                ? 'text-emerald-400'
+                ? 'bg-status-success-soft text-status-success-ink'
                 : item.variant === 'error'
-                  ? 'text-rose-400'
-                  : 'text-indigo-400';
+                  ? 'bg-status-danger-soft text-status-danger-ink'
+                  : 'bg-accent-soft text-accent-ink';
 
             return (
               <div
                 key={item.id}
                 role="status"
-                className={`pointer-events-auto flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 text-xs sm:text-sm shadow-xl backdrop-blur-md transition-all ${tone}`}
+                className="pointer-events-auto flex items-center gap-2.5 rounded-2xl border border-subtle bg-popover px-3.5 py-2.5 text-xs sm:text-sm text-ink-primary shadow-float backdrop-blur-md transition-all"
               >
-                <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${iconColor}`} />
+                <span
+                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg ${iconPillClass}`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                </span>
                 <span className="flex-1 leading-snug">{item.message}</span>
                 <button
                   type="button"
                   aria-label="关闭提示"
                   onClick={() => dismiss(item.id)}
-                  className="shrink-0 rounded-md p-0.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+                  className="shrink-0 rounded-lg p-1 text-ink-muted hover:bg-subtle hover:text-ink-primary transition-colors"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>

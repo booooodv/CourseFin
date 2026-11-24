@@ -10,7 +10,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 
-type TooltipPlacement = 'top' | 'bottom';
+export type TooltipPlacement = 'top' | 'bottom' | 'right';
 
 interface TriggerProps {
   disabled?: boolean;
@@ -59,7 +59,35 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
       const rect = el.getBoundingClientRect();
       const tipRect = tooltipElRef.current?.getBoundingClientRect();
       const tipHeight = tipRect ? tipRect.height : 32;
-      const halfWidth = tipRect ? tipRect.width / 2 : 0;
+      const tipWidth = tipRect ? tipRect.width : 0;
+      const halfWidth = tipWidth / 2;
+      const halfHeight = tipHeight / 2;
+
+      if (placement === 'right') {
+        const rightStart = rect.right + GAP_PX;
+        let left = rightStart;
+        if (tipWidth > 0 && rightStart + tipWidth + EDGE_PADDING_PX > window.innerWidth) {
+          const leftStart = rect.left - GAP_PX - tipWidth;
+          if (leftStart >= EDGE_PADDING_PX) {
+            left = leftStart;
+          } else {
+            const maxLeft = Math.max(EDGE_PADDING_PX, window.innerWidth - EDGE_PADDING_PX - tipWidth);
+            left = Math.max(EDGE_PADDING_PX, Math.min(maxLeft, rightStart));
+          }
+        }
+
+        const centerY = rect.top + rect.height / 2;
+        const minTop = EDGE_PADDING_PX + halfHeight;
+        const maxTop = Math.max(minTop, window.innerHeight - EDGE_PADDING_PX - halfHeight);
+        const top = Math.max(minTop, Math.min(maxTop, centerY));
+
+        setCoords((prev) =>
+          prev.top === top && prev.left === left && prev.resolved === 'right'
+            ? prev
+            : { top, left, resolved: 'right' },
+        );
+        return;
+      }
 
       let resolved: TooltipPlacement = placement;
       if (placement === 'top' && rect.top < tipHeight + GAP_PX + EDGE_PADDING_PX) {
@@ -188,7 +216,11 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
   });
 
   const translateClass =
-    coords.resolved === 'top' ? '-translate-x-1/2 -translate-y-full' : '-translate-x-1/2';
+    coords.resolved === 'right'
+      ? '-translate-y-1/2'
+      : coords.resolved === 'top'
+        ? '-translate-x-1/2 -translate-y-full'
+        : '-translate-x-1/2';
 
   return (
     <>
@@ -201,7 +233,7 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
             id={tooltipId}
             role="tooltip"
             style={{ top: `${coords.top}px`, left: `${coords.left}px` }}
-            className={`pointer-events-none fixed z-[70] w-max max-w-xs whitespace-normal break-words text-center rounded-lg border border-slate-700/90 bg-slate-800/95 px-2.5 py-1 text-[11px] font-medium leading-snug text-slate-100 shadow-lg backdrop-blur-sm ${translateClass}`}
+            className={`pointer-events-none fixed z-[70] w-max max-w-xs whitespace-normal break-words text-center rounded-lg border border-white/10 bg-tooltip px-2.5 py-1 text-[11px] font-medium leading-snug text-ink-tooltip shadow-float backdrop-blur-sm ${translateClass}`}
           >
             {trimmed}
           </div>,

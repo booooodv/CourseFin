@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ThemeProvider, useTheme, THEME_STORAGE_KEY } from '../contexts/ThemeContext';
+import ThemeSwitcher from '../components/ThemeSwitcher';
+import LibraryFormModal from '../components/LibraryFormModal';
 
 type MediaQueryListener = (event: MediaQueryListEvent) => void;
 
@@ -199,5 +201,143 @@ describe('ThemeContext', () => {
     );
     expect(screen.getByTestId('mode')).toHaveTextContent('system');
     expect(screen.getByTestId('resolved-theme')).toHaveTextContent('light');
+  });
+});
+
+describe('ThemeSwitcher', () => {
+  const originalMatchMedia = window.matchMedia;
+
+  beforeEach(() => {
+    localStorage.clear();
+    delete document.documentElement.dataset.theme;
+    document.documentElement.classList.remove('dark');
+    document.documentElement.style.colorScheme = '';
+    mockMatchMedia(false);
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      configurable: true,
+      value: originalMatchMedia,
+    });
+    vi.restoreAllMocks();
+  });
+
+  it('renders segmented buttons with aria-pressed and updates localStorage and <html data-theme>', async () => {
+    const user = userEvent.setup();
+    render(
+      <ThemeProvider>
+        <ThemeSwitcher variant="segmented" />
+      </ThemeProvider>
+    );
+
+    const group = screen.getByRole('group', { name: '主题模式' });
+    expect(group).toBeInTheDocument();
+
+    const lightBtn = screen.getByRole('button', { name: '浅色' });
+    const darkBtn = screen.getByRole('button', { name: '深色' });
+    const systemBtn = screen.getByRole('button', { name: '自动' });
+
+    expect(systemBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(lightBtn).toHaveAttribute('aria-pressed', 'false');
+    expect(darkBtn).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(darkBtn);
+    expect(darkBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(systemBtn).toHaveAttribute('aria-pressed', 'false');
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+    expect(document.documentElement.dataset.theme).toBe('dark');
+
+    await user.click(lightBtn);
+    expect(lightBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(darkBtn).toHaveAttribute('aria-pressed', 'false');
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(document.documentElement.dataset.theme).toBe('light');
+  });
+
+  it('renders compact button and cycles theme modes on click', async () => {
+    const user = userEvent.setup();
+    render(
+      <ThemeProvider>
+        <ThemeSwitcher variant="compact" tooltipPlacement="right" />
+      </ThemeProvider>
+    );
+
+    const toggleBtn = screen.getByRole('button', { name: '切换主题模式' });
+    expect(document.documentElement.dataset.theme).toBe('light');
+
+    // system -> light -> dark -> system
+    await user.click(toggleBtn);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(document.documentElement.dataset.theme).toBe('light');
+
+    await user.click(toggleBtn);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+    expect(document.documentElement.dataset.theme).toBe('dark');
+
+    await user.click(toggleBtn);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('system');
+    expect(document.documentElement.dataset.theme).toBe('light');
+  });
+});
+
+describe('LibraryFormModal', () => {
+  it('validates empty input, submits trimmed name, and closes on Escape in create mode', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onSubmit = vi.fn();
+
+    render(
+      <LibraryFormModal
+        isOpen={true}
+        mode="create"
+        onClose={onClose}
+        onSubmit={onSubmit}
+      />
+    );
+
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toBeInTheDocument();
+
+    const input = screen.getByLabelText('新媒体库名称');
+    expect(input).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: '确认创建' }));
+    expect(screen.getByText('请输入媒体库名称')).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await user.type(input, '  后端工程  ');
+    await user.click(screen.getByRole('button', { name: '确认创建' }));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith('后端工程');
+
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('prefills initialName and submits via 保存名称 in rename mode', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onSubmit = vi.fn();
+
+    render(
+      <LibraryFormModal
+        isOpen={true}
+        mode="rename"
+        initialName="旧媒体库"
+        onClose={onClose}
+        onSubmit={onSubmit}
+      />
+    );
+
+    const input = screen.getByLabelText('重命名媒体库名称');
+    expect(input).toHaveValue('旧媒体库');
+
+    await user.clear(input);
+    await user.type(input, '新媒体库');
+    await user.click(screen.getByRole('button', { name: '保存名称' }));
+
+    expect(onSubmit).toHaveBeenCalledWith('新媒体库');
   });
 });

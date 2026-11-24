@@ -239,6 +239,98 @@ describe('Tooltip', () => {
       Object.defineProperty(window, 'innerWidth', { value: origInnerWidth, configurable: true });
     }
   });
+
+  it('positions placement="right" to the right of trigger, vertically centers with viewport clamping, and keeps whitespace-normal', async () => {
+    const origInnerWidth = window.innerWidth;
+    const origInnerHeight = window.innerHeight;
+    Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 768, configurable: true });
+
+    let triggerTop = 100;
+    let triggerBottom = 132;
+    const origGetRect = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.getAttribute('role') === 'tooltip') {
+        return {
+          top: 0,
+          bottom: 40,
+          left: 0,
+          right: 140,
+          width: 140,
+          height: 40,
+          x: 0,
+          y: 0,
+          toJSON: () => {},
+        } as DOMRect;
+      }
+      if (this.tagName === 'BUTTON') {
+        return {
+          top: triggerTop,
+          bottom: triggerBottom,
+          left: 16,
+          right: 56,
+          width: 40,
+          height: 32,
+          x: 16,
+          y: triggerTop,
+          toJSON: () => {},
+        } as DOMRect;
+      }
+      return origGetRect.call(this);
+    });
+
+    try {
+      const { rerender } = render(
+        <Tooltip content="折叠导航提示" placement="right">
+          <button type="button">导航项</button>
+        </Tooltip>,
+      );
+
+      const user = userEvent.setup();
+      await user.hover(screen.getByRole('button', { name: '导航项' }));
+
+      const tooltip = await screen.findByRole('tooltip');
+      expect(tooltip).toHaveTextContent('折叠导航提示');
+      expect(tooltip.className).not.toContain('whitespace-nowrap');
+      expect(tooltip.className).toContain('whitespace-normal');
+      expect(tooltip.className).toContain('-translate-y-1/2');
+      expect(Number.parseFloat(tooltip.style.left)).toBeGreaterThanOrEqual(56 + 8);
+      // trigger center = 116
+      expect(Number.parseFloat(tooltip.style.top)).toBe(116);
+
+      // Clamp near top edge: trigger center = 18, minTop = 10 + 40/2 = 30
+      await user.unhover(screen.getByRole('button', { name: '导航项' }));
+      triggerTop = 2;
+      triggerBottom = 34;
+      rerender(
+        <Tooltip content="折叠导航提示" placement="right">
+          <button type="button">导航项</button>
+        </Tooltip>,
+      );
+      await user.hover(screen.getByRole('button', { name: '导航项' }));
+      const topClampedTooltip = await screen.findByRole('tooltip');
+      expect(Number.parseFloat(topClampedTooltip.style.top)).toBeGreaterThanOrEqual(30);
+
+      // Clamp near bottom edge: trigger center = 756, maxTop = 768 - 10 - 40/2 = 738
+      await user.unhover(screen.getByRole('button', { name: '导航项' }));
+      triggerTop = 740;
+      triggerBottom = 772;
+      rerender(
+        <Tooltip content="折叠导航提示" placement="right">
+          <button type="button">导航项</button>
+        </Tooltip>,
+      );
+      await user.hover(screen.getByRole('button', { name: '导航项' }));
+      const bottomClampedTooltip = await screen.findByRole('tooltip');
+      expect(Number.parseFloat(bottomClampedTooltip.style.top)).toBeLessThanOrEqual(738);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { value: origInnerWidth, configurable: true });
+      Object.defineProperty(window, 'innerHeight', { value: origInnerHeight, configurable: true });
+      vi.restoreAllMocks();
+    }
+  });
 });
 
 describe('API client extensions', () => {

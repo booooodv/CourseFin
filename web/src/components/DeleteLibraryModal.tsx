@@ -89,19 +89,19 @@ export default function DeleteLibraryModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="delete-library-modal-title"
     >
-      <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl">
+      <div className="w-full max-w-lg overflow-hidden rounded-3xl border border-subtle bg-popover shadow-float">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
+        <div className="flex items-center justify-between border-b border-subtle px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-500/15 text-rose-400">
+            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-status-danger-soft text-status-danger-ink">
               <Trash2 className="h-4 w-4" />
             </span>
-            <h2 id="delete-library-modal-title" className="text-base font-bold text-white">
+            <h2 id="delete-library-modal-title" className="text-base font-bold text-ink-primary">
               删除媒体库
             </h2>
           </div>
@@ -112,7 +112,7 @@ export default function DeleteLibraryModal({
               aria-label="关闭"
               disabled={submitting}
               onClick={onClose}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors disabled:opacity-50"
+              className="rounded-lg p-1.5 text-ink-muted hover:bg-subtle hover:text-ink-primary transition-colors disabled:opacity-50"
             >
               <X className="h-5 w-5" />
             </button>
@@ -122,29 +122,29 @@ export default function DeleteLibraryModal({
         {/* Body */}
         <div className="p-5 space-y-4">
           {isEmpty ? (
-            <div className="space-y-2 text-sm text-slate-300">
+            <div className="space-y-2 text-sm text-ink-secondary">
               <p>
-                确定要删除空媒体库 <strong className="text-white">「{library.name}」</strong> 吗？
+                确定要删除空媒体库 <strong className="text-ink-primary">「{library.name}」</strong> 吗？
               </p>
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-ink-muted">
                 删除媒体库仅移除分组配置，不会影响本地硬盘上的任何视频文件。
               </p>
             </div>
           ) : (
             <div className="space-y-3.5">
-              <p className="text-sm text-slate-200">
-                媒体库 <strong className="text-white">「{library.name}」</strong> 下仍有{' '}
-                <strong className="text-indigo-300">{library.course_count}</strong> 门课程，请选择删除方式：
+              <p className="text-sm text-ink-secondary">
+                媒体库 <strong className="text-ink-primary">「{library.name}」</strong> 下仍有{' '}
+                <strong className="text-accent-ink">{library.course_count}</strong> 门课程，请选择删除方式：
               </p>
 
               {/* Option 1: Migrate courses */}
               <div
-                className={`rounded-xl border p-3.5 space-y-2.5 transition-colors ${
+                className={`rounded-2xl border p-3.5 space-y-2.5 transition-colors ${
                   !canMove
-                    ? 'border-slate-800/70 bg-slate-950/30 opacity-60'
+                    ? 'border-subtle bg-subtle/50 opacity-60'
                     : mode === 'move'
-                      ? 'border-indigo-500/60 bg-indigo-500/10'
-                      : 'border-slate-800 bg-slate-950/50 hover:border-slate-700'
+                      ? 'border-accent/50 bg-accent-soft'
+                      : 'border-subtle bg-subtle hover:border-default'
                 }`}
               >
                 <label className="flex items-start gap-2.5 cursor-pointer">
@@ -155,14 +155,14 @@ export default function DeleteLibraryModal({
                     disabled={!canMove || submitting}
                     checked={mode === 'move'}
                     onChange={() => setMode('move')}
-                    className="mt-0.5 h-4 w-4 border-slate-600 bg-slate-900 text-indigo-500 focus:ring-indigo-500"
+                    className="mt-0.5 h-4 w-4 border-default bg-card text-accent focus:ring-accent-ring"
                   />
                   <div className="space-y-0.5">
-                    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-white">
-                      <ArrowRightLeft className="h-3.5 w-3.5 text-indigo-400" />
+                    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
+                      <ArrowRightLeft className="h-3.5 w-3.5 text-accent-ink" />
                       迁移课程到其他媒体库并删除
                     </span>
-                    <p className="text-xs text-slate-400">
+                    <p className="text-xs text-ink-muted">
                       {canMove
                         ? '保留全部课程章节、封面、标签与观看进度，迁移完成后删除当前媒体库。'
                         : '暂无其他媒体库可迁入，可先新建一个媒体库，或选择下方连带删除。'}
@@ -174,7 +174,7 @@ export default function DeleteLibraryModal({
                   <div className="pl-6">
                     <label
                       htmlFor="move-target-library"
-                      className="block text-[11px] font-medium text-slate-400 mb-1"
+                      className="block text-[11px] font-medium text-ink-secondary mb-1"
                     >
                       迁移目标媒体库
                     </label>
@@ -184,7 +184,7 @@ export default function DeleteLibraryModal({
                       value={targetLibraryId}
                       disabled={submitting}
                       onChange={(e) => setTargetLibraryId(e.target.value)}
-                      className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                      className="w-full rounded-xl border border-default bg-card px-3 py-2 text-xs text-ink-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring"
                     >
                       {otherLibraries.map((lib) => (
                         <option key={lib.id} value={lib.id}>
@@ -198,10 +198,10 @@ export default function DeleteLibraryModal({
 
               {/* Option 2: Force delete courses metadata */}
               <div
-                className={`rounded-xl border p-3.5 transition-colors ${
+                className={`rounded-2xl border p-3.5 transition-colors ${
                   mode === 'force'
-                    ? 'border-rose-500/60 bg-rose-500/10'
-                    : 'border-slate-800 bg-slate-950/50 hover:border-slate-700'
+                    ? 'border-status-danger/50 bg-status-danger-soft'
+                    : 'border-subtle bg-subtle hover:border-default'
                 }`}
               >
                 <label className="flex items-start gap-2.5 cursor-pointer">
@@ -212,15 +212,15 @@ export default function DeleteLibraryModal({
                     disabled={submitting}
                     checked={mode === 'force'}
                     onChange={() => setMode('force')}
-                    className="mt-0.5 h-4 w-4 border-slate-600 bg-slate-900 text-rose-500 focus:ring-rose-500"
+                    className="mt-0.5 h-4 w-4 border-default bg-card text-status-danger focus:ring-status-danger/40"
                   />
                   <div className="space-y-1">
-                    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-rose-200">
-                      <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
+                    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-status-danger-ink">
+                      <AlertTriangle className="h-3.5 w-3.5 text-status-danger-ink" />
                       连带删除这 {library.course_count} 门课程记录
                     </span>
-                    <p className="text-xs text-slate-400 leading-relaxed">
-                      仅删除 CourseFin 中的课程目录、章节与观看进度记录，<strong className="text-slate-200">绝不删除本地硬盘上的视频文件</strong>。
+                    <p className="text-xs text-ink-muted leading-relaxed">
+                      仅删除 CourseFin 中的课程目录、章节与观看进度记录，<strong className="text-ink-primary">绝不删除本地硬盘上的视频文件</strong>。
                     </p>
                   </div>
                 </label>
@@ -229,19 +229,19 @@ export default function DeleteLibraryModal({
           )}
 
           {error && (
-            <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3.5 py-2 text-xs text-rose-200">
+            <div className="rounded-xl border border-status-danger/30 bg-status-danger-soft px-3.5 py-2 text-xs text-status-danger-ink">
               {error}
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2.5 border-t border-slate-800 bg-slate-900/95 px-5 py-3.5">
+        <div className="flex items-center justify-end gap-2.5 border-t border-subtle bg-subtle/40 px-5 py-3.5">
           <button
             type="button"
             disabled={submitting}
             onClick={onClose}
-            className="rounded-xl border border-slate-700 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-50 transition-colors"
+            className="rounded-xl border border-default bg-card px-4 py-2 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary disabled:opacity-50 transition-colors"
           >
             取消
           </button>
@@ -250,10 +250,10 @@ export default function DeleteLibraryModal({
             type="button"
             disabled={submitting || (!isEmpty && mode === 'move' && !canMove)}
             onClick={() => void handleConfirm()}
-            className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white disabled:opacity-50 transition-colors ${
+            className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-ink-inverse disabled:opacity-50 transition-colors ${
               !isEmpty && mode === 'move'
-                ? 'bg-indigo-600 hover:bg-indigo-500'
-                : 'bg-rose-600 hover:bg-rose-500'
+                ? 'bg-accent hover:bg-accent-hover shadow-accent'
+                : 'bg-status-danger hover:opacity-90'
             }`}
           >
             {submitting ? (
