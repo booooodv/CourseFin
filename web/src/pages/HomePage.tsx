@@ -13,9 +13,13 @@ import {
   Search,
   Sparkles,
   Tag as TagIcon,
+  Trash2,
   X,
 } from 'lucide-react';
 import { api, itemPrimaryImageUrl } from '../api/client';
+import DeleteLibraryModal, { type DeleteLibraryMode } from '../components/DeleteLibraryModal';
+import { useToast } from '../components/Toast';
+import Tooltip from '../components/Tooltip';
 import type { CourseSummary, HomeResponse, Library, Tag } from '../types/coursefin';
 
 const TICKS_PER_MS = 10000;
@@ -94,6 +98,7 @@ function CoursePoster({ courseId, title, hasCover, tag }: CoursePosterProps) {
 
 export default function HomePage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [home, setHome] = useState<HomeResponse | null>(null);
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [libraries, setLibraries] = useState<Library[]>([]);
@@ -110,6 +115,13 @@ export default function HomePage() {
   const [newLibName, setNewLibName] = useState('');
   const [creatingLib, setCreatingLib] = useState(false);
   const [createLibError, setCreateLibError] = useState<string | null>(null);
+
+  // Rename & delete library state
+  const [renamingLib, setRenamingLib] = useState<Library | null>(null);
+  const [renameLibName, setRenameLibName] = useState('');
+  const [savingRename, setSavingRename] = useState(false);
+  const [renameLibError, setRenameLibError] = useState<string | null>(null);
+  const [deletingLib, setDeletingLib] = useState<Library | null>(null);
 
   // Create blank course inline form state
   const [showCreateCourse, setShowCreateCourse] = useState(false);
@@ -132,9 +144,9 @@ export default function HomePage() {
       setCourses(coursesData.courses ?? homeData.courses ?? []);
       const resolvedLibs = libsData.libraries ?? homeData.libraries ?? [];
       setLibraries(resolvedLibs);
-      if (resolvedLibs.length > 0) {
-        setNewCourseLibraryId((prev) => prev || resolvedLibs[0].id);
-      }
+      setNewCourseLibraryId((prev) =>
+        resolvedLibs.some((l) => l.id === prev) ? prev : (resolvedLibs[0]?.id ?? ''),
+      );
       setTags(tagsData.tags ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载课程库失败');
@@ -159,14 +171,73 @@ export default function HomePage() {
     try {
       const created = await api.createLibrary(trimmed);
       setLibraries((prev) => [...prev, created]);
+      setNewCourseLibraryId((prev) => prev || created.id);
       setNewLibName('');
       setShowCreateLib(false);
       setSelectedLibraryId(created.id);
+      toast.success(`已创建媒体库「${created.name}」`);
     } catch (err) {
-      setCreateLibError(err instanceof Error ? err.message : '创建媒体库失败');
+      const msg = err instanceof Error ? err.message : '创建媒体库失败';
+      setCreateLibError(msg);
+      toast.error(msg);
     } finally {
       setCreatingLib(false);
     }
+  }
+
+  function startRenameLibrary(lib: Library) {
+    setShowCreateLib(false);
+    setShowCreateCourse(false);
+    setRenamingLib(lib);
+    setRenameLibName(lib.name);
+    setRenameLibError(null);
+  }
+
+  async function handleRenameLibrary(e: FormEvent) {
+    e.preventDefault();
+    if (!renamingLib || savingRename) return;
+    const trimmed = renameLibName.trim();
+    if (!trimmed) {
+      setRenameLibError('请输入媒体库名称');
+      return;
+    }
+    if (trimmed === renamingLib.name) {
+      setRenamingLib(null);
+      return;
+    }
+    setSavingRename(true);
+    setRenameLibError(null);
+    try {
+      const updated = await api.updateLibrary(renamingLib.id, trimmed);
+      setLibraries((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
+      setRenamingLib(null);
+      toast.success(`已将媒体库重命名为「${updated.name}」`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '重命名媒体库失败';
+      setRenameLibError(msg);
+      toast.error(msg);
+    } finally {
+      setSavingRename(false);
+    }
+  }
+
+  function handleLibraryDeleted(
+    deleted: Library,
+    mode: DeleteLibraryMode,
+    targetLibraryName?: string,
+  ) {
+    if (selectedLibraryId === deleted.id) {
+      setSelectedLibraryId('all');
+    }
+    if (renamingLib?.id === deleted.id) {
+      setRenamingLib(null);
+    }
+    if (mode === 'move' && targetLibraryName) {
+      toast.success(`已将课程迁移至「${targetLibraryName}」并删除媒体库「${deleted.name}」`);
+    } else {
+      toast.success(`已删除媒体库「${deleted.name}」`);
+    }
+    void loadData();
   }
 
   async function handleCreateBlankCourse(e: FormEvent) {
@@ -319,61 +390,115 @@ export default function HomePage() {
             <h1 id="course-library-heading" className="sr-only">
               课程库
             </h1>
-            <button
-              type="button"
-              onClick={() => setSelectedLibraryId('all')}
-              className={`rounded-xl px-3.5 py-2 text-sm font-medium transition-colors ${
-                selectedLibraryId === 'all'
-                  ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
-                  : 'bg-slate-900 text-slate-300 border border-slate-800 hover:border-slate-700 hover:text-white'
-              }`}
-            >
-              全部 ({allCourses.length})
-            </button>
+            <Tooltip content="查看所有媒体库中的全部课程">
+              <button
+                type="button"
+                onClick={() => setSelectedLibraryId('all')}
+                className={`rounded-xl px-3.5 py-2 text-sm font-medium transition-colors ${
+                  selectedLibraryId === 'all'
+                    ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
+                    : 'bg-slate-900 text-slate-300 border border-slate-800 hover:border-slate-700 hover:text-white'
+                }`}
+              >
+                全部 ({allCourses.length})
+              </button>
+            </Tooltip>
 
             {libraries.map((lib) => {
               const active = selectedLibraryId === lib.id;
               return (
-                <button
+                <div
                   key={lib.id}
-                  type="button"
-                  onClick={() => setSelectedLibraryId(lib.id)}
-                  className={`rounded-xl px-3.5 py-2 text-sm font-medium transition-colors ${
+                  role="group"
+                  aria-label={`媒体库 ${lib.name}`}
+                  className={`group inline-flex items-center rounded-xl text-sm font-medium transition-colors ${
                     active
                       ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
                       : 'bg-slate-900 text-slate-300 border border-slate-800 hover:border-slate-700 hover:text-white'
                   }`}
                 >
-                  {lib.name}
-                  <span className="ml-1.5 text-xs opacity-75">({lib.course_count})</span>
-                </button>
+                  <Tooltip content={`仅查看「${lib.name}」中的课程`}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLibraryId(lib.id)}
+                      className="pl-3.5 pr-1.5 py-2 text-left"
+                    >
+                      {lib.name}
+                      <span className="ml-1.5 text-xs opacity-75">({lib.course_count})</span>
+                    </button>
+                  </Tooltip>
+
+                  <div
+                    className={`flex items-center gap-0.5 pr-1.5 transition-opacity ${
+                      active
+                        ? 'opacity-90'
+                        : 'opacity-45 group-hover:opacity-100 group-focus-within:opacity-100'
+                    }`}
+                  >
+                    <Tooltip content={`重命名「${lib.name}」`}>
+                      <button
+                        type="button"
+                        aria-label="重命名媒体库"
+                        onClick={() => startRenameLibrary(lib)}
+                        className={`rounded-lg p-1 transition-colors ${
+                          active
+                            ? 'text-indigo-100 hover:bg-indigo-500/80 hover:text-white'
+                            : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                        }`}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    </Tooltip>
+
+                    <Tooltip content={`删除「${lib.name}」`}>
+                      <button
+                        type="button"
+                        aria-label="删除媒体库"
+                        onClick={() => setDeletingLib(lib)}
+                        className={`rounded-lg p-1 transition-colors ${
+                          active
+                            ? 'text-indigo-100 hover:bg-rose-500/80 hover:text-white'
+                            : 'text-slate-400 hover:bg-rose-500/20 hover:text-rose-300'
+                        }`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </Tooltip>
+                  </div>
+                </div>
               );
             })}
 
-            <button
-              type="button"
-              onClick={() => {
-                setShowCreateLib((v) => !v);
-                setCreateLibError(null);
-              }}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-dashed border-slate-700 px-3.5 py-2 text-sm font-medium text-slate-300 hover:border-indigo-500/60 hover:text-indigo-300 transition-colors"
-            >
-              <Plus className="h-4 w-4" />
-              <span>新建媒体库</span>
-            </button>
-
-            {libraries.length > 0 && (
+            <Tooltip content="新建一个课程分类媒体库">
               <button
                 type="button"
                 onClick={() => {
-                  setShowCreateCourse((v) => !v);
-                  setCreateCourseError(null);
+                  setRenamingLib(null);
+                  setShowCreateLib((v) => !v);
+                  setCreateLibError(null);
                 }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2 text-sm font-medium text-slate-200 hover:border-indigo-500/60 hover:text-indigo-300 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-dashed border-slate-700 px-3.5 py-2 text-sm font-medium text-slate-300 hover:border-indigo-500/60 hover:text-indigo-300 transition-colors"
               >
                 <Plus className="h-4 w-4" />
-                <span>新建空白课程</span>
+                <span>新建媒体库</span>
               </button>
+            </Tooltip>
+
+            {libraries.length > 0 && (
+              <Tooltip content="手动创建空白课程并进入编辑页编排视频">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRenamingLib(null);
+                    setShowCreateCourse((v) => !v);
+                    setCreateCourseError(null);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2 text-sm font-medium text-slate-200 hover:border-indigo-500/60 hover:text-indigo-300 transition-colors"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>新建空白课程</span>
+                </button>
+              </Tooltip>
             )}
           </div>
 
@@ -389,17 +514,58 @@ export default function HomePage() {
               className="w-full rounded-xl border border-slate-800 bg-slate-900/90 pl-10 pr-8 py-2 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
             />
             {searchQuery && (
-              <button
-                type="button"
-                aria-label="清空搜索"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-              >
-                <X className="h-4 w-4" />
-              </button>
+              <Tooltip content="清空搜索关键词">
+                <button
+                  type="button"
+                  aria-label="清空搜索"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </Tooltip>
             )}
           </div>
         </div>
+
+        {/* Inline Rename Library Form */}
+        {renamingLib && (
+          <form
+            onSubmit={handleRenameLibrary}
+            className="flex flex-col sm:flex-row sm:items-center gap-3 rounded-2xl border border-indigo-500/40 bg-slate-900/90 p-4"
+          >
+            <span className="text-xs font-medium text-indigo-300 shrink-0">
+              重命名「{renamingLib.name}」：
+            </span>
+            <input
+              type="text"
+              value={renameLibName}
+              onChange={(e) => setRenameLibName(e.target.value)}
+              placeholder="输入新的媒体库名称"
+              aria-label="重命名媒体库名称"
+              className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="submit"
+                disabled={savingRename}
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              >
+                {savingRename ? '保存中...' : '保存名称'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRenamingLib(null)}
+                className="rounded-xl border border-slate-700 px-3.5 py-2 text-sm text-slate-300 hover:bg-slate-800 transition-colors"
+              >
+                取消
+              </button>
+            </div>
+            {renameLibError && (
+              <p className="text-xs text-rose-400 sm:ml-2">{renameLibError}</p>
+            )}
+          </form>
+        )}
 
         {/* Inline Create Library Form */}
         {showCreateLib && (
@@ -495,19 +661,23 @@ export default function HomePage() {
             {tags.map((tag) => {
               const active = selectedTag === tag.name;
               return (
-                <button
+                <Tooltip
                   key={tag.id}
-                  type="button"
-                  onClick={() => setSelectedTag(active ? null : tag.name)}
-                  className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                    active
-                      ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                      : 'bg-slate-900 text-slate-400 border border-slate-800 hover:border-slate-700 hover:text-slate-200'
-                  }`}
+                  content={active ? `取消按标签「${tag.name}」筛选` : `按标签「${tag.name}」筛选课程`}
                 >
-                  {tag.name}
-                  <span className="ml-1 opacity-60">{tag.course_count}</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTag(active ? null : tag.name)}
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                      active
+                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                        : 'bg-slate-900 text-slate-400 border border-slate-800 hover:border-slate-700 hover:text-slate-200'
+                    }`}
+                  >
+                    {tag.name}
+                    <span className="ml-1 opacity-60">{tag.course_count}</span>
+                  </button>
+                </Tooltip>
               );
             })}
           </div>
@@ -536,17 +706,19 @@ export default function HomePage() {
             <BookOpen className="mx-auto h-9 w-9 text-slate-500 mb-3" />
             <p className="text-base font-medium text-slate-200">没有符合当前筛选条件的课程</p>
             {hasActiveFilter && (
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedLibraryId('all');
-                  setSelectedTag(null);
-                  setSearchQuery('');
-                }}
-                className="mt-4 inline-flex items-center rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 transition-colors"
-              >
-                清除筛选条件
-              </button>
+              <Tooltip content="重置媒体库、标签和关键词筛选">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedLibraryId('all');
+                    setSelectedTag(null);
+                    setSearchQuery('');
+                  }}
+                  className="mt-4 inline-flex items-center rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 transition-colors"
+                >
+                  清除筛选条件
+                </button>
+              </Tooltip>
             )}
           </div>
         ) : (
@@ -637,21 +809,25 @@ export default function HomePage() {
 
                     {/* Quick actions */}
                     <div className="flex items-center gap-2 pt-2 border-t border-slate-800/80">
-                      <Link
-                        to={`/courses/${course.id}`}
-                        className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600/90 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
-                      >
-                        <Play className="h-3.5 w-3.5 fill-current" />
-                        <span>开始学习</span>
-                      </Link>
-                      <Link
-                        to={`/courses/${course.id}/edit`}
-                        aria-label={`编辑 ${course.title}`}
-                        className="inline-flex items-center justify-center gap-1 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        <span>编辑</span>
-                      </Link>
+                      <Tooltip content="进入课程播放页并续播上次进度">
+                        <Link
+                          to={`/courses/${course.id}`}
+                          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600/90 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
+                        >
+                          <Play className="h-3.5 w-3.5 fill-current" />
+                          <span>开始学习</span>
+                        </Link>
+                      </Tooltip>
+                      <Tooltip content="编辑课程信息、章节排序或运行 AI 整理">
+                        <Link
+                          to={`/courses/${course.id}/edit`}
+                          aria-label={`编辑 ${course.title}`}
+                          className="inline-flex items-center justify-center gap-1 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          <span>编辑</span>
+                        </Link>
+                      </Tooltip>
                     </div>
                   </div>
                 </article>
@@ -660,6 +836,13 @@ export default function HomePage() {
           </div>
         )}
       </section>
+
+      <DeleteLibraryModal
+        library={deletingLib}
+        libraries={libraries}
+        onClose={() => setDeletingLib(null)}
+        onDeleted={handleLibraryDeleted}
+      />
     </div>
   );
 }

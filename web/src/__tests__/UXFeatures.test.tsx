@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast';
+import HomePage from '../pages/HomePage';
 import StoragePage from '../pages/StoragePage';
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -247,5 +248,323 @@ describe('DirectoryPickerModal & StoragePage', () => {
 
     await user.click(screen.getByRole('button', { name: '删除存储源 硬盘A' }));
     expect(await screen.findByText(/已删除存储源/)).toBeInTheDocument();
+  });
+});
+
+describe('HomePage library delete & rename', () => {
+  beforeEach(() => {
+    localStorage.setItem('coursefin_token', 'test-token');
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  function makeCourse(id: string, libraryId: string, title: string) {
+    return {
+      id,
+      library_id: libraryId,
+      title,
+      sort_title: title,
+      overview: '',
+      instructor: '',
+      cover_path: '',
+      backdrop_path: '',
+      tags: [],
+      chapter_count: 1,
+      lesson_count: 2,
+      played_count: 0,
+      unplayed_item_count: 2,
+      played_percentage: 0,
+      played: false,
+      total_duration_ms: 600000,
+      first_lesson_id: '',
+      created_at: '2026-11-24T00:00:00Z',
+      updated_at: '2026-11-24T00:00:00Z',
+    };
+  }
+
+  it('deletes an empty library, resets active selection to all, and shows toast', async () => {
+    const deleteUrls: string[] = [];
+    let libraries = [
+      {
+        id: 'lib-empty',
+        name: '临时空库',
+        cover_path: '',
+        sort_order: 1,
+        course_count: 0,
+        created_at: '2026-11-24T00:00:00Z',
+        updated_at: '2026-11-24T00:00:00Z',
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({ resume: [], next_up: [], libraries, courses: [] });
+        }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses: [] });
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries });
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({ tags: [] });
+        }
+        if (url.startsWith('/api/v1/libraries/lib-empty') && method === 'DELETE') {
+          deleteUrls.push(url);
+          libraries = [];
+          return jsonResponse({ ok: true });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <MemoryRouter>
+          <HomePage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    const user = userEvent.setup();
+    const libTabBtn = await screen.findByRole('button', { name: /临时空库/ });
+    await user.click(libTabBtn);
+
+    const group = screen.getByRole('group', { name: '媒体库 临时空库' });
+    await user.click(within(group).getByRole('button', { name: '删除媒体库' }));
+
+    const dialog = await screen.findByRole('dialog', { name: /删除媒体库/ });
+    expect(within(dialog).getByText(/临时空库/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => {
+      expect(deleteUrls).toEqual(['/api/v1/libraries/lib-empty']);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('group', { name: '媒体库 临时空库' })).not.toBeInTheDocument();
+    });
+    expect(screen.getByText(/已删除媒体库「临时空库」/)).toBeInTheDocument();
+  });
+
+  it('migrates courses to another library when deleting a non-empty library', async () => {
+    const deleteUrls: string[] = [];
+    let libraries = [
+      {
+        id: 'lib-a',
+        name: '前端开发',
+        cover_path: '',
+        sort_order: 1,
+        course_count: 1,
+        created_at: '2026-11-24T00:00:00Z',
+        updated_at: '2026-11-24T00:00:00Z',
+      },
+      {
+        id: 'lib-b',
+        name: '全栈工程',
+        cover_path: '',
+        sort_order: 2,
+        course_count: 0,
+        created_at: '2026-11-24T00:00:00Z',
+        updated_at: '2026-11-24T00:00:00Z',
+      },
+    ];
+    let courses = [makeCourse('c-1', 'lib-a', 'React 19 课程')];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({ resume: [], next_up: [], libraries, courses });
+        }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses });
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries });
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({ tags: [] });
+        }
+        if (url.startsWith('/api/v1/libraries/lib-a') && method === 'DELETE') {
+          deleteUrls.push(url);
+          libraries = [{ ...libraries[1], course_count: 1 }];
+          courses = [{ ...courses[0], library_id: 'lib-b' }];
+          return jsonResponse({ ok: true });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <MemoryRouter>
+          <HomePage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    const user = userEvent.setup();
+    await screen.findByRole('link', { name: 'React 19 课程' });
+
+    const group = screen.getByRole('group', { name: '媒体库 前端开发' });
+    await user.click(within(group).getByRole('button', { name: '删除媒体库' }));
+
+    const dialog = await screen.findByRole('dialog', { name: /删除媒体库/ });
+    const moveRadio = within(dialog).getByLabelText(/迁移课程到其他媒体库并删除/);
+    expect(moveRadio).toBeChecked();
+    expect(within(dialog).getByLabelText('迁移目标媒体库')).toHaveValue('lib-b');
+
+    await user.click(within(dialog).getByRole('button', { name: '迁移并删除' }));
+
+    await waitFor(() => {
+      expect(deleteUrls).toEqual(['/api/v1/libraries/lib-a?move_to_library_id=lib-b']);
+    });
+    expect(await screen.findByText(/已将课程迁移至「全栈工程」并删除媒体库「前端开发」/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'React 19 课程' })).toBeInTheDocument();
+  });
+
+  it('disables migrate option when deleting the only non-empty library and supports force delete', async () => {
+    const deleteUrls: string[] = [];
+    let libraries = [
+      {
+        id: 'lib-only',
+        name: '唯一库',
+        cover_path: '',
+        sort_order: 1,
+        course_count: 1,
+        created_at: '2026-11-24T00:00:00Z',
+        updated_at: '2026-11-24T00:00:00Z',
+      },
+    ];
+    let courses = [makeCourse('c-only', 'lib-only', '唯一课程')];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({ resume: [], next_up: [], libraries, courses });
+        }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses });
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries });
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({ tags: [] });
+        }
+        if (url.startsWith('/api/v1/libraries/lib-only') && method === 'DELETE') {
+          deleteUrls.push(url);
+          libraries = [];
+          courses = [];
+          return jsonResponse({ ok: true });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <MemoryRouter>
+          <HomePage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    const user = userEvent.setup();
+    await screen.findByRole('link', { name: '唯一课程' });
+
+    const group = screen.getByRole('group', { name: '媒体库 唯一库' });
+    await user.click(within(group).getByRole('button', { name: '删除媒体库' }));
+
+    const dialog = await screen.findByRole('dialog', { name: /删除媒体库/ });
+    expect(within(dialog).getByLabelText(/迁移课程到其他媒体库并删除/)).toBeDisabled();
+    const forceRadio = within(dialog).getByLabelText(/连带删除这 1 门课程记录/);
+    expect(forceRadio).toBeChecked();
+
+    await user.click(within(dialog).getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => {
+      expect(deleteUrls).toEqual(['/api/v1/libraries/lib-only?force=true']);
+    });
+    expect(await screen.findByText(/已删除媒体库「唯一库」/)).toBeInTheDocument();
+  });
+
+  it('renames a library inline via PUT /api/v1/libraries/:id', async () => {
+    const renameBodies: unknown[] = [];
+    const libraries = [
+      {
+        id: 'lib-1',
+        name: '旧库名',
+        cover_path: '',
+        sort_order: 1,
+        course_count: 0,
+        created_at: '2026-11-24T00:00:00Z',
+        updated_at: '2026-11-24T00:00:00Z',
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({ resume: [], next_up: [], libraries, courses: [] });
+        }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses: [] });
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries });
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({ tags: [] });
+        }
+        if (url.endsWith('/api/v1/libraries/lib-1') && method === 'PUT') {
+          const body = JSON.parse(String(init?.body));
+          renameBodies.push(body);
+          return jsonResponse({ ...libraries[0], name: body.name });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <MemoryRouter>
+          <HomePage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    const user = userEvent.setup();
+    await screen.findByRole('button', { name: /旧库名/ });
+
+    const group = screen.getByRole('group', { name: '媒体库 旧库名' });
+    await user.click(within(group).getByRole('button', { name: '重命名媒体库' }));
+
+    const input = screen.getByLabelText('重命名媒体库名称');
+    expect(input).toHaveValue('旧库名');
+    await user.clear(input);
+    await user.type(input, '新库名');
+    await user.click(screen.getByRole('button', { name: '保存名称' }));
+
+    await waitFor(() => {
+      expect(renameBodies).toEqual([{ name: '新库名' }]);
+    });
+    expect(await screen.findByRole('button', { name: /新库名/ })).toBeInTheDocument();
+    expect(screen.getByText(/已将媒体库重命名为「新库名」/)).toBeInTheDocument();
   });
 });
