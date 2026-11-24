@@ -100,6 +100,7 @@ func NewHandler(deps Deps) http.Handler {
 			pr.Delete("/sessions/{token}", h.handleRevokeSession)
 
 			// Storage sources & scanner
+			pr.Get("/fs/dirs", h.handleBrowseFSDirs)
 			pr.Get("/sources", h.handleListSources)
 			pr.Post("/sources", h.handleCreateSource)
 			pr.Delete("/sources/{id}", h.handleDeleteSource)

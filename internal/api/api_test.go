@@ -13,8 +13,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1025,5 +1027,164 @@ func TestAsyncScanDeterministicRunningAndConflict(t *testing.T) {
 	scanSvc2.Wait()
 	if st2 := scanSvc2.Status(src.ID); st2.Running {
 		t.Fatalf("expected scanSvc2 not running after Wait()")
+	}
+}
+
+func TestBrowseFSDirs(t *testing.T) {
+	env := setupAPITestEnv(t)
+
+	// Setup admin & login
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "fs-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	// 1. Unauthenticated request returns 401
+	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/fs/dirs", nil, "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET /api/v1/fs/dirs = %d, want 401: %s", resp.StatusCode, raw)
+	}
+
+	type browseResp struct {
+		CurrentPath string `json:"current_path"`
+		ParentPath  string `json:"parent_path"`
+		Entries     []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"entries"`
+		Roots []struct {
+			Label string `json:"label"`
+			Path  string `json:"path"`
+		} `json:"roots"`
+	}
+
+	// 2. Authenticated default browse returns 200 with non-empty current_path & roots
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/fs/dirs", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/fs/dirs = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	var def browseResp
+	if err := json.Unmarshal(raw, &def); err != nil {
+		t.Fatalf("unmarshal default browse: %v", err)
+	}
+	if def.CurrentPath == "" || !filepath.IsAbs(def.CurrentPath) {
+		t.Fatalf("expected absolute current_path, got %q", def.CurrentPath)
+	}
+	if len(def.Roots) == 0 {
+		t.Fatalf("expected non-empty roots, got %s", raw)
+	}
+
+	// 3. Explicit temp directory with subdirs, hidden dir, file, symlink to dir, broken symlink
+	tmp := t.TempDir()
+	for _, sub := range []string{"10_go", "2_rust", ".hidden"} {
+		if err := os.Mkdir(filepath.Join(tmp, sub), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", sub, err)
+		}
+	}
+	filePath := filepath.Join(tmp, "readme.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	linkTarget := t.TempDir()
+	if err := os.Symlink(linkTarget, filepath.Join(tmp, "link_dir")); err != nil {
+		t.Fatalf("symlink valid: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmp, "does-not-exist-target"), filepath.Join(tmp, "broken_link")); err != nil {
+		t.Fatalf("symlink broken: %v", err)
+	}
+
+	q := "/api/v1/fs/dirs?path=" + url.QueryEscape(tmp)
+	resp, raw = env.doJSON(t, http.MethodGet, q, nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200: %s", q, resp.StatusCode, raw)
+	}
+	var listed browseResp
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		t.Fatalf("unmarshal listed: %v", err)
+	}
+	if listed.CurrentPath != filepath.Clean(tmp) {
+		t.Fatalf("current_path = %q, want %q", listed.CurrentPath, filepath.Clean(tmp))
+	}
+	if listed.ParentPath != filepath.Dir(filepath.Clean(tmp)) {
+		t.Fatalf("parent_path = %q, want %q", listed.ParentPath, filepath.Dir(filepath.Clean(tmp)))
+	}
+	var names []string
+	for _, e := range listed.Entries {
+		names = append(names, e.Name)
+		if e.Path != filepath.Join(filepath.Clean(tmp), e.Name) {
+			t.Fatalf("entry %q path = %q, want %q", e.Name, e.Path, filepath.Join(filepath.Clean(tmp), e.Name))
+		}
+	}
+	wantNames := []string{"2_rust", "10_go", "link_dir"}
+	if strings.Join(names, ",") != strings.Join(wantNames, ",") {
+		t.Fatalf("entries = %v, want %v", names, wantNames)
+	}
+
+	// show_hidden=true includes .hidden
+	resp, raw = env.doJSON(t, http.MethodGet, q+"&show_hidden=true", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET show_hidden = %d: %s", resp.StatusCode, raw)
+	}
+	var listedHidden browseResp
+	if err := json.Unmarshal(raw, &listedHidden); err != nil {
+		t.Fatalf("unmarshal hidden: %v", err)
+	}
+	foundHidden := false
+	for _, e := range listedHidden.Entries {
+		if e.Name == ".hidden" {
+			foundHidden = true
+		}
+	}
+	if !foundHidden {
+		t.Fatalf("expected .hidden in entries with show_hidden=true, got %+v", listedHidden.Entries)
+	}
+
+	// 4. Browsing filesystem root returns parent_path == ""
+	if runtime.GOOS != "windows" {
+		resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/fs/dirs?path="+url.QueryEscape("/"), nil, token)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET root = %d: %s", resp.StatusCode, raw)
+		}
+		var rootResp browseResp
+		if err := json.Unmarshal(raw, &rootResp); err != nil {
+			t.Fatalf("unmarshal root: %v", err)
+		}
+		if rootResp.ParentPath != "" {
+			t.Fatalf("root parent_path = %q, want empty", rootResp.ParentPath)
+		}
+	}
+
+	// 5. Validation & error cases
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/fs/dirs?path="+url.QueryEscape("relative/dir"), nil, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("relative path = %d, want 400: %s", resp.StatusCode, raw)
+	}
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/fs/dirs?path="+url.QueryEscape(filePath), nil, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("file path = %d, want 400: %s", resp.StatusCode, raw)
+	}
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/fs/dirs?path="+url.QueryEscape(filepath.Join(tmp, "missing-dir")), nil, token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing path = %d, want 404: %s", resp.StatusCode, raw)
+	}
+
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		noPermDir := filepath.Join(tmp, "no_perm")
+		if err := os.Mkdir(noPermDir, 0o755); err != nil {
+			t.Fatalf("mkdir no_perm: %v", err)
+		}
+		if err := os.Chmod(noPermDir, 0o000); err != nil {
+			t.Fatalf("chmod no_perm: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(noPermDir, 0o755) })
+
+		resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/fs/dirs?path="+url.QueryEscape(noPermDir), nil, token)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("unreadable dir = %d, want 403: %s", resp.StatusCode, raw)
+		}
 	}
 }
