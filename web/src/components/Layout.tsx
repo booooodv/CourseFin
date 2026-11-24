@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react';
-import { useState } from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
-import { BookOpen, FolderInput, GraduationCap, LogOut, Settings } from 'lucide-react';
-import { api, clearToken } from '../api/client';
+import { useEffect, useRef, useState } from 'react';
+import { Link, NavLink, useNavigate } from 'react-router-dom';
+import { ArrowUp, BookOpen, FolderInput, GraduationCap, LogOut, Settings } from 'lucide-react';
+import { api, clearToken, getToken } from '../api/client';
 import Tooltip from './Tooltip';
+import { useUpdate } from './UpdateContext';
 
 interface LayoutProps {
   children: ReactNode;
@@ -15,9 +16,26 @@ const navItems = [
   { to: '/settings', label: '设置', tip: '查看 Jellyfin 连接信息、配置 AI 模型与会话', icon: Settings, end: false },
 ];
 
+function formatVersionLabel(raw?: string | null): string {
+  const trimmed = (raw ?? '').trim().replace(/^[vV](?=\d)/, '');
+  return trimmed ? `v${trimmed}` : '';
+}
+
 export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
   const [loggingOut, setLoggingOut] = useState(false);
+  const { isProvided, status, refreshStatus } = useUpdate();
+  const requestedUpdateRef = useRef(false);
+
+  useEffect(() => {
+    if (!requestedUpdateRef.current && isProvided && status === null && getToken()) {
+      requestedUpdateRef.current = true;
+      void refreshStatus();
+    }
+  }, [isProvided, refreshStatus, status]);
+
+  const latestVersionLabel = formatVersionLabel(status?.latest_version);
+  const hasUpdate = Boolean(status?.update_available && latestVersionLabel);
 
   async function handleLogout() {
     if (loggingOut) return;
@@ -71,6 +89,21 @@ export default function Layout({ children }: LayoutProps) {
           </div>
 
           <div className="flex items-center gap-3">
+            {hasUpdate && (
+              <Tooltip
+                content={`发现新版本 ${latestVersionLabel}，点击前往设置页查看并更新`}
+                placement="bottom"
+              >
+                <Link
+                  to="/settings#system-update"
+                  className="hidden md:inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-300 hover:border-emerald-400/60 hover:bg-emerald-500/25 hover:text-emerald-200 transition-colors"
+                >
+                  <ArrowUp className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span>新版本 {latestVersionLabel}</span>
+                </Link>
+              </Tooltip>
+            )}
+
             <Tooltip content="退出当前浏览器登录会话" placement="bottom">
               <button
                 type="button"
@@ -105,7 +138,16 @@ export default function Layout({ children }: LayoutProps) {
                   }`
                 }
               >
-                <Icon className="h-3.5 w-3.5" />
+                <span className="relative inline-flex">
+                  <Icon className="h-3.5 w-3.5" />
+                  {item.to === '/settings' && hasUpdate && (
+                    <span
+                      data-testid="mobile-update-dot"
+                      aria-hidden="true"
+                      className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-emerald-400 ring-2 ring-slate-950"
+                    />
+                  )}
+                </span>
                 <span>{item.label}</span>
               </NavLink>
             );

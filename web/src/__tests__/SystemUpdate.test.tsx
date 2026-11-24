@@ -1,10 +1,13 @@
 import { StrictMode, useState } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
+import Layout from '../components/Layout';
 import { ToastProvider } from '../components/Toast';
 import { UpdateProvider, useUpdate } from '../components/UpdateContext';
+import SettingsPage from '../pages/SettingsPage';
 import type { UpdateStatus } from '../types/coursefin';
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -944,5 +947,652 @@ describe('UpdateContext & Update API client', () => {
     });
     expect(onReload).not.toHaveBeenCalled();
     expect(screen.getByTestId('restart-error').textContent).toMatch(/回滚.*1\.0\.1/);
+  });
+});
+
+function makeSettingsResponse() {
+  return {
+    server_name: 'CourseFin Studio',
+    scan_interval_minutes: 60,
+    base_url_hint: 'http://192.168.1.10:8096',
+    jellyfin_username: 'admin',
+    ai_base_url: 'https://api.openai.com/v1',
+    ai_api_key: '',
+    ai_api_key_set: false,
+    ai_model: 'gpt-4o-mini',
+    ai_max_subtitle_chars: 4000,
+  };
+}
+
+function makeMeResponse() {
+  return {
+    user: { id: 'u1', username: 'admin', created_at: '', updated_at: '' },
+    session: {
+      token: 'test-token',
+      user_id: 'u1',
+      device_id: 'web',
+      device_name: 'Web',
+      client_name: 'CourseFin Web',
+      client_version: '1.0.1',
+      last_active_at: '',
+      created_at: '',
+    },
+  };
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <div data-testid="location-probe">
+      {location.pathname}
+      {location.hash}
+    </div>
+  );
+}
+
+describe('SystemUpdate UI — Layout & SettingsPage', () => {
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+
+  beforeEach(() => {
+    localStorage.setItem('coursefin_token', 'test-token');
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+    delete (window as unknown as { __xss?: unknown }).__xss;
+    vi.restoreAllMocks();
+  });
+
+  it('Layout hides update pill when update_available is false and shows clickable pill + mobile dot navigating to /settings#system-update when true', async () => {
+    let available = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/v1/system/update') {
+          return jsonResponse(
+            makeStatus({
+              update_available: available,
+              latest_version: available ? '1.0.2' : '1.0.1',
+            }),
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const firstRender = render(
+      <UpdateProvider>
+        <MemoryRouter initialEntries={['/']}>
+          <Layout>
+            <div>首页内容</div>
+          </Layout>
+        </MemoryRouter>
+      </UpdateProvider>,
+    );
+
+    await screen.findByText('首页内容');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.queryByRole('link', { name: /新版本/ })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('mobile-update-dot')).not.toBeInTheDocument();
+    firstRender.unmount();
+
+    available = true;
+    render(
+      <UpdateProvider>
+        <MemoryRouter initialEntries={['/']}>
+          <Routes>
+            <Route
+              path="/"
+              element={
+                <Layout>
+                  <div>首页内容</div>
+                </Layout>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <Layout>
+                  <LocationProbe />
+                </Layout>
+              }
+            />
+          </Routes>
+        </MemoryRouter>
+      </UpdateProvider>,
+    );
+
+    const pill = await screen.findByRole('link', { name: /新版本 v1\.0\.2/ });
+    expect(pill).toHaveAttribute('href', '/settings#system-update');
+    expect(screen.getByTestId('mobile-update-dot')).toBeInTheDocument();
+    // Existing nav link accessible names remain intact for HomePage tests
+    expect(screen.getAllByRole('link', { name: '设置' }).length).toBeGreaterThanOrEqual(1);
+
+    const user = userEvent.setup();
+    await user.hover(pill);
+    await waitFor(() => {
+      expect(screen.getByRole('tooltip')).toHaveTextContent(
+        '发现新版本 v1.0.2，点击前往设置页查看并更新',
+      );
+    });
+
+    await user.click(pill);
+    expect(await screen.findByTestId('location-probe')).toHaveTextContent('/settings#system-update');
+  });
+
+  it('SettingsPage renders SystemUpdateSection with deploy mode, safe plain-text release notes, and manual check button', async () => {
+    let checkCalled = false;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          return jsonResponse(
+            makeStatus({
+              current_version: '1.0.1',
+              latest_version: '1.0.1',
+              update_available: false,
+              deploy_mode: 'docker',
+              platform: 'linux/amd64',
+            }),
+          );
+        }
+        if (url === '/api/v1/system/update/check' && method === 'POST') {
+          checkCalled = true;
+          return jsonResponse(
+            makeStatus({
+              current_version: '1.0.1',
+              latest_version: '1.0.2',
+              update_available: true,
+              deploy_mode: 'docker',
+              platform: 'linux/amd64',
+              release_notes:
+                '<script>window.__xss=1</script><img src=x onerror="window.__xss=2">\n修复播放器与导入问题',
+              release_url: 'https://github.com/booooodv/CourseFin/releases/tag/v1.0.2',
+            }),
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const { container } = render(
+      <ToastProvider>
+        <UpdateProvider>
+          <MemoryRouter initialEntries={['/settings']}>
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    const section = await screen.findByText('Docker 容器');
+    const sectionEl = section.closest('#system-update') as HTMLElement;
+    expect(sectionEl).toBeInTheDocument();
+    expect(within(sectionEl).getByText('v1.0.1')).toBeInTheDocument();
+    expect(within(sectionEl).getByText('linux/amd64')).toBeInTheDocument();
+    expect(within(sectionEl).getByText(/当前已是最新版本/)).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(within(sectionEl).getByRole('button', { name: /检查更新/ }));
+
+    await waitFor(() => {
+      expect(checkCalled).toBe(true);
+    });
+    expect(await within(sectionEl).findByText(/修复播放器与导入问题/)).toBeInTheDocument();
+    expect(
+      within(sectionEl).getByText(/<script>window\.__xss=1<\/script>/),
+    ).toBeInTheDocument();
+    expect(sectionEl.querySelector('script')).toBeNull();
+    expect(sectionEl.querySelector('img')).toBeNull();
+    expect(container.querySelector('script')).toBeNull();
+    expect((window as unknown as { __xss?: unknown }).__xss).toBeUndefined();
+
+    const releaseLink = within(sectionEl).getByRole('link', { name: /GitHub Releases/ });
+    expect(releaseLink).toHaveAttribute(
+      'href',
+      'https://github.com/booooodv/CourseFin/releases/tag/v1.0.2',
+    );
+    expect(releaseLink).toHaveAttribute('target', '_blank');
+    expect(releaseLink).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  it('opens confirmation modal before applying update, rejects unsafe release_url, and renders 60% progress bar', async () => {
+    let applyCalled = false;
+    let statusCalls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/health' && method === 'GET') {
+          return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-1' });
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            return jsonResponse(
+              makeStatus({
+                deploy_mode: 'binary',
+                platform: 'darwin/arm64',
+                release_url: 'javascript:alert(1)',
+                can_apply: true,
+                update_available: true,
+                latest_version: '1.0.2',
+              }),
+            );
+          }
+          return jsonResponse(
+            makeStatus({
+              deploy_mode: 'binary',
+              platform: 'darwin/arm64',
+              release_url: 'javascript:alert(1)',
+              state: 'downloading',
+              target_version: '1.0.2',
+              progress_bytes: 9437184,
+              total_bytes: 15728640,
+              progress_percent: 60,
+            }),
+          );
+        }
+        if (url === '/api/v1/system/update/apply' && method === 'POST') {
+          applyCalled = true;
+          return jsonResponse(
+            makeStatus({
+              deploy_mode: 'binary',
+              platform: 'darwin/arm64',
+              state: 'downloading',
+              target_version: '1.0.2',
+              progress_bytes: 9437184,
+              total_bytes: 15728640,
+              progress_percent: 60,
+            }),
+            202,
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const { container } = render(
+      <ToastProvider>
+        <UpdateProvider pollIntervalMs={50} healthPollIntervalMs={50} restartTimeoutMs={500}>
+          <MemoryRouter initialEntries={['/settings']}>
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText('本地二进制')).toBeInTheDocument();
+    expect(screen.getByText('darwin/arm64')).toBeInTheDocument();
+    expect(container.querySelector('a[href^="javascript:"]')).toBeNull();
+    expect(screen.queryByRole('link', { name: /GitHub Releases/ })).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /立即更新到 v1\.0\.2/ }));
+
+    // Confirmation modal opens BEFORE calling POST /api/v1/system/update/apply
+    expect(applyCalled).toBe(false);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: /确认更新/ })).toBeInTheDocument();
+    expect(within(dialog).getByText(/暂停|中断/)).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('button', { name: /确认更新/ }));
+
+    await waitFor(() => {
+      expect(applyCalled).toBe(true);
+    });
+    const bar = await screen.findByRole('progressbar');
+    expect(bar).toHaveAttribute('aria-valuenow', '60');
+    expect(screen.getByText('60%')).toBeInTheDocument();
+  });
+
+  it('saves update config via PUT /api/v1/system/update/config with toast confirmation and locks auto-check when locked by env', async () => {
+    const configBodies: unknown[] = [];
+    let lockedByEnv = false;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          return jsonResponse(
+            makeStatus({
+              auto_check_enabled: true,
+              auto_check_locked_by_env: lockedByEnv,
+              check_interval_hours: 6,
+              mirror_url: '',
+            }),
+          );
+        }
+        if (url === '/api/v1/system/update/config' && method === 'PUT') {
+          const body = JSON.parse(String(init?.body));
+          configBodies.push(body);
+          return jsonResponse(
+            makeStatus({
+              auto_check_enabled: body.auto_check_enabled ?? true,
+              auto_check_locked_by_env: lockedByEnv,
+              check_interval_hours: body.check_interval_hours,
+              mirror_url: body.mirror_url,
+            }),
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const firstRender = render(
+      <ToastProvider>
+        <UpdateProvider>
+          <MemoryRouter initialEntries={['/settings']}>
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    const autoCheck = await screen.findByLabelText(/自动检查更新/);
+    expect(autoCheck).toBeEnabled();
+    expect(autoCheck).toBeChecked();
+
+    const user = userEvent.setup();
+    await user.click(autoCheck);
+    expect(autoCheck).not.toBeChecked();
+
+    const intervalSelect = screen.getByLabelText(/检查间隔/);
+    await user.selectOptions(intervalSelect, '12');
+
+    const mirrorInput = screen.getByLabelText(/GitHub 加速代理前缀/);
+    expect(screen.getByText(/仅填写可信加速代理地址/)).toBeInTheDocument();
+
+    // Rejects non-http(s) mirror URL before hitting backend
+    await user.type(mirrorInput, 'ftp://invalid-mirror.example');
+    await user.click(screen.getByRole('button', { name: '保存更新配置' }));
+    expect(configBodies).toHaveLength(0);
+    expect(
+      (await screen.findAllByText(/加速代理地址必须以 http:\/\/ 或 https:\/\/ 开头/)).length,
+    ).toBeGreaterThanOrEqual(1);
+
+    await user.clear(mirrorInput);
+    await user.type(mirrorInput, 'https://gh-proxy.com');
+    await user.click(screen.getByRole('button', { name: '保存更新配置' }));
+
+    await waitFor(() => {
+      expect(configBodies).toEqual([
+        {
+          auto_check_enabled: false,
+          check_interval_hours: 12,
+          mirror_url: 'https://gh-proxy.com',
+        },
+      ]);
+    });
+    expect(await screen.findByText(/更新配置已保存/)).toBeInTheDocument();
+    firstRender.unmount();
+
+    // When auto_check_locked_by_env === true
+    lockedByEnv = true;
+    render(
+      <ToastProvider>
+        <UpdateProvider>
+          <MemoryRouter initialEntries={['/settings']}>
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    const lockedToggle = await screen.findByLabelText(/自动检查更新/);
+    expect(lockedToggle).toBeDisabled();
+    expect(screen.getByText(/COURSEFIN_UPDATE_AUTO_CHECK/)).toBeInTheDocument();
+  });
+
+  it('disables apply button and renders cannot_apply_reason with GitHub Releases link when can_apply is false', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          return jsonResponse(
+            makeStatus({
+              update_available: true,
+              latest_version: '1.0.2',
+              can_apply: false,
+              cannot_apply_reason: '当前操作系统不支持应用内热替换，请前往 GitHub Releases 手动下载更新',
+              release_url: 'https://github.com/booooodv/CourseFin/releases/tag/v1.0.2',
+            }),
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <UpdateProvider>
+          <MemoryRouter initialEntries={['/settings']}>
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    expect(
+      await screen.findByText('当前操作系统不支持应用内热替换，请前往 GitHub Releases 手动下载更新'),
+    ).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /GitHub Releases/ });
+    expect(link).toHaveAttribute(
+      'href',
+      'https://github.com/booooodv/CourseFin/releases/tag/v1.0.2',
+    );
+    const applyBtn = screen.getByRole('button', { name: /立即更新到 v1\.0\.2/ });
+    expect(applyBtn).toBeDisabled();
+  });
+
+  it('scrolls #system-update into view on #system-update hash and displays timeout refresh button', async () => {
+    let statusCalls = 0;
+    let healthCalls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            return jsonResponse(makeStatus({ state: 'idle' }));
+          }
+          return jsonResponse(makeStatus({ state: 'restarting', target_version: '1.0.2' }));
+        }
+        if (url === '/health' && method === 'GET') {
+          healthCalls += 1;
+          if (healthCalls === 1) {
+            return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-1' });
+          }
+          throw new TypeError('Failed to fetch');
+        }
+        if (url === '/api/v1/system/update/apply' && method === 'POST') {
+          return jsonResponse(
+            makeStatus({ state: 'downloading', target_version: '1.0.2' }),
+            202,
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <UpdateProvider pollIntervalMs={15} healthPollIntervalMs={15} restartTimeoutMs={80}>
+          <MemoryRouter initialEntries={['/settings#system-update']}>
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    });
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /立即更新到 v1\.0\.2/ }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: /确认更新/ }));
+
+    expect(await screen.findByText(/等待服务重启超时/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '立即刷新' })).toBeInTheDocument();
+  });
+
+  it('displays rollback banner on restart failure and degrades safely when rendered without UpdateProvider on 404', async () => {
+    let statusCalls = 0;
+    let healthCalls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            return jsonResponse(makeStatus({ state: 'idle' }));
+          }
+          return jsonResponse({ error: 'bad gateway' }, 502);
+        }
+        if (url === '/health' && method === 'GET') {
+          healthCalls += 1;
+          if (healthCalls === 1) {
+            return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-old' });
+          }
+          return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-rollback-2' });
+        }
+        if (url === '/api/v1/system/update/apply' && method === 'POST') {
+          return jsonResponse(
+            makeStatus({ state: 'downloading', target_version: '1.0.2' }),
+            202,
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const firstRender = render(
+      <ToastProvider>
+        <UpdateProvider pollIntervalMs={15} healthPollIntervalMs={15} restartTimeoutMs={500}>
+          <MemoryRouter initialEntries={['/settings']}>
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /立即更新到 v1\.0\.2/ }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: /确认更新/ }));
+
+    expect(await screen.findByText(/已自动回滚至 v1\.0\.1/)).toBeInTheDocument();
+    firstRender.unmount();
+
+    // Standalone SettingsPage without UpdateProvider when update endpoint returns 404
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <MemoryRouter initialEntries={['/settings']}>
+          <SettingsPage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText('http://192.168.1.10:8096')).toBeInTheDocument();
+    expect(screen.getByText('暂未获取到版本更新状态。')).toBeInTheDocument();
+    expect(screen.queryByText(/加载系统设置失败/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /保存设置/ })).toBeEnabled();
   });
 });

@@ -1,5 +1,6 @@
 import type { FormEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   Check,
   Copy,
@@ -14,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../api/client';
+import SystemUpdateSection from '../components/SystemUpdateSection';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import { copyTextToClipboard } from '../utils/clipboard';
@@ -23,6 +25,7 @@ const MASKED_KEY_PLACEHOLDER = '****';
 
 export default function SettingsPage() {
   const { toast } = useToast();
+  const location = useLocation();
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentToken, setCurrentToken] = useState<string>('');
@@ -100,6 +103,19 @@ export default function SettingsPage() {
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (loading) return;
+    const isTargetHash =
+      location.hash === '#system-update' ||
+      (typeof window !== 'undefined' && window.location.hash === '#system-update');
+    if (isTargetHash && typeof document !== 'undefined') {
+      const el = document.getElementById('system-update');
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  }, [loading, location.hash]);
 
   const jellyfinUrl =
     settings?.base_url_hint?.trim() ||
@@ -365,6 +381,9 @@ export default function SettingsPage() {
           </div>
         </div>
       </section>
+
+      {/* System Version & Self-Update */}
+      <SystemUpdateSection />
 
       {/* Server & AI Config Form */}
       <form
