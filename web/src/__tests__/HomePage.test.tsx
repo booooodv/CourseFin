@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { api, itemPrimaryImageUrl, withApiKey } from '../api/client';
 import Layout from '../components/Layout';
+import { ToastProvider } from '../components/Toast';
+import { LibraryProvider } from '../contexts/LibraryContext';
+import { ThemeProvider } from '../contexts/ThemeContext';
 import HomePage from '../pages/HomePage';
 import SetupLoginPage from '../pages/SetupLoginPage';
 
@@ -507,6 +510,598 @@ describe('HomePage', () => {
       'src',
       '/Items/lesson-resume-99/Images/Primary?tag=2026-11-23T12%3A00%3A00Z&maxWidth=480',
     );
+  });
+
+  it('renders Citonema spotlight hero with >5 resume lessons, preserves all 7 items, and switches active preview & CTA', async () => {
+    const sevenResume = Array.from({ length: 7 }, (_, idx) => ({
+      id: `lesson-${idx + 1}`,
+      course_id: `course-${idx + 1}`,
+      chapter_id: `chap-${idx + 1}`,
+      media_file_id: `mf-${idx + 1}`,
+      title: `第 ${idx + 1} 节：核心专题 ${idx + 1}`,
+      overview: '',
+      sort_order: idx + 1,
+      cover_path: '',
+      duration_ms: 600000,
+      container: 'mp4',
+      video_codec: 'h264',
+      audio_codec: 'aac',
+      width: 1920,
+      height: 1080,
+      bitrate: 2000000,
+      thumbnail_path: '',
+      media_status: 'active',
+      position_ticks: (idx + 1) * 60000 * 10000, // 10% .. 70%
+      played: false,
+      play_count: 0,
+      created_at: '2026-11-20T00:00:00Z',
+      updated_at: '2026-11-20T00:00:00Z',
+      course_title: `课程 ${idx + 1}`,
+      course_cover_path: '',
+      library_id: 'lib-dev',
+      chapter_title: `第 ${idx + 1} 章`,
+      chapter_sort_order: idx + 1,
+    }));
+
+    const courses = Array.from({ length: 7 }, (_, idx) => ({
+      id: `course-${idx + 1}`,
+      library_id: 'lib-dev',
+      title: `课程 ${idx + 1}`,
+      sort_title: `课程 ${idx + 1}`,
+      overview: '',
+      instructor: '讲师',
+      cover_path: '',
+      backdrop_path: '',
+      tags: [],
+      chapter_count: 1,
+      lesson_count: 10,
+      played_count: idx,
+      unplayed_item_count: 10 - idx,
+      played_percentage: idx * 10,
+      played: false,
+      total_duration_ms: 600000,
+      first_lesson_id: '',
+      created_at: '2026-11-20T00:00:00Z',
+      updated_at: '2026-11-20T00:00:00Z',
+    }));
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({ resume: sevenResume, next_up: [], libraries: [], courses });
+        }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses });
+        }
+        if (url.endsWith('/api/v1/libraries')) {
+          return jsonResponse({
+            libraries: [
+              {
+                id: 'lib-dev',
+                name: '编程开发',
+                cover_path: '',
+                sort_order: 1,
+                course_count: 7,
+                created_at: '2026-11-20T00:00:00Z',
+                updated_at: '2026-11-20T00:00:00Z',
+              },
+            ],
+          });
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({ tags: [] });
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('继续学习')).toBeInTheDocument();
+    expect(screen.getByText('1 / 7')).toBeInTheDocument();
+
+    // All 7 lessons are present inside the scrollable quick-switch list (none dropped)
+    for (let i = 1; i <= 7; i += 1) {
+      expect(
+        screen.getAllByText(`第 ${i} 节：核心专题 ${i}`).length,
+      ).toBeGreaterThanOrEqual(1);
+    }
+
+    const ctaLink = screen.getByRole('link', { name: /继续播放/ });
+    expect(ctaLink).toHaveAttribute('href', '/courses/course-1?lesson=lesson-1');
+
+    const user = userEvent.setup();
+
+    // Clicking next chevron switches to item 2
+    await user.click(screen.getByRole('button', { name: '下一个进行中课时' }));
+    expect(screen.getByText('2 / 7')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /继续播放/ })).toHaveAttribute(
+      'href',
+      '/courses/course-2?lesson=lesson-2',
+    );
+
+    // Clicking the 6th item in quick-switch list switches spotlight preview to item 6
+    await user.click(screen.getByRole('button', { name: /第 6 节：核心专题 6/ }));
+    expect(screen.getByText('6 / 7')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /继续播放/ })).toHaveAttribute(
+      'href',
+      '/courses/course-6?lesson=lesson-6',
+    );
+  });
+
+  it('scopes continue watching, tag chips, and header to ?library= inside LibraryProvider + Layout and returns to / on 查看全部', async () => {
+    function LocationProbe() {
+      const loc = useLocation();
+      return (
+        <div data-testid="current-location">
+          {loc.pathname}
+          {loc.search}
+        </div>
+      );
+    }
+
+    const libraries = [
+      {
+        id: 'lib-dev',
+        name: '编程开发',
+        cover_path: '',
+        sort_order: 1,
+        course_count: 2,
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+      },
+      {
+        id: 'lib-design',
+        name: '设计艺术',
+        cover_path: '',
+        sort_order: 2,
+        course_count: 1,
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+      },
+    ];
+
+    const courses = [
+      {
+        id: 'course-go',
+        library_id: 'lib-dev',
+        title: 'Go 语言进阶实战',
+        sort_title: 'Go 语言进阶实战',
+        overview: '',
+        instructor: '张老师',
+        cover_path: '',
+        backdrop_path: '',
+        tags: ['Go'],
+        chapter_count: 3,
+        lesson_count: 10,
+        played_count: 4,
+        unplayed_item_count: 6,
+        played_percentage: 40,
+        played: false,
+        total_duration_ms: 3600000,
+        first_lesson_id: '',
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+      },
+      {
+        id: 'course-react',
+        library_id: 'lib-dev',
+        title: 'React 19 架构精讲',
+        sort_title: 'React 19 架构精讲',
+        overview: '',
+        instructor: '李老师',
+        cover_path: '',
+        backdrop_path: '',
+        tags: ['React'],
+        chapter_count: 2,
+        lesson_count: 8,
+        played_count: 0,
+        unplayed_item_count: 8,
+        played_percentage: 0,
+        played: false,
+        total_duration_ms: 2400000,
+        first_lesson_id: '',
+        created_at: '2026-11-21T00:00:00Z',
+        updated_at: '2026-11-21T00:00:00Z',
+      },
+      {
+        id: 'course-figma',
+        library_id: 'lib-design',
+        title: 'Figma 设计系统全解',
+        sort_title: 'Figma 设计系统全解',
+        overview: '',
+        instructor: '王老师',
+        cover_path: '',
+        backdrop_path: '',
+        tags: ['UI设计'],
+        chapter_count: 4,
+        lesson_count: 12,
+        played_count: 12,
+        unplayed_item_count: 0,
+        played_percentage: 100,
+        played: true,
+        total_duration_ms: 4800000,
+        first_lesson_id: '',
+        created_at: '2026-11-22T00:00:00Z',
+        updated_at: '2026-11-22T00:00:00Z',
+      },
+    ];
+
+    const resume = [
+      {
+        id: 'lesson-1',
+        course_id: 'course-go',
+        chapter_id: 'chap-1',
+        media_file_id: 'mf-1',
+        title: '第 1 节：并发原语',
+        overview: '',
+        sort_order: 1,
+        cover_path: '',
+        duration_ms: 600000,
+        container: 'mp4',
+        video_codec: 'h264',
+        audio_codec: 'aac',
+        width: 1920,
+        height: 1080,
+        bitrate: 2000000,
+        thumbnail_path: '',
+        media_status: 'active',
+        position_ticks: 300000 * 10000,
+        played: false,
+        play_count: 0,
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+        course_title: 'Go 语言进阶实战',
+        course_cover_path: '',
+        library_id: 'lib-dev',
+        chapter_title: '第一章',
+        chapter_sort_order: 1,
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/libraries')) {
+          return jsonResponse({ libraries });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse({ user: { id: 'u1', username: 'alice', created_at: '', updated_at: '' } });
+        }
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({ resume, next_up: [], libraries, courses });
+        }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses });
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({
+            tags: [
+              { id: 't1', name: 'Go', course_count: 1 },
+              { id: 't2', name: 'React', course_count: 1 },
+              { id: 't3', name: 'UI设计', course_count: 1 },
+            ],
+          });
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    render(
+      <ThemeProvider>
+        <ToastProvider>
+          <MemoryRouter initialEntries={['/?library=lib-design']}>
+            <LibraryProvider>
+              <Routes>
+                <Route path="*" element={<Layout />}>
+                  <Route
+                    index
+                    element={
+                      <>
+                        <LocationProbe />
+                        <HomePage />
+                      </>
+                    }
+                  />
+                </Route>
+              </Routes>
+            </LibraryProvider>
+          </MemoryRouter>
+        </ToastProvider>
+      </ThemeProvider>,
+    );
+
+    // Header shows active library name
+    expect(await screen.findByRole('heading', { level: 1, name: '设计艺术' })).toBeInTheDocument();
+    // Should not duplicate standalone inline library pill bar
+    expect(screen.queryByRole('button', { name: /^全部 \(/ })).not.toBeInTheDocument();
+
+    // lib-dev resume item is filtered out (hero hidden because lib-design has 0 resume lessons)
+    expect(screen.queryByRole('heading', { name: '继续学习' })).not.toBeInTheDocument();
+    expect(screen.queryByText('第 1 节：并发原语')).not.toBeInTheDocument();
+
+    // Only design course and UI设计 tag chip appear
+    expect(screen.getByRole('link', { name: 'Figma 设计系统全解' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Go 语言进阶实战' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^UI设计/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Go/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^React/ })).not.toBeInTheDocument();
+
+    // Clicking 查看全部 returns to / and shows all courses & continue watching
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /查看全部/ }));
+
+    expect(await screen.findByRole('heading', { level: 1, name: '全部课程' })).toBeInTheDocument();
+    expect(screen.getByTestId('current-location')).toHaveTextContent(/^\/$/);
+    expect(screen.getByRole('heading', { name: '继续学习' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Go 语言进阶实战' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Go/ })).toBeInTheDocument();
+  });
+
+  it('falls back cleanly to 全部课程 when ?library= points to a nonexistent library', async () => {
+    const libraries = [
+      {
+        id: 'lib-dev',
+        name: '编程开发',
+        cover_path: '',
+        sort_order: 1,
+        course_count: 2,
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+      },
+    ];
+    const courses = [
+      {
+        id: 'course-go',
+        library_id: 'lib-dev',
+        title: 'Go 语言进阶实战',
+        sort_title: 'Go 语言进阶实战',
+        overview: '',
+        instructor: '张老师',
+        cover_path: '',
+        backdrop_path: '',
+        tags: ['Go'],
+        chapter_count: 3,
+        lesson_count: 10,
+        played_count: 4,
+        unplayed_item_count: 6,
+        played_percentage: 40,
+        played: false,
+        total_duration_ms: 3600000,
+        first_lesson_id: '',
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+      },
+      {
+        id: 'course-figma',
+        library_id: 'lib-other',
+        title: 'Figma 设计系统全解',
+        sort_title: 'Figma 设计系统全解',
+        overview: '',
+        instructor: '王老师',
+        cover_path: '',
+        backdrop_path: '',
+        tags: ['UI设计'],
+        chapter_count: 4,
+        lesson_count: 12,
+        played_count: 12,
+        unplayed_item_count: 0,
+        played_percentage: 100,
+        played: true,
+        total_duration_ms: 4800000,
+        first_lesson_id: '',
+        created_at: '2026-11-22T00:00:00Z',
+        updated_at: '2026-11-22T00:00:00Z',
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/libraries')) {
+          return jsonResponse({ libraries });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse({ user: { id: 'u1', username: 'alice', created_at: '', updated_at: '' } });
+        }
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({ resume: [], next_up: [], libraries, courses });
+        }
+        if (url.endsWith('/api/v1/courses')) {
+          return jsonResponse({ courses });
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({ tags: [] });
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    render(
+      <ThemeProvider>
+        <ToastProvider>
+          <MemoryRouter initialEntries={['/?library=nonexistent-id']}>
+            <LibraryProvider>
+              <Routes>
+                <Route path="*" element={<Layout />}>
+                  <Route index element={<HomePage />} />
+                </Route>
+              </Routes>
+            </LibraryProvider>
+          </MemoryRouter>
+        </ToastProvider>
+      </ThemeProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { level: 1, name: '全部课程' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Go 语言进阶实战' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Figma 设计系统全解' })).toBeInTheDocument();
+  });
+
+  it('reorders course cards client-side via 排序方式 and bumps catalogVersion after creating a blank course', async () => {
+    let libFetches = 0;
+    const libraries = [
+      {
+        id: 'lib-dev',
+        name: '编程开发',
+        cover_path: '',
+        sort_order: 1,
+        course_count: 3,
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+      },
+    ];
+    const courses = [
+      {
+        id: 'course-go',
+        library_id: 'lib-dev',
+        title: 'Go 语言进阶实战',
+        sort_title: 'Go 语言进阶实战',
+        overview: '',
+        instructor: '张老师',
+        cover_path: '',
+        backdrop_path: '',
+        tags: [],
+        chapter_count: 3,
+        lesson_count: 10,
+        played_count: 4,
+        unplayed_item_count: 6,
+        played_percentage: 40,
+        played: false,
+        total_duration_ms: 3600000,
+        first_lesson_id: '',
+        created_at: '2026-11-20T00:00:00Z',
+        updated_at: '2026-11-20T00:00:00Z',
+      },
+      {
+        id: 'course-react',
+        library_id: 'lib-dev',
+        title: 'React 19 架构精讲',
+        sort_title: 'React 19 架构精讲',
+        overview: '',
+        instructor: '李老师',
+        cover_path: '',
+        backdrop_path: '',
+        tags: [],
+        chapter_count: 2,
+        lesson_count: 8,
+        played_count: 0,
+        unplayed_item_count: 8,
+        played_percentage: 0,
+        played: false,
+        total_duration_ms: 2400000,
+        first_lesson_id: '',
+        created_at: '2026-11-21T00:00:00Z',
+        updated_at: '2026-11-21T00:00:00Z',
+      },
+      {
+        id: 'course-figma',
+        library_id: 'lib-dev',
+        title: 'Figma 设计系统全解',
+        sort_title: 'Figma 设计系统全解',
+        overview: '',
+        instructor: '王老师',
+        cover_path: '',
+        backdrop_path: '',
+        tags: [],
+        chapter_count: 4,
+        lesson_count: 12,
+        played_count: 12,
+        unplayed_item_count: 0,
+        played_percentage: 100,
+        played: true,
+        total_duration_ms: 4800000,
+        first_lesson_id: '',
+        created_at: '2026-11-22T00:00:00Z',
+        updated_at: '2026-11-22T00:00:00Z',
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          libFetches += 1;
+          return jsonResponse({ libraries });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse({ user: { id: 'u1', username: 'alice', created_at: '', updated_at: '' } });
+        }
+        if (url.endsWith('/api/v1/home')) {
+          return jsonResponse({ resume: [], next_up: [], libraries, courses });
+        }
+        if (url.endsWith('/api/v1/courses') && method === 'GET') {
+          return jsonResponse({ courses });
+        }
+        if (url.endsWith('/api/v1/courses') && method === 'POST') {
+          return jsonResponse({ id: 'course-new', title: '新建课程', chapters: [] }, 201);
+        }
+        if (url.endsWith('/api/v1/tags')) {
+          return jsonResponse({ tags: [] });
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    render(
+      <ThemeProvider>
+        <ToastProvider>
+          <MemoryRouter initialEntries={['/']}>
+            <LibraryProvider>
+              <Routes>
+                <Route path="*" element={<Layout />}>
+                  <Route index element={<HomePage />} />
+                  <Route path="courses/:courseId/edit" element={<div data-testid="course-editor">编辑页</div>} />
+                </Route>
+              </Routes>
+            </LibraryProvider>
+          </MemoryRouter>
+        </ToastProvider>
+      </ThemeProvider>,
+    );
+
+    expect(await screen.findByRole('link', { name: 'Go 语言进阶实战' })).toBeInTheDocument();
+
+    const getOrder = () =>
+      screen
+        .getAllByRole('article')
+        .map((card) => within(card).getByRole('link', { name: /^编辑 / }).getAttribute('aria-label'));
+
+    expect(getOrder()).toEqual([
+      '编辑 Go 语言进阶实战',
+      '编辑 React 19 架构精讲',
+      '编辑 Figma 设计系统全解',
+    ]);
+
+    const user = userEvent.setup();
+    const sortSelect = screen.getByLabelText('排序方式');
+    await user.selectOptions(sortSelect, 'progress');
+
+    expect(getOrder()).toEqual([
+      '编辑 Figma 设计系统全解',
+      '编辑 Go 语言进阶实战',
+      '编辑 React 19 架构精讲',
+    ]);
+
+    const fetchesBeforeCreate = libFetches;
+    await user.click(screen.getByRole('button', { name: /新建空白课程/ }));
+    await user.type(screen.getByLabelText('新课程名称'), 'Rust 系统编程');
+    await user.click(screen.getByRole('button', { name: '创建并编辑' }));
+
+    expect(await screen.findByTestId('course-editor')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(libFetches).toBeGreaterThan(fetchesBeforeCreate);
+    });
   });
 });
 
