@@ -372,15 +372,15 @@ export default function VideoPlayer({
     return (
       <div
         ref={containerRef}
-        className="relative aspect-video w-full overflow-hidden rounded-2xl border border-amber-500/30 bg-slate-900/95 p-6 sm:p-10 flex flex-col items-center justify-center text-center shadow-lg"
+        className="relative aspect-video w-full overflow-hidden rounded-3xl border border-status-warning/30 bg-card p-6 sm:p-10 flex flex-col items-center justify-center text-center shadow-card"
       >
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-400 mb-4">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-status-warning-soft text-status-warning-ink mb-4">
           <Tv className="h-7 w-7" />
         </div>
-        <h3 className="text-lg sm:text-xl font-semibold text-white">
+        <h3 className="text-lg sm:text-xl font-semibold text-ink-primary">
           当前浏览器不支持直接播放此视频编码
         </h3>
-        <p className="mt-2 max-w-xl text-sm text-slate-300 leading-relaxed">
+        <p className="mt-2 max-w-xl text-sm text-ink-secondary leading-relaxed">
           {lessonTitle ? `「${lessonTitle}」` : '该课时'}的视频流无法在网页端直接解码。推荐使用支持 Jellyfin
           协议的原生播放器连接本服务观看，以获得完整硬解与字幕体验：
         </p>
@@ -389,28 +389,28 @@ export default function VideoPlayer({
           {['Infuse', 'VidHub', 'SenPlayer'].map((app) => (
             <span
               key={app}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/30 bg-indigo-500/15 px-3.5 py-1.5 text-sm font-semibold text-indigo-200"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-accent-ring/40 bg-accent-soft px-3.5 py-1.5 text-sm font-semibold text-accent-ink"
             >
-              <MonitorPlay className="h-4 w-4 text-indigo-400" />
+              <MonitorPlay className="h-4 w-4 text-accent-ink" />
               {app}
             </span>
           ))}
         </div>
 
-        <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs text-ink-muted">
           {playback.container && (
-            <span className="rounded-lg border border-slate-700/80 bg-slate-800/80 px-2.5 py-1">
-              容器: <strong className="text-slate-200 uppercase">{playback.container}</strong>
+            <span className="rounded-lg border border-subtle bg-subtle px-2.5 py-1 text-ink-secondary">
+              容器: <strong className="text-ink-primary uppercase">{playback.container}</strong>
             </span>
           )}
           {playback.video_codec && (
-            <span className="rounded-lg border border-slate-700/80 bg-slate-800/80 px-2.5 py-1">
-              视频编码: <strong className="text-slate-200 uppercase">{playback.video_codec}</strong>
+            <span className="rounded-lg border border-subtle bg-subtle px-2.5 py-1 text-ink-secondary">
+              视频编码: <strong className="text-ink-primary uppercase">{playback.video_codec}</strong>
             </span>
           )}
           {playback.audio_codec && (
-            <span className="rounded-lg border border-slate-700/80 bg-slate-800/80 px-2.5 py-1">
-              音频编码: <strong className="text-slate-200 uppercase">{playback.audio_codec}</strong>
+            <span className="rounded-lg border border-subtle bg-subtle px-2.5 py-1 text-ink-secondary">
+              音频编码: <strong className="text-ink-primary uppercase">{playback.audio_codec}</strong>
             </span>
           )}
         </div>
@@ -421,7 +421,7 @@ export default function VideoPlayer({
   return (
     <div
       ref={containerRef}
-      className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 shadow-xl"
+      className="overflow-hidden rounded-3xl border border-subtle bg-card shadow-card"
     >
       <div className="relative aspect-video w-full bg-black">
         <video
@@ -455,25 +455,25 @@ export default function VideoPlayer({
         </video>
 
         {playerError && (
-          <div className="absolute inset-x-4 bottom-14 rounded-xl border border-rose-500/40 bg-slate-950/90 px-4 py-2.5 text-xs text-rose-200 flex items-center gap-2 backdrop-blur">
-            <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+          <div className="absolute inset-x-4 bottom-14 rounded-2xl border border-status-danger/40 bg-card/95 px-4 py-2.5 text-xs text-status-danger-ink flex items-center gap-2 backdrop-blur shadow-float">
+            <AlertTriangle className="h-4 w-4 text-status-danger shrink-0" />
             <span>{playerError}</span>
           </div>
         )}
       </div>
 
       {/* Player Control Strip */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/90 bg-slate-900/90 px-4 py-2.5 text-xs text-slate-300">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle bg-card px-4 py-3 text-xs text-ink-secondary">
         <div className="flex flex-wrap items-center gap-4">
           <Tooltip content="切换视频播放倍速（自动记忆偏好）">
             <label className="inline-flex items-center gap-2">
-              <Gauge className="h-4 w-4 text-indigo-400" />
-              <span className="text-slate-400">倍速</span>
+              <Gauge className="h-4 w-4 text-accent" />
+              <span className="text-ink-secondary font-medium">倍速</span>
               <select
                 aria-label="播放倍速"
                 value={String(playbackRate)}
                 onChange={(e) => handleRateChange(Number(e.target.value))}
-                className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs font-medium text-slate-100 focus:border-indigo-500 focus:outline-none"
+                className="rounded-full border border-default bg-subtle px-3 py-1 text-xs font-medium text-ink-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors cursor-pointer"
               >
                 {PLAYBACK_RATES.map((rate) => (
                   <option key={rate} value={String(rate)}>
@@ -486,13 +486,13 @@ export default function VideoPlayer({
 
           <Tooltip content="切换外挂或内嵌字幕轨道">
             <label className="inline-flex items-center gap-2">
-              <Captions className="h-4 w-4 text-sky-400" />
-              <span className="text-slate-400">字幕</span>
+              <Captions className="h-4 w-4 text-accent" />
+              <span className="text-ink-secondary font-medium">字幕</span>
               <select
                 aria-label="字幕选择"
                 value={selectedSubtitleIndex === null ? 'off' : String(selectedSubtitleIndex)}
                 onChange={(e) => handleSubtitleChange(e.target.value)}
-                className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs font-medium text-slate-100 focus:border-indigo-500 focus:outline-none max-w-[180px]"
+                className="rounded-full border border-default bg-subtle px-3 py-1 text-xs font-medium text-ink-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors max-w-[180px] cursor-pointer"
               >
                 <option value="off">关闭</option>
                 {textSubtitles.map((sub) => (
@@ -506,15 +506,32 @@ export default function VideoPlayer({
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="hidden sm:inline text-[11px] text-slate-500">
-            快捷键：空格 播放/暂停 · ←/→ 快退/快进 10 秒 · F 全屏
-          </span>
+          <div className="hidden sm:flex items-center gap-2 text-[11px] text-ink-muted">
+            <span className="inline-flex items-center gap-1">
+              <kbd className="rounded-md border border-default bg-subtle px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink-secondary">
+                Space
+              </kbd>
+              <span>播放/暂停</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <kbd className="rounded-md border border-default bg-subtle px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink-secondary">
+                ←/→
+              </kbd>
+              <span>±10s</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <kbd className="rounded-md border border-default bg-subtle px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink-secondary">
+                F
+              </kbd>
+              <span>全屏</span>
+            </span>
+          </div>
           <Tooltip content="切换全屏播放（快捷键 F）">
             <button
               type="button"
               onClick={handleToggleFullscreen}
               aria-label="切换全屏"
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
+              className="inline-flex items-center gap-1.5 rounded-full border border-default bg-subtle px-3 py-1 text-xs font-medium text-ink-primary hover:bg-muted transition-colors cursor-pointer"
             >
               <Maximize2 className="h-3.5 w-3.5" />
               <span>全屏</span>

@@ -219,6 +219,8 @@ describe('VideoPlayer', () => {
     expect(screen.getByText('dts')).toBeInTheDocument();
     expect(screen.getByText('mkv')).toBeInTheDocument();
     expect(container.querySelector('video')).toBeNull();
+    expect(container.innerHTML).not.toMatch(/\bbg-slate-900\b/);
+    expect(container.innerHTML).not.toMatch(/\b(slate|indigo|rose|emerald)-/);
   });
 
   it('changes playbackRate when user selects 1.5x speed and renders subtitle selector options', async () => {
@@ -598,5 +600,55 @@ describe('CourseDetailPage', () => {
       expect(playbackAttempts).toBe(2);
       expect(container.querySelector('video')).toBeTruthy();
     });
+  });
+
+  it('renders theater-first layout with compact header, video before course overview, and dual-theme tokens', async () => {
+    const course = makeCourse();
+    const playbackL1 = makePlayback({ lesson_id: 'l1' });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) {
+          return jsonResponse(course);
+        }
+        if (url.endsWith('/api/v1/lessons/l1/playback')) {
+          return jsonResponse(playbackL1);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/courses/c1']}>
+        <Routes>
+          <Route path="/courses/:courseId" element={<CourseDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole('link', { name: /返回课程库/ })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Go 微服务全栈实战' })).toBeInTheDocument();
+    expect(screen.getByText(/已学 0\/2 节 · 0%/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /收起目录/ })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /编辑课程/ })).toBeInTheDocument();
+
+    let video: HTMLVideoElement | null = null;
+    await waitFor(() => {
+      video = container.querySelector('video');
+      expect(video).toBeTruthy();
+    });
+    const overviewEl = screen.getByText('从零设计并部署高并发 Go 微服务系统。');
+    expect(overviewEl).toBeInTheDocument();
+
+    // Video must appear before the course overview section in DOM order
+    expect(
+      Boolean(video!.compareDocumentPosition(overviewEl) & Node.DOCUMENT_POSITION_FOLLOWING),
+    ).toBe(true);
+
+    // Ensure no hardcoded legacy palette classes remain
+    expect(container.innerHTML).not.toMatch(/\bbg-slate-900\b/);
+    expect(container.innerHTML).not.toMatch(/\b(slate|indigo|rose|emerald)-/);
   });
 });

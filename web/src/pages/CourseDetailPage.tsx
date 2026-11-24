@@ -300,8 +300,8 @@ export default function CourseDetailPage() {
 
   if (loadingCourse) {
     return (
-      <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3">
-        <Loader2 className="h-7 w-7 animate-spin text-indigo-400" />
+      <div className="flex flex-col items-center justify-center py-24 text-ink-secondary gap-3">
+        <Loader2 className="h-7 w-7 animate-spin text-accent" />
         <p className="text-sm">正在加载课程详情...</p>
       </div>
     );
@@ -309,12 +309,12 @@ export default function CourseDetailPage() {
 
   if (courseError || !course) {
     return (
-      <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-6 text-center max-w-lg mx-auto my-12 space-y-4">
-        <p className="text-rose-200 font-medium">{courseError ?? '未找到课程'}</p>
+      <div className="rounded-3xl border border-status-danger/30 bg-status-danger-soft p-6 text-center max-w-lg mx-auto my-12 space-y-4 shadow-card">
+        <p className="text-status-danger-ink font-medium">{courseError ?? '未找到课程'}</p>
         <div className="flex items-center justify-center gap-3">
           <Link
             to="/"
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-full border border-default bg-card px-4 py-2 text-sm font-medium text-ink-primary hover:bg-subtle transition-colors"
           >
             <ArrowLeft className="h-4 w-4" />
             <span>返回课程库</span>
@@ -322,7 +322,7 @@ export default function CourseDetailPage() {
           <button
             type="button"
             onClick={() => void loadCourse()}
-            className="inline-flex items-center rounded-xl bg-rose-600 px-4 py-2 text-sm font-medium text-white hover:bg-rose-500 transition-colors"
+            className="inline-flex items-center rounded-full bg-status-danger px-4 py-2 text-sm font-medium text-ink-inverse hover:opacity-90 transition-opacity cursor-pointer"
           >
             重试
           </button>
@@ -336,25 +336,42 @@ export default function CourseDetailPage() {
   const totalDurationText = formatTotalDuration(course.total_duration_ms);
 
   return (
-    <div className="space-y-6">
-      {/* Top breadcrumb & actions */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Tooltip content="返回首页课程列表">
-          <Link
-            to="/"
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-white transition-colors"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            <span>返回课程库</span>
-          </Link>
-        </Tooltip>
+    <div className="space-y-5">
+      {/* Compact Top Header Strip */}
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+          <Tooltip content="返回首页课程列表">
+            <Link
+              to="/"
+              className="inline-flex items-center gap-1.5 rounded-full border border-subtle bg-card px-3.5 py-1.5 text-xs font-medium text-ink-secondary hover:border-default hover:text-ink-primary shadow-card transition-colors shrink-0"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              <span>返回课程库</span>
+            </Link>
+          </Tooltip>
 
-        <div className="flex items-center gap-2.5">
+          <h1 className="text-lg sm:text-xl font-bold text-ink-primary tracking-tight truncate max-w-full sm:max-w-md lg:max-w-xl">
+            {course.title}
+          </h1>
+
+          {course.played && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-status-success-soft px-2.5 py-0.5 text-xs font-semibold text-status-success-ink shrink-0">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              <span>已完成</span>
+            </span>
+          )}
+
+          <span className="inline-flex items-center rounded-full border border-subtle bg-subtle px-2.5 py-0.5 text-xs font-medium tabular-nums text-ink-secondary shrink-0">
+            已学 {course.played_count}/{course.lesson_count} 节 · {coursePct}%
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
           <Tooltip content={sidebarOpen ? '收起右侧章节目录以扩大播放画面' : '展开右侧章节目录'}>
             <button
               type="button"
               onClick={() => setSidebarOpen((v) => !v)}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-700 hover:text-white transition-colors"
+              className="inline-flex items-center gap-1.5 rounded-full border border-subtle bg-card px-3.5 py-1.5 text-xs font-medium text-ink-secondary hover:border-default hover:text-ink-primary shadow-card transition-colors cursor-pointer"
             >
               {sidebarOpen ? (
                 <>
@@ -373,131 +390,44 @@ export default function CourseDetailPage() {
           <Tooltip content="编辑课程信息、章节排序、封面或运行 AI 整理">
             <Link
               to={`/courses/${course.id}/edit`}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700/80 bg-slate-800/80 px-3.5 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
+              className="inline-flex items-center gap-1.5 rounded-full border border-default bg-card px-3.5 py-1.5 text-xs font-semibold text-ink-primary hover:bg-subtle shadow-card transition-colors"
             >
               <Pencil className="h-3.5 w-3.5" />
               <span>编辑课程</span>
             </Link>
           </Tooltip>
         </div>
-      </div>
+      </header>
 
-      {/* Course Metadata Header */}
-      <section className="rounded-2xl border border-slate-800/90 bg-slate-900/70 p-4 sm:p-5">
-        <div className="flex flex-col sm:flex-row gap-5">
-          <div className="w-full sm:w-48 aspect-video sm:aspect-[16/10] shrink-0 overflow-hidden rounded-xl bg-slate-800 border border-slate-800">
-            {hasCover ? (
-              <img
-                src={itemPrimaryImageUrl(course.id, course.updated_at)}
-                alt={course.title}
-                onError={() => setCoverFailed(true)}
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <div className="h-full w-full bg-gradient-to-br from-indigo-600 via-indigo-700 to-slate-900 flex items-center justify-center">
-                <span className="text-3xl font-bold text-white/90">
-                  {course.title.trim().slice(0, 1).toUpperCase() || '课'}
-                </span>
-              </div>
-            )}
-          </div>
-
-          <div className="flex-1 min-w-0 flex flex-col justify-between gap-3">
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center gap-2.5">
-                <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
-                  {course.title}
-                </h1>
-                {course.played && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
-                    <CheckCircle2 className="h-3.5 w-3.5" />
-                    已完成
-                  </span>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
-                {course.instructor && <span>讲师：{course.instructor}</span>}
-                <span>
-                  共 {course.chapter_count} 章 · {course.lesson_count} 节
-                </span>
-                {totalDurationText && (
-                  <span className="inline-flex items-center gap-1">
-                    <Clock className="h-3.5 w-3.5" />
-                    {totalDurationText}
-                  </span>
-                )}
-              </div>
-
-              {course.overview && (
-                <p className="text-sm text-slate-300 leading-relaxed line-clamp-2">
-                  {course.overview}
-                </p>
-              )}
-
-              {course.tags && course.tags.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 pt-0.5">
-                  {course.tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="rounded-md border border-slate-700/70 bg-slate-800/80 px-2 py-0.5 text-[11px] text-slate-300"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="space-y-1.5 max-w-md">
-              <div className="flex items-center justify-between text-xs text-slate-400">
-                <span>
-                  已学 {course.played_count} / {course.lesson_count} 节
-                </span>
-                <span className="font-semibold text-slate-200">{coursePct}%</span>
-              </div>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-800">
-                <div
-                  className={`h-full rounded-full transition-all ${
-                    course.played ? 'bg-emerald-500' : 'bg-indigo-500'
-                  }`}
-                  style={{ width: `${coursePct}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Player + Collapsible Playlist Layout */}
+      {/* Theater-First Player + Sticky Playlist Layout */}
       <div
         className={`grid gap-6 items-start ${
-          sidebarOpen ? 'lg:grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1'
+          sidebarOpen ? 'lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1'
         }`}
       >
-        {/* Main Player Column */}
+        {/* Left Theater Column: (1) VideoPlayer, (2) Lesson Action Card, (3) Course Overview Card */}
         <div className="space-y-4 min-w-0">
           {flatLessons.length === 0 ? (
-            <div className="aspect-video w-full rounded-2xl border border-dashed border-slate-800 bg-slate-900/50 flex flex-col items-center justify-center text-center p-6">
-              <ListVideo className="h-10 w-10 text-slate-500 mb-3" />
-              <p className="text-base font-medium text-slate-200">该课程暂无课时</p>
-              <p className="mt-1 text-xs text-slate-400">
+            <div className="aspect-video w-full rounded-3xl border border-dashed border-default bg-card shadow-card flex flex-col items-center justify-center text-center p-6">
+              <ListVideo className="h-10 w-10 text-ink-muted mb-3" />
+              <p className="text-base font-semibold text-ink-primary">该课程暂无课时</p>
+              <p className="mt-1 text-xs text-ink-secondary">
                 请前往课程编辑页面添加章节和视频文件。
               </p>
             </div>
           ) : loadingPlayback ? (
-            <div className="aspect-video w-full rounded-2xl border border-slate-800 bg-slate-900/90 flex flex-col items-center justify-center text-slate-400 gap-3">
-              <Loader2 className="h-7 w-7 animate-spin text-indigo-400" />
+            <div className="aspect-video w-full rounded-3xl border border-subtle bg-card shadow-card flex flex-col items-center justify-center text-ink-secondary gap-3">
+              <Loader2 className="h-7 w-7 animate-spin text-accent" />
               <p className="text-sm">正在准备播放地址...</p>
             </div>
           ) : playbackError ? (
-            <div className="aspect-video w-full rounded-2xl border border-rose-500/30 bg-rose-500/10 flex flex-col items-center justify-center p-6 text-center gap-3">
-              <p className="text-sm font-medium text-rose-200">{playbackError}</p>
+            <div className="aspect-video w-full rounded-3xl border border-status-danger/30 bg-status-danger-soft flex flex-col items-center justify-center p-6 text-center gap-3 shadow-card">
+              <p className="text-sm font-medium text-status-danger-ink">{playbackError}</p>
               {activeLessonId && (
                 <button
                   type="button"
                   onClick={() => setPlaybackRetryNonce((n) => n + 1)}
-                  className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-500 transition-colors"
+                  className="rounded-full bg-status-danger px-4 py-2 text-xs font-semibold text-ink-inverse hover:opacity-90 transition-opacity cursor-pointer"
                 >
                   重新获取
                 </button>
@@ -512,13 +442,13 @@ export default function CourseDetailPage() {
             />
           ) : null}
 
-          {/* Current Lesson Action Strip */}
+          {/* Current Lesson Action Card */}
           {activeEntry && (
-            <div className="rounded-2xl border border-slate-800/90 bg-slate-900/70 p-4 space-y-3">
+            <section className="rounded-3xl border border-subtle bg-card shadow-card p-5 space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div className="min-w-0 space-y-0.5">
-                  <p className="text-xs font-medium text-indigo-300">{activeEntry.chapterTitle}</p>
-                  <h2 className="text-base sm:text-lg font-semibold text-white truncate">
+                  <p className="text-xs font-semibold text-accent-ink">{activeEntry.chapterTitle}</p>
+                  <h2 className="text-base sm:text-lg font-bold text-ink-primary truncate">
                     {activeEntry.lesson.title}
                   </h2>
                 </div>
@@ -529,7 +459,7 @@ export default function CourseDetailPage() {
                       type="button"
                       disabled={!prevLesson}
                       onClick={() => prevLesson && selectLesson(prevLesson.id)}
-                      className="inline-flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                      className="inline-flex items-center gap-1 rounded-full border border-default bg-subtle px-3.5 py-1.5 text-xs font-medium text-ink-primary hover:bg-muted disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
                     >
                       <SkipBack className="h-3.5 w-3.5" />
                       <span>上一节</span>
@@ -541,7 +471,7 @@ export default function CourseDetailPage() {
                       type="button"
                       disabled={!nextLesson}
                       onClick={() => nextLesson && selectLesson(nextLesson.id)}
-                      className="inline-flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                      className="inline-flex items-center gap-1 rounded-full border border-default bg-subtle px-3.5 py-1.5 text-xs font-medium text-ink-primary hover:bg-muted disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
                     >
                       <span>下一节</span>
                       <SkipForward className="h-3.5 w-3.5" />
@@ -553,10 +483,10 @@ export default function CourseDetailPage() {
                       type="button"
                       onClick={() => void handleTogglePlayed()}
                       disabled={togglingPlayed}
-                      className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                      className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer ${
                         activeEntry.lesson.played
-                          ? 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
-                          : 'bg-indigo-600 text-white hover:bg-indigo-500'
+                          ? 'border border-status-success/40 bg-status-success-soft text-status-success-ink hover:opacity-90'
+                          : 'bg-accent text-ink-inverse hover:bg-accent-hover shadow-accent'
                       }`}
                     >
                       <CheckCircle2 className="h-3.5 w-3.5" />
@@ -567,35 +497,110 @@ export default function CourseDetailPage() {
               </div>
 
               {actionError && (
-                <p className="text-xs text-rose-400">{actionError}</p>
+                <p className="text-xs text-status-danger-ink">{actionError}</p>
               )}
 
               {activeEntry.lesson.overview && (
-                <p className="text-sm text-slate-400 leading-relaxed border-t border-slate-800/80 pt-3">
+                <p className="text-sm text-ink-secondary leading-relaxed border-t border-subtle pt-3">
                   {activeEntry.lesson.overview}
                 </p>
               )}
-            </div>
+            </section>
           )}
+
+          {/* Course Overview & Metadata Card (below video for theater-first flow) */}
+          <section className="rounded-3xl border border-subtle bg-card shadow-card p-5">
+            <div className="flex flex-col sm:flex-row gap-5">
+              <div className="w-full sm:w-44 aspect-video sm:aspect-[16/10] shrink-0 overflow-hidden rounded-2xl bg-subtle border border-subtle">
+                {hasCover ? (
+                  <img
+                    src={itemPrimaryImageUrl(course.id, course.updated_at)}
+                    alt={course.title}
+                    onError={() => setCoverFailed(true)}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="h-full w-full bg-gradient-to-br from-blue-500 to-sky-600 flex items-center justify-center">
+                    <span className="text-3xl font-bold text-white/95">
+                      {course.title.trim().slice(0, 1).toUpperCase() || '课'}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0 flex flex-col justify-between gap-3">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-secondary">
+                    {course.instructor && <span>讲师：{course.instructor}</span>}
+                    <span>
+                      共 {course.chapter_count} 章 · {course.lesson_count} 节
+                    </span>
+                    {totalDurationText && (
+                      <span className="inline-flex items-center gap-1">
+                        <Clock className="h-3.5 w-3.5 text-ink-muted" />
+                        {totalDurationText}
+                      </span>
+                    )}
+                  </div>
+
+                  {course.overview && (
+                    <p className="text-sm text-ink-secondary leading-relaxed">
+                      {course.overview}
+                    </p>
+                  )}
+
+                  {course.tags && course.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-0.5">
+                      {course.tags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded-full border border-subtle bg-subtle px-2.5 py-0.5 text-[11px] font-medium text-ink-secondary"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-1.5 max-w-md pt-1">
+                  <div className="flex items-center justify-between text-xs text-ink-secondary">
+                    <span>
+                      已学 {course.played_count} / {course.lesson_count} 节
+                    </span>
+                    <span className="font-semibold tabular-nums text-ink-primary">{coursePct}%</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-subtle">
+                    <div
+                      className={`h-full rounded-full transition-all ${
+                        course.played ? 'bg-status-success' : 'bg-accent'
+                      }`}
+                      style={{ width: `${coursePct}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
 
-        {/* Collapsible Chapter & Lesson Playlist Sidebar */}
+        {/* Right Sticky Chapter & Lesson Playlist Sidebar */}
         {sidebarOpen && (
           <aside
             aria-label="课程目录"
-            className="rounded-2xl border border-slate-800/90 bg-slate-900/70 overflow-hidden"
+            className="rounded-3xl bg-card border border-subtle shadow-card overflow-hidden lg:sticky lg:top-6"
           >
-            <div className="flex items-center justify-between border-b border-slate-800/90 px-4 py-3">
+            <div className="flex items-center justify-between border-b border-subtle px-4 py-3.5">
               <div className="flex items-center gap-2">
-                <ListVideo className="h-4 w-4 text-indigo-400" />
-                <h2 className="text-sm font-semibold text-white">课程目录</h2>
+                <ListVideo className="h-4 w-4 text-accent" />
+                <h2 className="text-sm font-semibold text-ink-primary">课程目录</h2>
               </div>
-              <span className="text-xs text-slate-400">
+              <span className="text-xs tabular-nums text-ink-muted">
                 {course.played_count}/{course.lesson_count} 节
               </span>
             </div>
 
-            <div className="max-h-[640px] overflow-y-auto divide-y divide-slate-800/70">
+            <div className="max-h-[calc(100vh-8rem)] overflow-y-auto divide-y divide-subtle">
               {(course.chapters ?? []).map((chapter) => {
                 const isCollapsed = Boolean(collapsedChapters[chapter.id]);
                 const lessons = chapter.lessons ?? [];
@@ -605,25 +610,25 @@ export default function CourseDetailPage() {
                       type="button"
                       onClick={() => toggleChapterCollapse(chapter.id)}
                       aria-expanded={!isCollapsed}
-                      className="w-full flex items-center justify-between gap-2 px-4 py-3 text-left bg-slate-900/90 hover:bg-slate-800/60 transition-colors"
+                      className="w-full flex items-center justify-between gap-2 px-4 py-3 text-left bg-subtle/70 hover:bg-subtle transition-colors cursor-pointer"
                     >
                       <div className="flex items-center gap-2 min-w-0">
                         {isCollapsed ? (
-                          <ChevronRight className="h-4 w-4 text-slate-400 shrink-0" />
+                          <ChevronRight className="h-4 w-4 text-ink-muted shrink-0" />
                         ) : (
-                          <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" />
+                          <ChevronDown className="h-4 w-4 text-ink-muted shrink-0" />
                         )}
-                        <span className="text-xs font-semibold text-slate-200 truncate">
+                        <span className="text-xs font-semibold text-ink-primary truncate">
                           {chapter.title}
                         </span>
                       </div>
-                      <span className="text-[11px] text-slate-400 shrink-0">
+                      <span className="text-[11px] tabular-nums text-ink-muted shrink-0">
                         {chapter.played_count}/{lessons.length}
                       </span>
                     </button>
 
                     {!isCollapsed && (
-                      <ul className="divide-y divide-slate-800/40 bg-slate-950/40">
+                      <ul className="divide-y divide-subtle bg-card">
                         {lessons.map((lesson) => {
                           const isActive = lesson.id === activeLessonId;
                           return (
@@ -632,31 +637,37 @@ export default function CourseDetailPage() {
                                 type="button"
                                 onClick={() => selectLesson(lesson.id)}
                                 aria-current={isActive ? 'true' : undefined}
-                                className={`w-full flex items-start gap-2.5 px-4 py-2.5 text-left transition-colors ${
+                                className={`relative w-full flex items-start gap-2.5 px-4 py-2.5 text-left transition-colors cursor-pointer ${
                                   isActive
-                                    ? 'bg-indigo-500/15 border-l-2 border-indigo-400 text-white'
-                                    : 'hover:bg-slate-800/50 text-slate-300 border-l-2 border-transparent'
+                                    ? 'bg-accent-soft text-ink-primary'
+                                    : 'hover:bg-subtle/70 text-ink-secondary'
                                 }`}
                               >
+                                {isActive && (
+                                  <span
+                                    aria-hidden="true"
+                                    className="absolute inset-y-1.5 left-0 w-1 rounded-r-full bg-accent"
+                                  />
+                                )}
                                 <span className="mt-0.5 shrink-0">
                                   {lesson.played ? (
-                                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                                    <CheckCircle2 className="h-4 w-4 text-status-success" />
                                   ) : isActive ? (
-                                    <Play className="h-4 w-4 text-indigo-400 fill-current" />
+                                    <Play className="h-4 w-4 text-accent fill-current" />
                                   ) : (
-                                    <Circle className="h-4 w-4 text-slate-600" />
+                                    <Circle className="h-4 w-4 text-ink-muted/60" />
                                   )}
                                 </span>
                                 <span className="flex-1 min-w-0">
                                   <span
                                     className={`block text-xs leading-snug line-clamp-2 ${
-                                      isActive ? 'font-semibold text-white' : 'font-medium'
+                                      isActive ? 'font-bold text-ink-primary' : 'font-medium text-ink-secondary'
                                     }`}
                                   >
                                     {lesson.title}
                                   </span>
                                 </span>
-                                <span className="shrink-0 text-[11px] tabular-nums text-slate-500 mt-0.5">
+                                <span className="shrink-0 text-[11px] tabular-nums text-ink-muted mt-0.5">
                                   {formatLessonDuration(lesson.duration_ms)}
                                 </span>
                               </button>
