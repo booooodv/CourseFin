@@ -1046,4 +1046,60 @@ describe('LibraryContext, Layout AppShell, & AppRoutes', () => {
     });
     expect(screen.getByTestId('shell-location')).toHaveTextContent('/settings');
   });
+
+  it('keeps 课程库 active in Layout when landing on a stale /?library=nonexistent-id URL inside LibraryProvider', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/v1/libraries') {
+          return jsonResponse({
+            libraries: [
+              makeLibrary({ id: 'lib-dev', name: '编程开发', sort_order: 1, course_count: 3 }),
+              makeLibrary({ id: 'lib-design', name: '设计艺术', sort_order: 2, course_count: 1 }),
+            ],
+          });
+        }
+        if (url === '/api/v1/auth/me') {
+          return jsonResponse({ user: { id: 'u1', username: 'alice', created_at: '', updated_at: '' } });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/?library=nonexistent-id']}>
+            <LibraryProvider>
+              <Routes>
+                <Route path="*" element={<Layout />}>
+                  <Route index element={<ShellLocationProbe />} />
+                </Route>
+              </Routes>
+            </LibraryProvider>
+          </MemoryRouter>
+        </ThemeProvider>
+      </ToastProvider>,
+    );
+
+    const devLibGroup = await screen.findByRole('group', { name: '媒体库 编程开发' });
+    const designLibGroup = screen.getByRole('group', { name: '媒体库 设计艺术' });
+    const courseNavLink = screen.getByRole('link', { name: '课程库' });
+
+    await waitFor(() => {
+      expect(courseNavLink.className).toContain('bg-accent-soft');
+      expect(courseNavLink.className).toContain('font-semibold');
+    });
+    expect(courseNavLink).toHaveAttribute('aria-current', 'page');
+    expect(courseNavLink.querySelector('span[aria-hidden="true"]')?.className).toContain('bg-accent');
+    expect(devLibGroup.className).not.toContain('bg-accent-soft');
+    expect(designLibGroup.className).not.toContain('bg-accent-soft');
+
+    // Selecting a valid library subsequently shifts active state off 课程库 onto that library
+    const user = userEvent.setup();
+    await user.click(within(devLibGroup).getByRole('button', { name: /编程开发/ }));
+    expect(courseNavLink.className).not.toContain('bg-accent-soft');
+    expect(devLibGroup.className).toContain('bg-accent-soft');
+  });
 });

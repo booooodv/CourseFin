@@ -358,7 +358,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
   return (
     <section
       id="system-update"
-      className="rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-5"
+      className="scroll-mt-20 lg:scroll-mt-6 rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-5"
     >
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-3">

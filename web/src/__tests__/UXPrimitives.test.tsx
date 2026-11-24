@@ -152,6 +152,31 @@ describe('Tooltip', () => {
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
   });
 
+  it('dismisses tooltip when trigger button is clicked while still calling onClick', async () => {
+    const onClick = vi.fn();
+    render(
+      <Tooltip content="切换侧边栏展开或收起">
+        <button type="button" onClick={onClick}>
+          收起侧边栏
+        </button>
+      </Tooltip>,
+    );
+
+    const user = userEvent.setup();
+    const triggerBtn = screen.getByRole('button', { name: '收起侧边栏' });
+
+    await user.hover(triggerBtn);
+    await waitFor(() => {
+      expect(screen.getByRole('tooltip')).toHaveTextContent('切换侧边栏展开或收起');
+    });
+
+    await user.click(triggerBtn);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    });
+  });
+
   it('closes immediately when trigger transitions to disabled while hovered', async () => {
     function DisablingButton() {
       const [disabled, setDisabled] = useState(false);

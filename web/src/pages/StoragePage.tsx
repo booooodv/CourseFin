@@ -390,6 +390,7 @@ export default function StoragePage() {
           <Tooltip content="关闭错误提示">
             <button
               type="button"
+              aria-label="关闭错误提示"
               onClick={() => setError(null)}
               className="rounded-lg p-1 text-status-danger-ink hover:bg-card/60 transition-colors cursor-pointer"
             >

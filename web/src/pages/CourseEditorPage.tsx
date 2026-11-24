@@ -1217,7 +1217,7 @@ export default function CourseEditorPage() {
   return (
     <div className="space-y-6">
       {/* Sticky Top Studio Bar */}
-      <header className="sticky top-0 z-20 -mx-4 px-4 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 py-3 bg-canvas/85 backdrop-blur-md border-b border-subtle">
+      <header className="sticky top-14 lg:top-0 z-20 -mx-4 px-4 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 py-3 bg-canvas/85 backdrop-blur-md border-b border-subtle">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <Tooltip content="返回课程播放页面">

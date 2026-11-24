@@ -140,6 +140,16 @@ interface SpotlightHeroProps {
 function SpotlightHero({ items, activeIdx, onSelectIdx }: SpotlightHeroProps): JSX.Element | null {
   const safeIdx = items.length > 0 ? Math.min(activeIdx, items.length - 1) : 0;
   const focused = items[safeIdx];
+  const quickRowRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const shouldScrollActiveRowRef = useRef(false);
+
+  useEffect(() => {
+    if (!shouldScrollActiveRowRef.current) return;
+    shouldScrollActiveRowRef.current = false;
+    const el = quickRowRefs.current[safeIdx];
+    el?.scrollIntoView?.({ block: 'nearest' });
+  }, [safeIdx]);
+
   if (!focused) return null;
 
   const pct = calcLessonProgressPct(focused.position_ticks, focused.duration_ms);
@@ -276,7 +286,10 @@ function SpotlightHero({ items, activeIdx, onSelectIdx }: SpotlightHeroProps): J
                     <button
                       type="button"
                       aria-label="上一个进行中课时"
-                      onClick={() => onSelectIdx((i) => (i - 1 + items.length) % items.length)}
+                      onClick={() => {
+                        shouldScrollActiveRowRef.current = true;
+                        onSelectIdx((i) => (i - 1 + items.length) % items.length);
+                      }}
                       className="flex h-7 w-7 items-center justify-center rounded-full border border-subtle bg-subtle text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors cursor-pointer"
                     >
                       <ChevronLeft className="h-4 w-4" />
@@ -286,7 +299,10 @@ function SpotlightHero({ items, activeIdx, onSelectIdx }: SpotlightHeroProps): J
                     <button
                       type="button"
                       aria-label="下一个进行中课时"
-                      onClick={() => onSelectIdx((i) => (i + 1) % items.length)}
+                      onClick={() => {
+                        shouldScrollActiveRowRef.current = true;
+                        onSelectIdx((i) => (i + 1) % items.length);
+                      }}
                       className="flex h-7 w-7 items-center justify-center rounded-full border border-subtle bg-subtle text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors cursor-pointer"
                     >
                       <ChevronRight className="h-4 w-4" />
@@ -303,6 +319,9 @@ function SpotlightHero({ items, activeIdx, onSelectIdx }: SpotlightHeroProps): J
                   return (
                     <div
                       key={item.id}
+                      ref={(el) => {
+                        quickRowRefs.current[idx] = el;
+                      }}
                       className={`relative group/item flex items-center gap-2 rounded-2xl pr-2 transition-colors ${
                         isSelected
                           ? 'bg-accent-soft text-ink-primary'
@@ -796,7 +815,7 @@ export default function HomePage(): JSX.Element {
     setSelectedTag(null);
     setSearchQuery('');
     if (libCtx.isProvided) {
-      if (activeLibraryId !== 'all') {
+      if (activeLibraryId !== 'all' || urlLibraryParam || searchParams.has('library')) {
         navigate('/');
       }
     } else {
@@ -807,7 +826,7 @@ export default function HomePage(): JSX.Element {
   const hasActiveFilter =
     activeLibraryId !== 'all' || selectedTag !== null || searchQuery.trim() !== '';
 
-  const effectiveLoading = loading || (libCtx.isProvided && libCtx.loading && !hasLoadedOnceRef.current);
+  const effectiveLoading = loading || (libCtx.isProvided && libCtx.loading);
 
   if (effectiveLoading) {
     return (
@@ -886,7 +905,7 @@ export default function HomePage(): JSX.Element {
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="搜索课程名称、讲师或标签..."
               aria-label="搜索课程"
-              className="w-full rounded-full border border-subtle bg-card py-2.5 pl-10 pr-9 text-sm text-ink-primary placeholder:text-ink-muted shadow-card focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring transition-all"
+              className="w-full rounded-full border border-subtle bg-card py-2.5 pl-10 pr-9 text-sm text-ink-primary placeholder:text-ink-muted shadow-card focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring transition-all [&::-webkit-search-cancel-button]:appearance-none"
             />
             {searchQuery && (
               <Tooltip content="清空搜索关键词">

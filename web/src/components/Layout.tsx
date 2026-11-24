@@ -504,13 +504,25 @@ export default function Layout({ children }: LayoutProps): JSX.Element {
     }
   }, [isProvided, refreshStatus, status]);
 
-  const isPlayerRoute = /^\/courses\/[^/]+$/.test(location.pathname);
+  const isPlayerRoute = /^\/courses\/[^/]+\/?$/.test(location.pathname);
   const isCourseSubroute = location.pathname.startsWith('/courses/');
-  const activeLibraryParam = location.pathname === '/' ? searchParams.get('library') : null;
+  const rawLibraryParam =
+    location.pathname === '/' ? (searchParams.get('library')?.trim() || null) : null;
+  const activeLibraryParam =
+    libCtx.isProvided &&
+    !libCtx.loading &&
+    rawLibraryParam &&
+    !libCtx.libraries.some((l) => l.id === rawLibraryParam)
+      ? null
+      : rawLibraryParam;
 
   useEffect(() => {
     setTheaterOverride(null);
   }, [isPlayerRoute, location.pathname]);
+
+  useEffect(() => {
+    setMobileDrawerOpen(false);
+  }, [location.pathname, location.search]);
 
   useEffect(() => {
     if (!mobileDrawerOpen) return;
@@ -625,8 +637,8 @@ export default function Layout({ children }: LayoutProps): JSX.Element {
       <aside
         aria-label="主侧边栏"
         data-collapsed={effectiveCollapsed ? 'true' : 'false'}
-        className={`hidden lg:flex sticky top-0 h-screen min-w-0 shrink-0 overflow-x-hidden bg-sidebar border-r border-subtle shadow-sidebar flex-col transition-[width] duration-200 ${
-          effectiveCollapsed ? 'w-[76px] max-w-[76px]' : 'w-[260px]'
+        className={`hidden lg:flex sticky top-0 h-screen min-w-0 shrink-0 overflow-x-hidden bg-sidebar border-r border-subtle shadow-sidebar flex-col transition-[width,max-width] duration-200 ${
+          effectiveCollapsed ? 'w-[76px] max-w-[76px]' : 'w-[260px] max-w-[260px]'
         }`}
       >
         <SidebarContent

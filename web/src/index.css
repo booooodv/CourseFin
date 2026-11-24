@@ -12,7 +12,7 @@
 
   --ink-primary: #181B26;
   --ink-secondary: #4B5568;
-  --ink-muted: #7C859B;
+  --ink-muted: #5B6478;
   --ink-inverse: #FFFFFF;
   --ink-tooltip: #F8FAFC;
 
@@ -26,7 +26,7 @@
   --accent-ring: rgba(30, 136, 229, 0.28);
   --accent-ink: #1565C0;
 
-  --status-success: #10B981;
+  --status-success: #047857;
   --status-success-soft: rgba(16, 185, 129, 0.12);
   --status-success-ink: #047857;
 
@@ -69,12 +69,12 @@
   --border-strong: rgba(255, 255, 255, 0.22);
 
   --accent: #3B82F6;
-  --accent-hover: #60A5FA;
+  --accent-hover: #2563EB;
   --accent-soft: rgba(59, 130, 246, 0.16);
   --accent-ring: rgba(59, 130, 246, 0.36);
   --accent-ink: #60A5FA;
 
-  --status-success: #10B981;
+  --status-success: #047857;
   --status-success-soft: rgba(16, 185, 129, 0.16);
   --status-success-ink: #34D399;
 
@@ -136,23 +136,28 @@
 }
 
 @utility shadow-card {
-  box-shadow: var(--shadow-card);
+  --tw-shadow: var(--shadow-card);
+  box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
 @utility shadow-card-hover {
-  box-shadow: var(--shadow-card-hover);
+  --tw-shadow: var(--shadow-card-hover);
+  box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
 @utility shadow-sidebar {
-  box-shadow: var(--shadow-sidebar);
+  --tw-shadow: var(--shadow-sidebar);
+  box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
 @utility shadow-float {
-  box-shadow: var(--shadow-float);
+  --tw-shadow: var(--shadow-float);
+  box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
 @utility shadow-accent {
-  box-shadow: var(--shadow-accent);
+  --tw-shadow: var(--shadow-accent);
+  box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
 @layer base {

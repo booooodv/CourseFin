@@ -448,7 +448,7 @@ export default function CourseDetailPage() {
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div className="min-w-0 space-y-0.5">
                   <p className="text-xs font-semibold text-accent-ink">{activeEntry.chapterTitle}</p>
-                  <h2 className="text-base sm:text-lg font-bold text-ink-primary truncate">
+                  <h2 className="text-base sm:text-lg font-bold text-ink-primary line-clamp-2 break-words">
                     {activeEntry.lesson.title}
                   </h2>
                 </div>
@@ -570,7 +570,7 @@ export default function CourseDetailPage() {
                     </span>
                     <span className="font-semibold tabular-nums text-ink-primary">{coursePct}%</span>
                   </div>
-                  <div className="h-2 w-full overflow-hidden rounded-full bg-subtle">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
                     <div
                       className={`h-full rounded-full transition-all ${
                         course.played ? 'bg-status-success' : 'bg-accent'
