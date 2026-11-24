@@ -4,8 +4,30 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CourseFin - 私有课程库与学习中心</title>
+    <script>
+      (function () {
+        var mode = 'system';
+        try {
+          var saved = localStorage.getItem('coursefin_theme');
+          if (saved === 'light' || saved === 'dark' || saved === 'system') {
+            mode = saved;
+          }
+        } catch (e) {}
+        var resolved =
+          mode === 'dark' ||
+          (mode === 'system' &&
+            typeof window.matchMedia === 'function' &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches)
+            ? 'dark'
+            : 'light';
+        var root = document.documentElement;
+        root.dataset.theme = resolved;
+        root.classList.toggle('dark', resolved === 'dark');
+        root.style.colorScheme = resolved;
+      })();
+    </script>
   </head>
-  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500/30 selection:text-indigo-200">
+  <body class="bg-canvas text-ink-primary antialiased selection:bg-accent-soft selection:text-accent-ink">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
