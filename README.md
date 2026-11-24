@@ -61,6 +61,7 @@ Jellyfin / Emby 的索引与刮削体系围绕电影和电视剧设计，管理�
 - **高兼容度 Jellyfin 协议**：支持根路径 `/` 及 `/emby` 大小写无关兼容、全部主流 Jellyfin 鉴权方式、`DeviceProfile` 播放协商、`/socket` WebSocket KeepAlive、`Views` / `Items` / `Seasons` / `Episodes` / `Genres` / `Tags` / `Resume` / `NextUp` / `Latest` / `Search` 及多端进度双向同步（≥90% 自动完播）。
 - **内置中文 Web 管理与播放端**：开箱即用初始化向导、课程库首页与继续学习栏、HTML5 / `hls.js` 播放器（0.75x–2.0x 倍速、字幕切换、键盘快捷键、断点续播与切课自动落盘）、拖拽式课程编辑器、存储导入页与设置页。
 - **自定义 AI 课程元数据整理**：支持任意 OpenAI 兼容接口（OpenAI / DeepSeek / 通义千问 / OpenRouter / Ollama / NewAPI 等），基于目录、文件名与可选字幕片段生成课程标题、简介、标签与章节划分建议，严格校验所有 `lesson_id` 一一对应并**先预览勾选确认再事务性应用**。
+- **内置自动检测与一键自更新**：定期（默认每 6 小时）及手动检测 GitHub Releases 新版本，在顶栏提示版本徽标并在「设置 → 系统更新」展示更新日志；支持在 **Docker 容器**（无需挂载 `docker.sock`，更新二进制持久化于 `/data/updates/bin` 并在拉取新版镜像时自动让位于镜像内置版本）和 **Linux / macOS 本地二进制**环境下执行 `SHA-256` 校验、`--version` 预检、原子替换备份与平滑热重启（失败自动回滚），支持配置 GitHub 加速代理前缀；Windows 端提供新版本检测与手动下载引导。
 
 ---
 
@@ -107,6 +108,9 @@ COURSEFIN_PORT=8096 COURSEFIN_DATA_DIR=./data ./coursefin
 | `COURSEFIN_ADMIN_PASS` | *(空)* | 可选：与 `COURSEFIN_ADMIN_USER` 配合使用的初始密码 |
 | `COURSEFIN_LOG_LEVEL` | `info` | 日志级别：`debug` / `info` / `warn` / `error` |
 | `COURSEFIN_BASE_URL` | *(空)* | 可选：反代场景下的对外根域名提示（如 `https://course.example.com`，不支持子路径反代） |
+| `COURSEFIN_UPDATE_REPO` | `booooodv/CourseFin` | 可选：自定义内置自动更新检查的 GitHub 仓库（`owner/repo`） |
+| `COURSEFIN_UPDATE_AUTO_CHECK` | *(空)* | 可选：强制覆盖网页端「自动检查更新」开关（`true` / `false`；留空则由设置页控制，默认开启） |
+| `COURSEFIN_GITHUB_TOKEN` | *(空)* | 可选：直连 GitHub Releases API 时使用的只读 Token（用于提升限流额度，绝不发送给镜像代理或前端） |
 
 ---
 
@@ -139,6 +143,7 @@ make docker-build
 - [CHANGELOG.md](CHANGELOG.md)
 - [docs/superpowers/specs/2026-11-23-coursefin-design.md](docs/superpowers/specs/2026-11-23-coursefin-design.md)
 - [docs/superpowers/plans/2026-11-23-coursefin.md](docs/superpowers/plans/2026-11-23-coursefin.md)
+- [docs/superpowers/specs/2026-11-24-self-update-design.md](docs/superpowers/specs/2026-11-24-self-update-design.md)
 
 ---
 

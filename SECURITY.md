@@ -34,3 +34,9 @@ CourseFin 定位为面向个人与内网/NAS 的自托管课程管理平台。�
    - 如果不希望将课程字幕片段发送给外部 AI 服务商，请在「设置 → AI 提供商」中将「最大字幕字符数」设为 `0`。
 5. **图片接口匿名访问说明**
    - 为了兼容官方 Jellyfin 客户端与第三方播放器对 `<img>` 封面的加载行为，`GET /Items/{itemId}/Images/*` 允许免 Token 访问，依靠 32 位随机 UUID 隔离；请勿在课程封面上存放敏感隐私图片。
+6. **内置自更新（Self-Update）安全边界**
+   - **仅限管理员认证调用**：`/api/v1/system/update`、`PUT /api/v1/system/update/config`、`POST /api/v1/system/update/check` 与 `POST /api/v1/system/update/apply` 均位于鉴权路由组内（CourseFin v1.0 为单管理员模式），未登录请求一律拒绝。
+   - **强制 `SHA-256` 校验与归档安全**：应用内更新必须同时存在匹配的平台归档与 `checksums.txt`，下载后执行恒定时间 `SHA-256` 摘要比对，并严格校验大小上限与 tar 路径（拒绝符号链接、硬链接与 `..` 路径穿越）；校验失败或缺少哈希项会在触及运行中二进制前立即中止。
+   - **`--version` 预检与回滚保护**：新二进制先解压至目标执行目录本身并赋予 `0755` 权限，在替换前以超时限制执行 `--version` 自检（同时验证架构兼容性与目标挂载目录是否允许执行，避免 `noexec` 导致启动失败）；替换前保留 `.bak` 备份，Docker 模式通过 `/data/updates/bin/.pending_update` 在启动崩溃时自动回滚。
+   - **零 `docker.sock` 依赖**：容器内自更新通过轻量入口脚本（`scripts/docker-entrypoint.sh`）将更新二进制持久化至 `${COURSEFIN_DATA_DIR}/updates/bin`，无需挂载 `/var/run/docker.sock` 或引入特权守护容器，避免容器逃逸风险。
+   - **自定义镜像代理与 Token 信任提示**：在「设置 → 系统更新」中配置「GitHub 加速代理前缀（`mirror_url`）」时，**请仅填写可信的代理服务地址**（仅允许 `http://` / `https://` 主机地址）；所有更新包在经过代理下载后仍会强制与 `checksums.txt` 做 `SHA-256` 校验，但恶意或不可信代理仍可观测请求元数据或干扰可用性。`COURSEFIN_GITHUB_TOKEN` 仅保存在服务端环境变量中，绝不返回给前端，且绝不会发送至第三方镜像代理或跨域名/降级重定向目标。
