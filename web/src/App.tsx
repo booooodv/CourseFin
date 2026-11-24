@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { getToken } from './api/client';
 import Layout from './components/Layout';
+import { ToastProvider } from './components/Toast';
 import CourseDetailPage from './pages/CourseDetailPage';
 import CourseEditorPage from './pages/CourseEditorPage';
 import HomePage from './pages/HomePage';
@@ -78,8 +79,10 @@ export function AppRoutes() {
 
 export default function App() {
   return (
-    <BrowserRouter basename="/web">
-      <AppRoutes />
-    </BrowserRouter>
+    <ToastProvider>
+      <BrowserRouter basename="/web">
+        <AppRoutes />
+      </BrowserRouter>
+    </ToastProvider>
   );
 }

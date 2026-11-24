@@ -61,6 +61,28 @@ export interface Library {
   updated_at: string;
 }
 
+export interface DeleteLibraryOptions {
+  moveToLibraryId?: string;
+  force?: boolean;
+}
+
+export interface FsDirEntry {
+  name: string;
+  path: string;
+}
+
+export interface FsRootShortcut {
+  label: string;
+  path: string;
+}
+
+export interface FsBrowseResponse {
+  current_path: string;
+  parent_path: string;
+  entries: FsDirEntry[];
+  roots: FsRootShortcut[];
+}
+
 export interface Tag {
   id: string;
   name: string;

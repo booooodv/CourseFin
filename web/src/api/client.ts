@@ -8,6 +8,8 @@ import type {
   CourseOrganizeProposal,
   CourseSummary,
   CreateCourseInput,
+  DeleteLibraryOptions,
+  FsBrowseResponse,
   HomeResponse,
   ImportPreview,
   IndexedDir,
@@ -237,8 +239,12 @@ export const api = {
       body: JSON.stringify({ name }),
     });
   },
-  deleteLibrary(id: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/api/v1/libraries/${encodeURIComponent(id)}`, {
+  deleteLibrary(id: string, options?: DeleteLibraryOptions): Promise<{ ok: boolean }> {
+    const qs = toQueryString({
+      move_to_library_id: options?.moveToLibraryId,
+      force: options?.force ? 'true' : undefined,
+    });
+    return request<{ ok: boolean }>(`/api/v1/libraries/${encodeURIComponent(id)}${qs}`, {
       method: 'DELETE',
     });
   },
@@ -392,6 +398,13 @@ export const api = {
   },
 
   // Storage & Import
+  browseFsDirs(path?: string, showHidden = false): Promise<FsBrowseResponse> {
+    const qs = toQueryString({
+      path: path?.trim() || undefined,
+      show_hidden: showHidden ? 'true' : undefined,
+    });
+    return request<FsBrowseResponse>(`/api/v1/fs/dirs${qs}`);
+  },
   listSources(): Promise<{ sources: StorageSource[] }> {
     return request<{ sources: StorageSource[] }>('/api/v1/sources');
   },
