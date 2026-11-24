@@ -1,10 +1,19 @@
 import type { FocusEvent, MouseEvent, ReactElement } from 'react';
-import { cloneElement, useCallback, useEffect, useId, useRef, useState } from 'react';
+import {
+  cloneElement,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 
 type TooltipPlacement = 'top' | 'bottom';
 
 interface TriggerProps {
+  disabled?: boolean;
   onMouseEnter?: (e: MouseEvent<HTMLElement>) => void;
   onMouseLeave?: (e: MouseEvent<HTMLElement>) => void;
   onFocus?: (e: FocusEvent<HTMLElement>) => void;
@@ -32,7 +41,10 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
   });
 
   const triggerElRef = useRef<HTMLElement | null>(null);
+  const tooltipElRef = useRef<HTMLDivElement | null>(null);
   const openTimerRef = useRef<number | null>(null);
+
+  const isDisabled = Boolean(children.props.disabled);
 
   const clearOpenTimer = useCallback(() => {
     if (openTimerRef.current !== null) {
@@ -45,22 +57,31 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
     (el: HTMLElement | null) => {
       if (!el || typeof window === 'undefined') return;
       const rect = el.getBoundingClientRect();
-      let resolved: TooltipPlacement = placement;
+      const tipRect = tooltipElRef.current?.getBoundingClientRect();
+      const tipHeight = tipRect ? tipRect.height : 32;
+      const halfWidth = tipRect ? tipRect.width / 2 : 0;
 
-      if (placement === 'top' && rect.top < 44) {
+      let resolved: TooltipPlacement = placement;
+      if (placement === 'top' && rect.top < tipHeight + GAP_PX + EDGE_PADDING_PX) {
         resolved = 'bottom';
-      } else if (placement === 'bottom' && window.innerHeight - rect.bottom < 44) {
+      } else if (
+        placement === 'bottom' &&
+        window.innerHeight - rect.bottom < tipHeight + GAP_PX + EDGE_PADDING_PX
+      ) {
         resolved = 'top';
       }
 
       const centerX = rect.left + rect.width / 2;
-      const clampedLeft = Math.max(
-        EDGE_PADDING_PX,
-        Math.min(window.innerWidth - EDGE_PADDING_PX, centerX),
-      );
+      const minLeft = EDGE_PADDING_PX + halfWidth;
+      const maxLeft = Math.max(minLeft, window.innerWidth - EDGE_PADDING_PX - halfWidth);
+      const clampedLeft = Math.max(minLeft, Math.min(maxLeft, centerX));
       const top = resolved === 'top' ? rect.top - GAP_PX : rect.bottom + GAP_PX;
 
-      setCoords({ top, left: clampedLeft, resolved });
+      setCoords((prev) =>
+        prev.top === top && prev.left === clampedLeft && prev.resolved === resolved
+          ? prev
+          : { top, left: clampedLeft, resolved },
+      );
     },
     [placement],
   );
@@ -70,6 +91,22 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
       clearOpenTimer();
     };
   }, [clearOpenTimer]);
+
+  // Immediately close tooltip if the trigger becomes disabled while hovered/focused
+  useEffect(() => {
+    if (isDisabled) {
+      clearOpenTimer();
+      setOpen(false);
+    }
+  }, [isDisabled, clearOpenTimer]);
+
+  const trimmed = content?.trim();
+
+  // Re-measure with actual portaled tooltip dimensions to prevent horizontal edge clipping
+  useLayoutEffect(() => {
+    if (!open || !trimmed) return;
+    updatePosition(triggerElRef.current);
+  }, [open, trimmed, updatePosition]);
 
   useEffect(() => {
     if (!open) return;
@@ -98,7 +135,6 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
     };
   }, [open, updatePosition]);
 
-  const trimmed = content?.trim();
   if (!trimmed) {
     return children;
   }
@@ -107,6 +143,7 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
 
   const handleMouseEnter = (e: MouseEvent<HTMLElement>) => {
     childProps.onMouseEnter?.(e);
+    if (isDisabled) return;
     const el = e.currentTarget;
     triggerElRef.current = el;
     clearOpenTimer();
@@ -124,6 +161,7 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
 
   const handleFocus = (e: FocusEvent<HTMLElement>) => {
     childProps.onFocus?.(e);
+    if (isDisabled) return;
     const el = e.currentTarget;
     triggerElRef.current = el;
     clearOpenTimer();
@@ -159,10 +197,11 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
         typeof document !== 'undefined' &&
         createPortal(
           <div
+            ref={tooltipElRef}
             id={tooltipId}
             role="tooltip"
             style={{ top: `${coords.top}px`, left: `${coords.left}px` }}
-            className={`pointer-events-none fixed z-[70] max-w-xs whitespace-nowrap rounded-lg border border-slate-700/90 bg-slate-800/95 px-2.5 py-1 text-[11px] font-medium text-slate-100 shadow-lg backdrop-blur-sm ${translateClass}`}
+            className={`pointer-events-none fixed z-[70] w-max max-w-xs whitespace-normal break-words text-center rounded-lg border border-slate-700/90 bg-slate-800/95 px-2.5 py-1 text-[11px] font-medium leading-snug text-slate-100 shadow-lg backdrop-blur-sm ${translateClass}`}
           >
             {trimmed}
           </div>,

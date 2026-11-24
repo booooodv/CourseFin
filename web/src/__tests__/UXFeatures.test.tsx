@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast';
+import DirectoryPickerModal from '../components/DirectoryPickerModal';
 import HomePage from '../pages/HomePage';
 import SettingsPage from '../pages/SettingsPage';
 import StoragePage from '../pages/StoragePage';
@@ -249,6 +250,44 @@ describe('DirectoryPickerModal & StoragePage', () => {
 
     await user.click(screen.getByRole('button', { name: '删除存储源 硬盘A' }));
     expect(await screen.findByText(/已删除存储源/)).toBeInTheDocument();
+  });
+
+  it('clears stale DirectoryPickerModal data on re-open when next fetch fails', async () => {
+    let shouldFail = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        if (shouldFail) {
+          return jsonResponse({ error: '服务器暂时不可用' }, 500);
+        }
+        return jsonResponse({
+          current_path: '/media/courses',
+          parent_path: '/media',
+          entries: [{ name: 'StaleFolder', path: '/media/courses/StaleFolder' }],
+          roots: [{ label: '媒体目录 (/media)', path: '/media' }],
+        });
+      }),
+    );
+
+    const onClose = vi.fn();
+    const onSelect = vi.fn();
+    const { rerender } = render(
+      <DirectoryPickerModal isOpen={true} onClose={onClose} onSelect={onSelect} />,
+    );
+
+    const dialog = await screen.findByRole('dialog', { name: /选择本地目录/ });
+    expect(await within(dialog).findByText('StaleFolder')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '选择此目录' })).toBeEnabled();
+
+    // Close modal, then re-open with failing request
+    rerender(<DirectoryPickerModal isOpen={false} onClose={onClose} onSelect={onSelect} />);
+    shouldFail = true;
+    rerender(<DirectoryPickerModal isOpen={true} onClose={onClose} onSelect={onSelect} />);
+
+    const dialog2 = await screen.findByRole('dialog', { name: /选择本地目录/ });
+    expect(await within(dialog2).findByText('服务器暂时不可用')).toBeInTheDocument();
+    expect(within(dialog2).queryByText('StaleFolder')).not.toBeInTheDocument();
+    expect(within(dialog2).getByRole('button', { name: '选择此目录' })).toBeDisabled();
   });
 });
 

@@ -111,6 +111,8 @@ export default function DirectoryPickerModal({
 
   useEffect(() => {
     if (!isOpen) return;
+    setData(null);
+    setError(null);
     setShowHidden(false);
     setFallbackNotice(null);
     setFilterText('');

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -149,6 +150,94 @@ describe('Tooltip', () => {
 
     await user.tab();
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+  });
+
+  it('closes immediately when trigger transitions to disabled while hovered', async () => {
+    function DisablingButton() {
+      const [disabled, setDisabled] = useState(false);
+      return (
+        <Tooltip content="扫描本地目录">
+          <button type="button" disabled={disabled} onClick={() => setDisabled(true)}>
+            扫描
+          </button>
+        </Tooltip>
+      );
+    }
+
+    render(<DisablingButton />);
+    const user = userEvent.setup();
+    const btn = screen.getByRole('button', { name: '扫描' });
+
+    await user.hover(btn);
+    await waitFor(() => {
+      expect(screen.getByRole('tooltip')).toHaveTextContent('扫描本地目录');
+    });
+
+    await user.click(btn);
+    expect(btn).toBeDisabled();
+    await waitFor(() => {
+      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    });
+  });
+
+  it('clamps tooltip horizontally within viewport edges and wraps long text without overflow', async () => {
+    const origInnerWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true });
+
+    const origGetRect = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.getAttribute('role') === 'tooltip') {
+        return {
+          top: 50,
+          bottom: 80,
+          left: 0,
+          right: 200,
+          width: 200,
+          height: 30,
+          x: 0,
+          y: 50,
+          toJSON: () => {},
+        } as DOMRect;
+      }
+      if (this.tagName === 'BUTTON') {
+        return {
+          top: 100,
+          bottom: 132,
+          left: 970,
+          right: 1018,
+          width: 48,
+          height: 32,
+          x: 970,
+          y: 100,
+          toJSON: () => {},
+        } as DOMRect;
+      }
+      return origGetRect.call(this);
+    });
+
+    try {
+      render(
+        <Tooltip content="用 AI 自动生成课程简介、标签与清晰章节结构（预览后应用）">
+          <button type="button">AI 智能整理</button>
+        </Tooltip>,
+      );
+
+      const user = userEvent.setup();
+      await user.hover(screen.getByRole('button', { name: 'AI 智能整理' }));
+
+      const tooltip = await screen.findByRole('tooltip');
+      expect(tooltip.className).not.toContain('whitespace-nowrap');
+      expect(tooltip.className).toContain('whitespace-normal');
+
+      // With innerWidth=1024, edgePadding=10, tooltipWidth=200 -> max center left = 1024 - 10 - 100 = 914
+      const leftPx = Number.parseFloat(tooltip.style.left);
+      expect(leftPx).toBeLessThanOrEqual(914);
+      expect(leftPx).toBeGreaterThanOrEqual(110);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { value: origInnerWidth, configurable: true });
+    }
   });
 });
 
