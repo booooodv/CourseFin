@@ -9,6 +9,7 @@ import {
   Tv,
 } from 'lucide-react';
 import { api, withApiKey } from '../api/client';
+import Tooltip from './Tooltip';
 import type {
   LessonPlaybackInfo,
   PlaybackSubtitleItem,
@@ -464,55 +465,61 @@ export default function VideoPlayer({
       {/* Player Control Strip */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/90 bg-slate-900/90 px-4 py-2.5 text-xs text-slate-300">
         <div className="flex flex-wrap items-center gap-4">
-          <label className="inline-flex items-center gap-2">
-            <Gauge className="h-4 w-4 text-indigo-400" />
-            <span className="text-slate-400">倍速</span>
-            <select
-              aria-label="播放倍速"
-              value={String(playbackRate)}
-              onChange={(e) => handleRateChange(Number(e.target.value))}
-              className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs font-medium text-slate-100 focus:border-indigo-500 focus:outline-none"
-            >
-              {PLAYBACK_RATES.map((rate) => (
-                <option key={rate} value={String(rate)}>
-                  {rate === 1 || rate === 2 ? rate.toFixed(1) : String(rate)}x
-                </option>
-              ))}
-            </select>
-          </label>
+          <Tooltip content="切换视频播放倍速（自动记忆偏好）">
+            <label className="inline-flex items-center gap-2">
+              <Gauge className="h-4 w-4 text-indigo-400" />
+              <span className="text-slate-400">倍速</span>
+              <select
+                aria-label="播放倍速"
+                value={String(playbackRate)}
+                onChange={(e) => handleRateChange(Number(e.target.value))}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs font-medium text-slate-100 focus:border-indigo-500 focus:outline-none"
+              >
+                {PLAYBACK_RATES.map((rate) => (
+                  <option key={rate} value={String(rate)}>
+                    {rate === 1 || rate === 2 ? rate.toFixed(1) : String(rate)}x
+                  </option>
+                ))}
+              </select>
+            </label>
+          </Tooltip>
 
-          <label className="inline-flex items-center gap-2">
-            <Captions className="h-4 w-4 text-sky-400" />
-            <span className="text-slate-400">字幕</span>
-            <select
-              aria-label="字幕选择"
-              value={selectedSubtitleIndex === null ? 'off' : String(selectedSubtitleIndex)}
-              onChange={(e) => handleSubtitleChange(e.target.value)}
-              className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs font-medium text-slate-100 focus:border-indigo-500 focus:outline-none max-w-[180px]"
-            >
-              <option value="off">关闭</option>
-              {textSubtitles.map((sub) => (
-                <option key={sub.index} value={String(sub.index)}>
-                  {formatSubtitleLabel(sub)}
-                </option>
-              ))}
-            </select>
-          </label>
+          <Tooltip content="切换外挂或内嵌字幕轨道">
+            <label className="inline-flex items-center gap-2">
+              <Captions className="h-4 w-4 text-sky-400" />
+              <span className="text-slate-400">字幕</span>
+              <select
+                aria-label="字幕选择"
+                value={selectedSubtitleIndex === null ? 'off' : String(selectedSubtitleIndex)}
+                onChange={(e) => handleSubtitleChange(e.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs font-medium text-slate-100 focus:border-indigo-500 focus:outline-none max-w-[180px]"
+              >
+                <option value="off">关闭</option>
+                {textSubtitles.map((sub) => (
+                  <option key={sub.index} value={String(sub.index)}>
+                    {formatSubtitleLabel(sub)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </Tooltip>
         </div>
 
         <div className="flex items-center gap-3">
           <span className="hidden sm:inline text-[11px] text-slate-500">
             快捷键：空格 播放/暂停 · ←/→ 快退/快进 10 秒 · F 全屏
           </span>
-          <button
-            type="button"
-            onClick={handleToggleFullscreen}
-            aria-label="切换全屏"
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
-          >
-            <Maximize2 className="h-3.5 w-3.5" />
-            <span>全屏</span>
-          </button>
+          <Tooltip content="切换全屏播放（快捷键 F）">
+            <button
+              type="button"
+              onClick={handleToggleFullscreen}
+              aria-label="切换全屏"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+              <span>全屏</span>
+            </button>
+          </Tooltip>
         </div>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Check,
   Copy,
@@ -14,11 +14,15 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../api/client';
+import { useToast } from '../components/Toast';
+import Tooltip from '../components/Tooltip';
+import { copyTextToClipboard } from '../utils/clipboard';
 import type { Session, SettingsPayload, UpdateSettingsInput } from '../types/coursefin';
 
 const MASKED_KEY_PLACEHOLDER = '****';
 
 export default function SettingsPage() {
+  const { toast } = useToast();
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentToken, setCurrentToken] = useState<string>('');
@@ -39,8 +43,18 @@ export default function SettingsPage() {
   const [testingAI, setTestingAI] = useState(false);
   const [aiTestMessage, setAiTestMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
-  // Copy URL state
+  // Copy button feedback states
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedUser, setCopiedUser] = useState(false);
+  const copyUrlTimerRef = useRef<number | null>(null);
+  const copyUserTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyUrlTimerRef.current !== null) window.clearTimeout(copyUrlTimerRef.current);
+      if (copyUserTimerRef.current !== null) window.clearTimeout(copyUserTimerRef.current);
+    };
+  }, []);
 
   // Password form
   const [oldPassword, setOldPassword] = useState('');
@@ -90,14 +104,29 @@ export default function SettingsPage() {
   const jellyfinUrl =
     settings?.base_url_hint?.trim() ||
     (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8096');
+  const jellyfinUsername = settings?.jellyfin_username || 'admin';
 
   async function handleCopyServerUrl() {
-    try {
-      await navigator.clipboard.writeText(jellyfinUrl);
+    const ok = await copyTextToClipboard(jellyfinUrl);
+    if (ok) {
       setCopiedUrl(true);
-      window.setTimeout(() => setCopiedUrl(false), 2000);
-    } catch {
-      // Clipboard may be unavailable in restricted contexts
+      if (copyUrlTimerRef.current !== null) window.clearTimeout(copyUrlTimerRef.current);
+      copyUrlTimerRef.current = window.setTimeout(() => setCopiedUrl(false), 2000);
+      toast.success('已复制服务器地址到剪贴板');
+    } else {
+      toast.error('复制失败，请手动选中复制');
+    }
+  }
+
+  async function handleCopyUsername() {
+    const ok = await copyTextToClipboard(jellyfinUsername);
+    if (ok) {
+      setCopiedUser(true);
+      if (copyUserTimerRef.current !== null) window.clearTimeout(copyUserTimerRef.current);
+      copyUserTimerRef.current = window.setTimeout(() => setCopiedUser(false), 2000);
+      toast.success('已复制用户名到剪贴板');
+    } else {
+      toast.error('复制失败，请手动选中复制');
     }
   }
 
@@ -134,8 +163,11 @@ export default function SettingsPage() {
       const updated = await api.updateSettings(payload);
       applySettingsPayload(updated);
       setSettingsSuccess('系统与 AI 设置已保存');
+      toast.success('系统与 AI 设置已保存');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存设置失败');
+      const msg = err instanceof Error ? err.message : '保存设置失败';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setSavingSettings(false);
     }
@@ -165,11 +197,14 @@ export default function SettingsPage() {
     try {
       await api.testAI(overrides);
       setAiTestMessage({ ok: true, text: 'AI 接口连接测试成功！' });
+      toast.success('AI 接口连接测试成功');
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'AI 接口连接测试失败';
       setAiTestMessage({
         ok: false,
-        text: err instanceof Error ? err.message : 'AI 接口连接测试失败',
+        text: msg,
       });
+      toast.error(msg);
     } finally {
       setTestingAI(false);
     }
@@ -196,11 +231,14 @@ export default function SettingsPage() {
       setNewPassword('');
       setConfirmPassword('');
       setPasswordFeedback({ ok: true, text: '管理员密码已更新' });
+      toast.success('管理员密码已更新');
     } catch (err) {
+      const msg = err instanceof Error ? err.message : '修改密码失败';
       setPasswordFeedback({
         ok: false,
-        text: err instanceof Error ? err.message : '修改密码失败',
+        text: msg,
       });
+      toast.error(msg);
     } finally {
       setChangingPassword(false);
     }
@@ -211,8 +249,11 @@ export default function SettingsPage() {
     try {
       await api.revokeSession(token);
       setSessions((prev) => prev.filter((s) => s.token !== token));
+      toast.success('已注销该设备会话');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '注销设备会话失败');
+      const msg = err instanceof Error ? err.message : '注销设备会话失败';
+      setError(msg);
+      toast.error(msg);
     }
   }
 
@@ -262,22 +303,44 @@ export default function SettingsPage() {
             <span className="text-xs text-slate-400">服务器地址（Server URL）</span>
             <div className="flex items-center justify-between gap-2">
               <code className="text-sm font-mono text-indigo-300 break-all">{jellyfinUrl}</code>
-              <button
-                type="button"
-                onClick={() => void handleCopyServerUrl()}
-                className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-700"
-              >
-                {copiedUrl ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                <span>{copiedUrl ? '已复制' : '复制'}</span>
-              </button>
+              <Tooltip content="复制 Jellyfin 服务器地址到剪贴板">
+                <button
+                  type="button"
+                  aria-label="复制服务器地址"
+                  onClick={() => void handleCopyServerUrl()}
+                  className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-700 transition-colors"
+                >
+                  {copiedUrl ? (
+                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
+                  <span>{copiedUrl ? '已复制' : '复制'}</span>
+                </button>
+              </Tooltip>
             </div>
           </div>
 
           <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-1.5">
             <span className="text-xs text-slate-400">登录用户名（Username）</span>
-            <p className="text-sm font-mono font-semibold text-white">
-              {settings?.jellyfin_username || 'admin'}
-            </p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-mono font-semibold text-white">{jellyfinUsername}</p>
+              <Tooltip content="复制 Jellyfin 登录用户名">
+                <button
+                  type="button"
+                  aria-label="复制用户名"
+                  onClick={() => void handleCopyUsername()}
+                  className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-700 transition-colors"
+                >
+                  {copiedUser ? (
+                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
+                  <span>{copiedUser ? '已复制' : '复制'}</span>
+                </button>
+              </Tooltip>
+            </div>
           </div>
         </div>
 
@@ -443,24 +506,28 @@ export default function SettingsPage() {
         )}
 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-          <button
-            type="button"
-            disabled={testingAI}
-            onClick={() => void handleTestAI()}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
-          >
-            {testingAI ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-            <span>{testingAI ? '测试中...' : '测试连接'}</span>
-          </button>
+          <Tooltip content="验证当前填写的 AI 接口地址、模型与密钥是否可用">
+            <button
+              type="button"
+              disabled={testingAI}
+              onClick={() => void handleTestAI()}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            >
+              {testingAI ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              <span>{testingAI ? '测试中...' : '测试连接'}</span>
+            </button>
+          </Tooltip>
 
-          <button
-            type="submit"
-            disabled={savingSettings}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
-          >
-            {savingSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            <span>{savingSettings ? '保存中...' : '保存设置'}</span>
-          </button>
+          <Tooltip content="保存服务器名称、定时扫描与 AI 接口配置">
+            <button
+              type="submit"
+              disabled={savingSettings}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+            >
+              {savingSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              <span>{savingSettings ? '保存中...' : '保存设置'}</span>
+            </button>
+          </Tooltip>
         </div>
       </form>
 
@@ -524,13 +591,15 @@ export default function SettingsPage() {
         )}
 
         <div className="flex justify-end">
-          <button
-            type="submit"
-            disabled={changingPassword}
-            className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
-          >
-            {changingPassword ? '更新中...' : '更新密码'}
-          </button>
+          <Tooltip content="更新管理员密码（同时影响 Jellyfin 客户端新登录）">
+            <button
+              type="submit"
+              disabled={changingPassword}
+              className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            >
+              {changingPassword ? '更新中...' : '更新密码'}
+            </button>
+          </Tooltip>
         </div>
       </form>
 
@@ -574,14 +643,16 @@ export default function SettingsPage() {
                       <td className="py-3 pr-4 font-mono text-slate-400">{sess.device_id}</td>
                       <td className="py-3 pr-4 text-slate-400">{sess.last_active_at}</td>
                       <td className="py-3 text-right">
-                        <button
-                          type="button"
-                          onClick={() => void handleRevokeSession(sess.token)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[11px] font-medium text-rose-300 hover:bg-rose-500/20 transition-colors"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                          <span>注销</span>
-                        </button>
+                        <Tooltip content="强制下线该设备会话，需重新登录">
+                          <button
+                            type="button"
+                            onClick={() => void handleRevokeSession(sess.token)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[11px] font-medium text-rose-300 hover:bg-rose-500/20 transition-colors"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                            <span>注销</span>
+                          </button>
+                        </Tooltip>
                       </td>
                     </tr>
                   );

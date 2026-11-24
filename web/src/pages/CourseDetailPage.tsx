@@ -17,6 +17,8 @@ import {
   SkipForward,
 } from 'lucide-react';
 import { api, itemPrimaryImageUrl } from '../api/client';
+import { useToast } from '../components/Toast';
+import Tooltip from '../components/Tooltip';
 import VideoPlayer from '../components/VideoPlayer';
 import type {
   CourseDetail,
@@ -119,6 +121,7 @@ function applyLessonProgressToCourse(
 
 export default function CourseDetailPage() {
   const { courseId } = useParams<{ courseId: string }>();
+  const { toast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedLessonId = searchParams.get('lesson');
 
@@ -278,8 +281,11 @@ export default function CourseDetailPage() {
     try {
       const updated = await api.setLessonPlayed(targetLesson.id, nextPlayed);
       handleProgressSaved(updated);
+      toast.success(nextPlayed ? '已标记本节为已看' : '已标记本节为未看');
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : '更新观看状态失败');
+      const msg = err instanceof Error ? err.message : '更新观看状态失败';
+      setActionError(msg);
+      toast.error(msg);
     } finally {
       setTogglingPlayed(false);
     }
@@ -333,40 +339,46 @@ export default function CourseDetailPage() {
     <div className="space-y-6">
       {/* Top breadcrumb & actions */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link
-          to="/"
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-white transition-colors"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          <span>返回课程库</span>
-        </Link>
+        <Tooltip content="返回首页课程列表">
+          <Link
+            to="/"
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-white transition-colors"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            <span>返回课程库</span>
+          </Link>
+        </Tooltip>
 
         <div className="flex items-center gap-2.5">
-          <button
-            type="button"
-            onClick={() => setSidebarOpen((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-700 hover:text-white transition-colors"
-          >
-            {sidebarOpen ? (
-              <>
-                <PanelRightClose className="h-4 w-4" />
-                <span>收起目录</span>
-              </>
-            ) : (
-              <>
-                <PanelRightOpen className="h-4 w-4" />
-                <span>展开目录</span>
-              </>
-            )}
-          </button>
+          <Tooltip content={sidebarOpen ? '收起右侧章节目录以扩大播放画面' : '展开右侧章节目录'}>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((v) => !v)}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-700 hover:text-white transition-colors"
+            >
+              {sidebarOpen ? (
+                <>
+                  <PanelRightClose className="h-4 w-4" />
+                  <span>收起目录</span>
+                </>
+              ) : (
+                <>
+                  <PanelRightOpen className="h-4 w-4" />
+                  <span>展开目录</span>
+                </>
+              )}
+            </button>
+          </Tooltip>
 
-          <Link
-            to={`/courses/${course.id}/edit`}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700/80 bg-slate-800/80 px-3.5 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-            <span>编辑课程</span>
-          </Link>
+          <Tooltip content="编辑课程信息、章节排序、封面或运行 AI 整理">
+            <Link
+              to={`/courses/${course.id}/edit`}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700/80 bg-slate-800/80 px-3.5 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              <span>编辑课程</span>
+            </Link>
+          </Tooltip>
         </div>
       </div>
 
@@ -512,39 +524,45 @@ export default function CourseDetailPage() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    disabled={!prevLesson}
-                    onClick={() => prevLesson && selectLesson(prevLesson.id)}
-                    className="inline-flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors"
-                  >
-                    <SkipBack className="h-3.5 w-3.5" />
-                    <span>上一节</span>
-                  </button>
+                  <Tooltip content={prevLesson ? `切换到上一节：${prevLesson.title}` : '已是第一节'}>
+                    <button
+                      type="button"
+                      disabled={!prevLesson}
+                      onClick={() => prevLesson && selectLesson(prevLesson.id)}
+                      className="inline-flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                    >
+                      <SkipBack className="h-3.5 w-3.5" />
+                      <span>上一节</span>
+                    </button>
+                  </Tooltip>
 
-                  <button
-                    type="button"
-                    disabled={!nextLesson}
-                    onClick={() => nextLesson && selectLesson(nextLesson.id)}
-                    className="inline-flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors"
-                  >
-                    <span>下一节</span>
-                    <SkipForward className="h-3.5 w-3.5" />
-                  </button>
+                  <Tooltip content={nextLesson ? `切换到下一节：${nextLesson.title}` : '已是最后一节'}>
+                    <button
+                      type="button"
+                      disabled={!nextLesson}
+                      onClick={() => nextLesson && selectLesson(nextLesson.id)}
+                      className="inline-flex items-center gap-1 rounded-xl border border-slate-700/80 bg-slate-800/70 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+                    >
+                      <span>下一节</span>
+                      <SkipForward className="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
 
-                  <button
-                    type="button"
-                    onClick={() => void handleTogglePlayed()}
-                    disabled={togglingPlayed}
-                    className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
-                      activeEntry.lesson.played
-                        ? 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
-                        : 'bg-indigo-600 text-white hover:bg-indigo-500'
-                    }`}
-                  >
-                    <CheckCircle2 className="h-3.5 w-3.5" />
-                    <span>{activeEntry.lesson.played ? '标记未看' : '标记已看'}</span>
-                  </button>
+                  <Tooltip content={activeEntry.lesson.played ? '将本节恢复为未学状态' : '手动将本节标记为已学完'}>
+                    <button
+                      type="button"
+                      onClick={() => void handleTogglePlayed()}
+                      disabled={togglingPlayed}
+                      className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                        activeEntry.lesson.played
+                          ? 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                          : 'bg-indigo-600 text-white hover:bg-indigo-500'
+                      }`}
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      <span>{activeEntry.lesson.played ? '标记未看' : '标记已看'}</span>
+                    </button>
+                  </Tooltip>
                 </div>
               </div>
 

@@ -9,6 +9,8 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../api/client';
+import { useToast } from './Toast';
+import Tooltip from './Tooltip';
 import type {
   CommitImportChapter,
   CourseDetail,
@@ -43,6 +45,7 @@ export default function ImportCourseModal({
   onImported,
   onLibraryCreated,
 }: ImportCourseModalProps) {
+  const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -128,8 +131,11 @@ export default function ImportCourseModal({
       setCreatingLibName('');
       setShowNewLib(false);
       onLibraryCreated?.(created);
+      toast.success(`已创建媒体库「${created.name}」`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '创建媒体库失败');
+      const msg = err instanceof Error ? err.message : '创建媒体库失败';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setCreatingLib(false);
     }
@@ -222,14 +228,16 @@ export default function ImportCourseModal({
             </div>
           </div>
 
-          <button
-            type="button"
-            aria-label="关闭"
-            onClick={onClose}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <Tooltip content="关闭导入弹窗">
+            <button
+              type="button"
+              aria-label="关闭"
+              onClick={onClose}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </Tooltip>
         </div>
 
         {/* Body */}
@@ -269,14 +277,16 @@ export default function ImportCourseModal({
                     <label htmlFor="import-library-id" className="block text-xs font-medium text-slate-300">
                       所属媒体库
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowNewLib((v) => !v)}
-                      className="inline-flex items-center gap-1 text-[11px] text-indigo-300 hover:text-indigo-200"
-                    >
-                      <Plus className="h-3 w-3" />
-                      <span>新建媒体库</span>
-                    </button>
+                    <Tooltip content="在此快速新建一个目标媒体库">
+                      <button
+                        type="button"
+                        onClick={() => setShowNewLib((v) => !v)}
+                        className="inline-flex items-center gap-1 text-[11px] text-indigo-300 hover:text-indigo-200"
+                      >
+                        <Plus className="h-3 w-3" />
+                        <span>新建媒体库</span>
+                      </button>
+                    </Tooltip>
                   </div>
                   <select
                     id="import-library-id"
@@ -378,13 +388,15 @@ export default function ImportCourseModal({
                       placeholder="输入标签后按回车或点击添加"
                       className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
                     />
-                    <button
-                      type="button"
-                      onClick={handleAddTag}
-                      className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
-                    >
-                      添加标签
-                    </button>
+                    <Tooltip content="将输入的标签添加到课程中">
+                      <button
+                        type="button"
+                        onClick={handleAddTag}
+                        className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+                      >
+                        添加标签
+                      </button>
+                    </Tooltip>
                   </div>
                 </div>
               </div>
@@ -463,18 +475,20 @@ export default function ImportCourseModal({
           >
             取消
           </button>
-          <button
-            type="submit"
-            disabled={loading || submitting || !preview}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
-          >
-            {submitting ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Check className="h-4 w-4" />
-            )}
-            <span>{submitting ? '正在导入...' : '确认导入'}</span>
-          </button>
+          <Tooltip content="按上方结构创建课程（不会改动磁盘文件）">
+            <button
+              type="submit"
+              disabled={loading || submitting || !preview}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+            >
+              {submitting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Check className="h-4 w-4" />
+              )}
+              <span>{submitting ? '正在导入...' : '确认导入'}</span>
+            </button>
+          </Tooltip>
         </div>
       </form>
     </div>

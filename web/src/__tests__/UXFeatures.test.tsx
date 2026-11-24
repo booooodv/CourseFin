@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast';
 import HomePage from '../pages/HomePage';
+import SettingsPage from '../pages/SettingsPage';
 import StoragePage from '../pages/StoragePage';
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -566,5 +567,107 @@ describe('HomePage library delete & rename', () => {
     });
     expect(await screen.findByRole('button', { name: /新库名/ })).toBeInTheDocument();
     expect(screen.getByText(/已将媒体库重命名为「新库名」/)).toBeInTheDocument();
+  });
+});
+
+describe('SettingsPage copy fallback & tooltips', () => {
+  const originalClipboard = navigator.clipboard;
+  const originalExecCommand = document.execCommand;
+  const originalIsSecureContext = window.isSecureContext;
+
+  beforeEach(() => {
+    localStorage.setItem('coursefin_token', 'test-token');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse({
+            server_name: 'CourseFin',
+            scan_interval_minutes: 60,
+            base_url_hint: 'http://192.168.1.20:8096',
+            jellyfin_username: 'admin',
+            ai_base_url: '',
+            ai_api_key: '',
+            ai_api_key_set: false,
+            ai_model: '',
+            ai_max_subtitle_chars: 4000,
+          });
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse({
+            user: { id: 'u1', username: 'admin', created_at: '', updated_at: '' },
+            session: {
+              token: 'test-token',
+              user_id: 'u1',
+              device_id: 'web',
+              device_name: 'Web',
+              client_name: 'CourseFin Web',
+              client_version: '0.1.0',
+              last_active_at: '',
+              created_at: '',
+            },
+          });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    Object.defineProperty(navigator, 'clipboard', {
+      value: originalClipboard,
+      configurable: true,
+    });
+    Object.defineProperty(window, 'isSecureContext', {
+      value: originalIsSecureContext,
+      configurable: true,
+    });
+    document.execCommand = originalExecCommand;
+    vi.restoreAllMocks();
+  });
+
+  it('copies Server URL over plain HTTP fallback with tooltip and success/error toasts, and copies username', async () => {
+    Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true });
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    document.execCommand = vi.fn().mockReturnValue(true);
+
+    render(
+      <ToastProvider>
+        <MemoryRouter>
+          <SettingsPage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    await screen.findByText('http://192.168.1.20:8096');
+
+    const user = userEvent.setup();
+    const copyUrlBtn = screen.getByRole('button', { name: '复制服务器地址' });
+
+    // Hovering copy button reveals tooltip guidance
+    await user.hover(copyUrlBtn);
+    await waitFor(() => {
+      expect(screen.getByRole('tooltip')).toHaveTextContent(/复制/);
+    });
+
+    // Clicking copy succeeds via execCommand fallback and shows toast
+    await user.click(copyUrlBtn);
+    expect(await screen.findByText('已复制服务器地址到剪贴板')).toBeInTheDocument();
+    expect(copyUrlBtn).toHaveTextContent('已复制');
+
+    // Copy username button works and shows toast
+    const copyUserBtn = screen.getByRole('button', { name: '复制用户名' });
+    await user.click(copyUserBtn);
+    expect(await screen.findByText('已复制用户名到剪贴板')).toBeInTheDocument();
+
+    // When both clipboard & execCommand fail, show explicit error toast
+    document.execCommand = vi.fn().mockReturnValue(false);
+    await user.click(copyUrlBtn);
+    expect(await screen.findByText('复制失败，请手动选中复制')).toBeInTheDocument();
   });
 });

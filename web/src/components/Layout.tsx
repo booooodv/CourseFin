@@ -3,15 +3,16 @@ import { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { BookOpen, FolderInput, GraduationCap, LogOut, Settings } from 'lucide-react';
 import { api, clearToken } from '../api/client';
+import Tooltip from './Tooltip';
 
 interface LayoutProps {
   children: ReactNode;
 }
 
 const navItems = [
-  { to: '/', label: '课程库', icon: BookOpen, end: true },
-  { to: '/storage', label: '存储与导入', icon: FolderInput, end: false },
-  { to: '/settings', label: '设置', icon: Settings, end: false },
+  { to: '/', label: '课程库', tip: '浏览全部课程、继续学习与管理媒体库', icon: BookOpen, end: true },
+  { to: '/storage', label: '存储与导入', tip: '配置本地目录、扫描视频并一键导入课程', icon: FolderInput, end: false },
+  { to: '/settings', label: '设置', tip: '查看 Jellyfin 连接信息、配置 AI 模型与会话', icon: Settings, end: false },
 ];
 
 export default function Layout({ children }: LayoutProps) {
@@ -48,36 +49,39 @@ export default function Layout({ children }: LayoutProps) {
               {navItems.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.end}
-                    className={({ isActive }) =>
-                      `flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors ${
-                        isActive
-                          ? 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30'
-                          : 'text-slate-300 hover:bg-slate-800/70 hover:text-white border border-transparent'
-                      }`
-                    }
-                  >
-                    <Icon className="h-4 w-4" />
-                    <span>{item.label}</span>
-                  </NavLink>
+                  <Tooltip key={item.to} content={item.tip} placement="bottom">
+                    <NavLink
+                      to={item.to}
+                      end={item.end}
+                      className={({ isActive }) =>
+                        `flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors ${
+                          isActive
+                            ? 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30'
+                            : 'text-slate-300 hover:bg-slate-800/70 hover:text-white border border-transparent'
+                        }`
+                      }
+                    >
+                      <Icon className="h-4 w-4" />
+                      <span>{item.label}</span>
+                    </NavLink>
+                  </Tooltip>
                 );
               })}
             </nav>
           </div>
 
           <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={handleLogout}
-              disabled={loggingOut}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-700 hover:bg-slate-800 hover:text-white transition-colors disabled:opacity-50"
-            >
-              <LogOut className="h-4 w-4" />
-              <span>{loggingOut ? '退出中...' : '退出登录'}</span>
-            </button>
+            <Tooltip content="退出当前浏览器登录会话" placement="bottom">
+              <button
+                type="button"
+                onClick={handleLogout}
+                disabled={loggingOut}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-700 hover:bg-slate-800 hover:text-white transition-colors disabled:opacity-50"
+              >
+                <LogOut className="h-4 w-4" />
+                <span>{loggingOut ? '退出中...' : '退出登录'}</span>
+              </button>
+            </Tooltip>
           </div>
         </div>
 

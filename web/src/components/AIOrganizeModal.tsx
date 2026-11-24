@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../api/client';
+import Tooltip from './Tooltip';
 import type { CourseDetail, CourseOrganizeProposal } from '../types/coursefin';
 
 interface AIOrganizeModalProps {
@@ -110,14 +111,16 @@ export default function AIOrganizeModal({
             </div>
           </div>
 
-          <button
-            type="button"
-            aria-label="关闭"
-            onClick={onClose}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <Tooltip content="关闭 AI 整理预览">
+            <button
+              type="button"
+              aria-label="关闭"
+              onClick={onClose}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </Tooltip>
         </div>
 
         {/* Body */}
@@ -314,15 +317,17 @@ export default function AIOrganizeModal({
 
         {/* Footer */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 px-6 py-4 bg-slate-900/95">
-          <button
-            type="button"
-            onClick={() => void fetchProposal()}
-            disabled={loading || submitting}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white disabled:opacity-50 transition-colors"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>重新生成</span>
-          </button>
+          <Tooltip content="重新调用 AI 模型生成新的课程整理方案">
+            <button
+              type="button"
+              onClick={() => void fetchProposal()}
+              disabled={loading || submitting}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 px-3.5 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              <span>重新生成</span>
+            </button>
+          </Tooltip>
 
           <div className="flex items-center gap-2.5">
             <button
@@ -333,19 +338,21 @@ export default function AIOrganizeModal({
             >
               取消
             </button>
-            <button
-              type="button"
-              onClick={() => void handleConfirm()}
-              disabled={loading || submitting || !proposal || nothingSelected}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
-            >
-              {submitting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Check className="h-4 w-4" />
-              )}
-              <span>{submitting ? '正在应用...' : '确认应用'}</span>
-            </button>
+            <Tooltip content="仅将已勾选的建议写入当前课程">
+              <button
+                type="button"
+                onClick={() => void handleConfirm()}
+                disabled={loading || submitting || !proposal || nothingSelected}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              >
+                {submitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+                <span>{submitting ? '正在应用...' : '确认应用'}</span>
+              </button>
+            </Tooltip>
           </div>
         </div>
       </div>

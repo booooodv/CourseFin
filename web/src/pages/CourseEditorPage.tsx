@@ -44,6 +44,8 @@ import {
   itemPrimaryImageUrl,
 } from '../api/client';
 import AIOrganizeModal from '../components/AIOrganizeModal';
+import { useToast } from '../components/Toast';
+import Tooltip from '../components/Tooltip';
 import type {
   ChapterDetail,
   CourseDetail,
@@ -259,15 +261,17 @@ function SortableLessonRow({
       }`}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          aria-label={`拖拽排序课时 ${lesson.title}`}
-          className="cursor-grab text-slate-500 hover:text-slate-300 p-1"
-          {...attributes}
-          {...listeners}
-        >
-          <GripVertical className="h-4 w-4" />
-        </button>
+        <Tooltip content="按住拖拽调整课时顺序或跨章节移动">
+          <button
+            type="button"
+            aria-label={`拖拽排序课时 ${lesson.title}`}
+            className="cursor-grab text-slate-500 hover:text-slate-300 p-1"
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical className="h-4 w-4" />
+          </button>
+        </Tooltip>
 
         <Video className="h-4 w-4 text-indigo-400 shrink-0" />
 
@@ -358,40 +362,48 @@ function SortableLessonRow({
             </select>
           )}
 
-          <button
-            type="button"
-            aria-label={`上移课时 ${lesson.title}`}
-            disabled={lessonIdx === 0}
-            onClick={() => void onMoveStep(chapterId, lessonIdx, -1)}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
-          >
-            <ArrowUp className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            aria-label={`下移课时 ${lesson.title}`}
-            disabled={lessonIdx === totalLessonsInChapter - 1}
-            onClick={() => void onMoveStep(chapterId, lessonIdx, 1)}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
-          >
-            <ArrowDown className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            aria-label={`重命名课时 ${lesson.title}`}
-            onClick={() => setEditing(true)}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            aria-label={`删除课时 ${lesson.title}`}
-            onClick={() => void onDelete(lesson.id)}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
+          <Tooltip content="上移该课时">
+            <button
+              type="button"
+              aria-label={`上移课时 ${lesson.title}`}
+              disabled={lessonIdx === 0}
+              onClick={() => void onMoveStep(chapterId, lessonIdx, -1)}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
+            >
+              <ArrowUp className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+          <Tooltip content="下移该课时">
+            <button
+              type="button"
+              aria-label={`下移课时 ${lesson.title}`}
+              disabled={lessonIdx === totalLessonsInChapter - 1}
+              onClick={() => void onMoveStep(chapterId, lessonIdx, 1)}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
+            >
+              <ArrowDown className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+          <Tooltip content="重命名课时标题">
+            <button
+              type="button"
+              aria-label={`重命名课时 ${lesson.title}`}
+              onClick={() => setEditing(true)}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+          <Tooltip content="从课程中移除此课时（不删本地文件）">
+            <button
+              type="button"
+              aria-label={`删除课时 ${lesson.title}`}
+              onClick={() => void onDelete(lesson.id)}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
         </div>
       </div>
     </div>
@@ -481,15 +493,17 @@ function SortableChapterCard({
     >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          <button
-            type="button"
-            aria-label={`拖拽排序章节 ${chapter.title}`}
-            className="cursor-grab text-slate-500 hover:text-slate-300 p-1"
-            {...attributes}
-            {...listeners}
-          >
-            <GripVertical className="h-4 w-4" />
-          </button>
+          <Tooltip content="按住拖拽调整章节顺序">
+            <button
+              type="button"
+              aria-label={`拖拽排序章节 ${chapter.title}`}
+              className="cursor-grab text-slate-500 hover:text-slate-300 p-1"
+              {...attributes}
+              {...listeners}
+            >
+              <GripVertical className="h-4 w-4" />
+            </button>
+          </Tooltip>
 
           {editing ? (
             <div className="flex flex-1 items-center gap-2">
@@ -539,49 +553,59 @@ function SortableChapterCard({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => onOpenAddVideo(chapter.id)}
-            className="inline-flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>从存储添加视频</span>
-          </button>
+          <Tooltip content="从已索引的存储源中挑选视频添加到本章节">
+            <button
+              type="button"
+              onClick={() => onOpenAddVideo(chapter.id)}
+              className="inline-flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>从存储添加视频</span>
+            </button>
+          </Tooltip>
 
-          <button
-            type="button"
-            aria-label={`上移章节 ${chapter.title}`}
-            disabled={chapterIdx === 0}
-            onClick={() => void onMoveChapterStep(chapterIdx, -1)}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
-          >
-            <ArrowUp className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            aria-label={`下移章节 ${chapter.title}`}
-            disabled={chapterIdx === totalChapters - 1}
-            onClick={() => void onMoveChapterStep(chapterIdx, 1)}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
-          >
-            <ArrowDown className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            aria-label={`重命名章节 ${chapter.title}`}
-            onClick={() => setEditing(true)}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
-          >
-            <Pencil className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            aria-label={`删除章节 ${chapter.title}`}
-            onClick={() => void onDeleteChapter(chapter.id)}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
+          <Tooltip content="上移该章节">
+            <button
+              type="button"
+              aria-label={`上移章节 ${chapter.title}`}
+              disabled={chapterIdx === 0}
+              onClick={() => void onMoveChapterStep(chapterIdx, -1)}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
+            >
+              <ArrowUp className="h-4 w-4" />
+            </button>
+          </Tooltip>
+          <Tooltip content="下移该章节">
+            <button
+              type="button"
+              aria-label={`下移章节 ${chapter.title}`}
+              disabled={chapterIdx === totalChapters - 1}
+              onClick={() => void onMoveChapterStep(chapterIdx, 1)}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-30 disabled:pointer-events-none"
+            >
+              <ArrowDown className="h-4 w-4" />
+            </button>
+          </Tooltip>
+          <Tooltip content="重命名章节标题">
+            <button
+              type="button"
+              aria-label={`重命名章节 ${chapter.title}`}
+              onClick={() => setEditing(true)}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+          </Tooltip>
+          <Tooltip content="删除此章节及其课时记录（不删本地文件）">
+            <button
+              type="button"
+              aria-label={`删除章节 ${chapter.title}`}
+              onClick={() => void onDeleteChapter(chapter.id)}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -619,6 +643,7 @@ function SortableChapterCard({
 export default function CourseEditorPage() {
   const { courseId } = useParams<{ courseId: string }>();
   const navigate = useNavigate();
+  const { toast } = useToast();
 
   const [course, setCourse] = useState<CourseDetail | null>(null);
   const [libraries, setLibraries] = useState<Library[]>([]);
@@ -710,6 +735,12 @@ export default function CourseEditorPage() {
 
   function showNotice(msg: string) {
     setStatusMessage(msg);
+    toast.success(msg);
+  }
+
+  function showError(msg: string) {
+    setError(msg);
+    toast.error(msg);
   }
 
   function handleAddTag() {
@@ -742,7 +773,7 @@ export default function CourseEditorPage() {
       syncFormFromCourse(updated);
       showNotice('课程元数据已保存');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存元数据失败');
+      showError(err instanceof Error ? err.message : '保存元数据失败');
     } finally {
       setSavingMeta(false);
     }
@@ -758,7 +789,7 @@ export default function CourseEditorPage() {
       syncFormFromCourse(updated);
       showNotice('课程封面已更新');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '上传封面失败');
+      showError(err instanceof Error ? err.message : '上传封面失败');
     } finally {
       setUploadingCover(false);
       e.target.value = '';
@@ -775,7 +806,7 @@ export default function CourseEditorPage() {
       setShowFramePicker(false);
       showNotice('已从课时帧更新封面');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '选取课时帧封面失败');
+      showError(err instanceof Error ? err.message : '选取课时帧封面失败');
     } finally {
       setUploadingCover(false);
     }
@@ -791,7 +822,7 @@ export default function CourseEditorPage() {
       syncFormFromCourse(updated);
       showNotice('课程背景图已更新');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '上传背景图失败');
+      showError(err instanceof Error ? err.message : '上传背景图失败');
     } finally {
       setUploadingBackdrop(false);
       e.target.value = '';
@@ -804,9 +835,10 @@ export default function CourseEditorPage() {
     setError(null);
     try {
       await api.deleteCourse(course.id);
+      toast.success(`已删除课程「${course.title}」`);
       navigate('/', { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除课程失败');
+      showError(err instanceof Error ? err.message : '删除课程失败');
       setDeletingCourse(false);
     }
   }
@@ -832,7 +864,7 @@ export default function CourseEditorPage() {
       setNewChapterTitle('');
       showNotice(`已添加章节「${created.title}」`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '添加章节失败');
+      showError(err instanceof Error ? err.message : '添加章节失败');
     } finally {
       setAddingChapter(false);
     }
@@ -854,7 +886,7 @@ export default function CourseEditorPage() {
       );
       showNotice('章节标题已更新');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '重命名章节失败');
+      showError(err instanceof Error ? err.message : '重命名章节失败');
       throw err;
     }
   }
@@ -868,7 +900,7 @@ export default function CourseEditorPage() {
       syncFormFromCourse(refreshed);
       showNotice('章节已删除');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除章节失败');
+      showError(err instanceof Error ? err.message : '删除章节失败');
     }
   }
 
@@ -882,7 +914,7 @@ export default function CourseEditorPage() {
       );
       showNotice('章节顺序已保存');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存章节顺序失败');
+      showError(err instanceof Error ? err.message : '保存章节顺序失败');
       const refreshed = await api.getCourse(course.id);
       syncFormFromCourse(refreshed);
     }
@@ -905,7 +937,7 @@ export default function CourseEditorPage() {
       await api.reorderLessons(course.id, placements);
       showNotice('课时顺序已保存');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存课时顺序失败');
+      showError(err instanceof Error ? err.message : '保存课时顺序失败');
       const refreshed = await api.getCourse(course.id);
       syncFormFromCourse(refreshed);
     }
@@ -965,7 +997,7 @@ export default function CourseEditorPage() {
       );
       showNotice('课时标题已更新');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '重命名课时失败');
+      showError(err instanceof Error ? err.message : '重命名课时失败');
       throw err;
     }
   }
@@ -979,7 +1011,7 @@ export default function CourseEditorPage() {
       syncFormFromCourse(refreshed);
       showNotice('课时已删除');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除课时失败');
+      showError(err instanceof Error ? err.message : '删除课时失败');
     }
   }
 
@@ -1015,7 +1047,7 @@ export default function CourseEditorPage() {
       }
       setSelectedNewFileIds(initialSel);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '检查新文件失败');
+      showError(err instanceof Error ? err.message : '检查新文件失败');
     } finally {
       setCheckingNewFiles(false);
     }
@@ -1033,7 +1065,7 @@ export default function CourseEditorPage() {
       setNewFiles(null);
       showNotice(`已追加 ${ids.length} 个新视频到课程`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '追加新文件失败');
+      showError(err instanceof Error ? err.message : '追加新文件失败');
     } finally {
       setAppendingNewFiles(false);
     }
@@ -1108,7 +1140,7 @@ export default function CourseEditorPage() {
       setAddVideoChapterId(null);
       showNotice(`已添加课时「${file.file_name}」`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '添加视频课时失败');
+      showError(err instanceof Error ? err.message : '添加视频课时失败');
     }
   }
 
@@ -1143,50 +1175,58 @@ export default function CourseEditorPage() {
       {/* Top Action Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <Link
-            to={`/courses/${course.id}`}
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-white transition-colors"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            <span>返回课程播放</span>
-          </Link>
+          <Tooltip content="返回课程播放页面">
+            <Link
+              to={`/courses/${course.id}`}
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-400 hover:text-white transition-colors"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              <span>返回课程播放</span>
+            </Link>
+          </Tooltip>
           <span className="text-slate-700">/</span>
           <h1 className="text-lg font-bold text-white truncate max-w-md">{course.title}</h1>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void handleCheckNewFiles()}
-            disabled={checkingNewFiles}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800/80 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-colors"
-          >
-            {checkingNewFiles ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <FolderSearch className="h-3.5 w-3.5" />
-            )}
-            <span>检查新文件</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowAIModal(true)}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-sky-600 px-3.5 py-2 text-xs font-semibold text-white shadow hover:from-indigo-500 hover:to-sky-500 transition-colors"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            <span>AI 智能整理</span>
-          </button>
-
-          {!confirmDeleteCourse ? (
+          <Tooltip content="扫描原导入目录，发现新增视频并增量追加">
             <button
               type="button"
-              onClick={() => setConfirmDeleteCourse(true)}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 hover:bg-rose-500/20 transition-colors"
+              onClick={() => void handleCheckNewFiles()}
+              disabled={checkingNewFiles}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800/80 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-colors"
             >
-              <Trash2 className="h-3.5 w-3.5" />
-              <span>删除课程</span>
+              {checkingNewFiles ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FolderSearch className="h-3.5 w-3.5" />
+              )}
+              <span>检查新文件</span>
             </button>
+          </Tooltip>
+
+          <Tooltip content="用 AI 自动生成课程简介、标签与清晰章节结构（预览后应用）">
+            <button
+              type="button"
+              onClick={() => setShowAIModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-sky-600 px-3.5 py-2 text-xs font-semibold text-white shadow hover:from-indigo-500 hover:to-sky-500 transition-colors"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>AI 智能整理</span>
+            </button>
+          </Tooltip>
+
+          {!confirmDeleteCourse ? (
+            <Tooltip content="删除此课程记录（不删除本地视频文件）">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteCourse(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 hover:bg-rose-500/20 transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>删除课程</span>
+              </button>
+            </Tooltip>
           ) : (
             <div className="inline-flex items-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-950/80 px-2.5 py-1">
               <span className="text-xs text-rose-200">确认删除?</span>
@@ -1402,30 +1442,34 @@ export default function CourseEditorPage() {
                   placeholder="输入标签后按回车或点击添加"
                   className="flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
                 />
-                <button
-                  type="button"
-                  onClick={handleAddTag}
-                  className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
-                >
-                  添加标签
-                </button>
+                <Tooltip content="将输入的标签添加到课程中">
+                  <button
+                    type="button"
+                    onClick={handleAddTag}
+                    className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                  >
+                    添加标签
+                  </button>
+                </Tooltip>
               </div>
             </div>
           </div>
 
           <div className="flex justify-end pt-2">
-            <button
-              type="submit"
-              disabled={savingMeta}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
-            >
-              {savingMeta ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Save className="h-4 w-4" />
-              )}
-              <span>{savingMeta ? '保存中...' : '保存元数据'}</span>
-            </button>
+            <Tooltip content="保存标题、讲师、媒体库、简介与标签">
+              <button
+                type="submit"
+                disabled={savingMeta}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              >
+                {savingMeta ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4" />
+                )}
+                <span>{savingMeta ? '保存中...' : '保存元数据'}</span>
+              </button>
+            </Tooltip>
           </div>
         </form>
 
@@ -1447,27 +1491,31 @@ export default function CourseEditorPage() {
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition-colors">
-                <Upload className="h-3.5 w-3.5" />
-                <span>{uploadingCover ? '上传中...' : '上传封面'}</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="sr-only"
-                  disabled={uploadingCover}
-                  onChange={(e) => void handleCoverUpload(e)}
-                />
-              </label>
+              <Tooltip content="从本地上传图片作为课程封面">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition-colors">
+                  <Upload className="h-3.5 w-3.5" />
+                  <span>{uploadingCover ? '上传中...' : '上传封面'}</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="sr-only"
+                    disabled={uploadingCover}
+                    onChange={(e) => void handleCoverUpload(e)}
+                  />
+                </label>
+              </Tooltip>
 
-              <button
-                type="button"
-                disabled={allLessons.length === 0 || uploadingCover}
-                onClick={() => setShowFramePicker((v) => !v)}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20 disabled:opacity-50 transition-colors"
-              >
-                <ImagePlus className="h-3.5 w-3.5" />
-                <span>从课时帧选取封面</span>
-              </button>
+              <Tooltip content="直接选用某节视频的缩略图作为课程封面">
+                <button
+                  type="button"
+                  disabled={allLessons.length === 0 || uploadingCover}
+                  onClick={() => setShowFramePicker((v) => !v)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20 disabled:opacity-50 transition-colors"
+                >
+                  <ImagePlus className="h-3.5 w-3.5" />
+                  <span>从课时帧选取封面</span>
+                </button>
+              </Tooltip>
             </div>
 
             {showFramePicker && (
@@ -1504,17 +1552,19 @@ export default function CourseEditorPage() {
                 <span className="text-xs text-slate-500">暂无背景图</span>
               )}
             </div>
-            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition-colors">
-              <Upload className="h-3.5 w-3.5" />
-              <span>{uploadingBackdrop ? '上传中...' : '上传背景图'}</span>
-              <input
-                type="file"
-                accept="image/*"
-                className="sr-only"
-                disabled={uploadingBackdrop}
-                onChange={(e) => void handleBackdropUpload(e)}
-              />
-            </label>
+            <Tooltip content="上传宽屏背景横幅图（Jellyfin 详情页展示）">
+              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700 transition-colors">
+                <Upload className="h-3.5 w-3.5" />
+                <span>{uploadingBackdrop ? '上传中...' : '上传背景图'}</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  disabled={uploadingBackdrop}
+                  onChange={(e) => void handleBackdropUpload(e)}
+                />
+              </label>
+            </Tooltip>
           </div>
         </div>
       </div>
@@ -1538,14 +1588,16 @@ export default function CourseEditorPage() {
               aria-label="新章节名称"
               className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
             />
-            <button
-              type="submit"
-              disabled={addingChapter || !newChapterTitle.trim()}
-              className="inline-flex items-center gap-1 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>添加章节</span>
-            </button>
+            <Tooltip content="在课程末尾新增一个章节分组">
+              <button
+                type="submit"
+                disabled={addingChapter || !newChapterTitle.trim()}
+                className="inline-flex items-center gap-1 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>添加章节</span>
+              </button>
+            </Tooltip>
           </form>
         </div>
 
@@ -1598,14 +1650,16 @@ export default function CourseEditorPage() {
           <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
               <h3 className="text-base font-bold text-white">从存储添加视频到章节</h3>
-              <button
-                type="button"
-                aria-label="关闭"
-                onClick={() => setAddVideoChapterId(null)}
-                className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              <Tooltip content="关闭弹窗">
+                <button
+                  type="button"
+                  aria-label="关闭"
+                  onClick={() => setAddVideoChapterId(null)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </Tooltip>
             </div>
 
             <div className="p-5 space-y-4 flex-1 overflow-y-auto">
