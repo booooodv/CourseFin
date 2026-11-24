@@ -44,6 +44,7 @@ type applyJob struct {
 	managedBinDir     string
 	dataDir           string
 	restartGraceDelay time.Duration
+	renameFn          func(oldpath, newpath string) error
 }
 
 // StartApply validates eligibility and launches the asynchronous download, verification,
@@ -104,6 +105,7 @@ func (s *Service) StartApply(lifecycleCtx context.Context) (Status, error) {
 		managedBinDir:     s.managedBinDir,
 		dataDir:           s.dataDir,
 		restartGraceDelay: s.restartGraceDelay,
+		renameFn:          s.renameFn,
 	}
 	st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
 	s.wg.Add(1)
@@ -197,18 +199,26 @@ func (s *Service) executeApply(ctx context.Context, job applyJob) error {
 		return fmt.Errorf("stat target binary: %w", statErr)
 	}
 
-	if err := os.Rename(candidatePath, job.targetPath); err != nil {
-		return fmt.Errorf("replace target binary: %w", err)
-	}
-	renamed = true
-	syncDirBestEffort(targetDir)
-
+	var pendingPath string
 	if job.managedBinDir != "" {
-		pendingPath := filepath.Join(job.managedBinDir, ".pending_update")
+		pendingPath = filepath.Join(job.managedBinDir, ".pending_update")
 		if err := writeFileAtomic(pendingPath, []byte("tried\n"), 0o644); err != nil {
 			return fmt.Errorf("write pending update marker: %w", err)
 		}
 	}
+
+	rename := job.renameFn
+	if rename == nil {
+		rename = os.Rename
+	}
+	if err := rename(candidatePath, job.targetPath); err != nil {
+		if pendingPath != "" {
+			_ = os.Remove(pendingPath)
+		}
+		return fmt.Errorf("replace target binary: %w", err)
+	}
+	renamed = true
+	syncDirBestEffort(targetDir)
 
 	_ = os.Remove(stagingPath)
 

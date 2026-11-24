@@ -115,7 +115,7 @@ export default function SettingsPage() {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     }
-  }, [loading, location.hash]);
+  }, [loading, location.hash, location.key]);
 
   const jellyfinUrl =
     settings?.base_url_hint?.trim() ||

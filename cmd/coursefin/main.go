@@ -110,11 +110,16 @@ func main() {
 						os.Exit(1)
 					}
 					if cfg.ManagedBinDir != "" {
-						_ = os.Remove(filepath.Join(cfg.ManagedBinDir, ".pending_update"))
+						pendingPath := filepath.Join(cfg.ManagedBinDir, ".pending_update")
+						if removeErr := os.Remove(pendingPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+							logger.Warn("failed to remove pending update marker", "path", pendingPath, "error", removeErr)
+						}
 					}
 					if execErr := updater.ExecReplace(restartReq.ExecPath, os.Args, os.Environ()); execErr != nil {
 						logger.Error("hot-exec on restored backup binary failed", "exec_path", restartReq.ExecPath, "error", execErr)
 					}
+				} else if !errors.Is(statErr, os.ErrNotExist) {
+					logger.Error("failed to stat backup binary for rollback", "backup_path", restartReq.BackupPath, "error", statErr)
 				}
 			}
 			os.Exit(1)

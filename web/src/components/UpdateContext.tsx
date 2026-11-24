@@ -490,6 +490,8 @@ export function UpdateProvider({
               .catch(() => {});
             scheduleActivePoll(runId);
           }
+        } else if (restartPhaseRef.current === 'idle') {
+          setRestartError(null);
         }
 
         return next;
@@ -523,6 +525,7 @@ export function UpdateProvider({
         return null;
       }
       setStatus(next);
+      setRestartError(null);
       return next;
     } finally {
       checkingRef.current = false;
@@ -538,6 +541,7 @@ export function UpdateProvider({
       return null;
     }
     setStatus(next);
+    setRestartError(null);
     return next;
   }, []);
 

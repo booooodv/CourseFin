@@ -219,6 +219,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
   }, [checkIntervalHours]);
 
   const hasActiveApplyStage =
+    !restartError &&
     (restartPhase === 'idle' || restartPhase === 'waiting') &&
     isActiveApplyState(status?.state);
 
@@ -348,8 +349,8 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
   const showProgressPanel = hasActiveApplyStage;
   const displayError =
     restartPhase === 'rolled_back' || restartPhase === 'timeout'
-      ? null
-      : inlineError || status?.last_error || null;
+      ? inlineError
+      : inlineError || (restartPhase === 'idle' ? restartError : null) || status?.last_error || null;
 
   return (
     <section
@@ -611,6 +612,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                     onChange={(e) => {
                       setAutoCheckEnabled(e.target.checked);
                       setConfigDirty(true);
+                      setConfigError(null);
                     }}
                     className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-indigo-500 disabled:opacity-50"
                   />
@@ -641,6 +643,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                   onChange={(e) => {
                     setCheckIntervalHours(e.target.value);
                     setConfigDirty(true);
+                    setConfigError(null);
                   }}
                   className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none disabled:opacity-50"
                 >
@@ -668,6 +671,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                   onChange={(e) => {
                     setMirrorUrl(e.target.value);
                     setConfigDirty(true);
+                    setConfigError(null);
                   }}
                   placeholder="https://gh-proxy.com"
                   className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none disabled:opacity-50"

@@ -948,6 +948,113 @@ describe('UpdateContext & Update API client', () => {
     expect(onReload).not.toHaveBeenCalled();
     expect(screen.getByTestId('restart-error').textContent).toMatch(/回滚.*1\.0\.1/);
   });
+
+  it('clears restartError on saveConfig and on refreshStatus only when restartPhase is idle', async () => {
+    let mode: 'idle_err' | 'timeout_err' | 'after_timeout' = 'idle_err';
+    let statusPolls = 0;
+    let healthPolls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          statusPolls += 1;
+          if (statusPolls === 1) {
+            return jsonResponse(makeStatus({ state: 'idle' }));
+          }
+          if (mode === 'idle_err' && statusPolls === 2) {
+            return jsonResponse({ error: 'poll failed 500' }, 500);
+          }
+          if (mode === 'timeout_err') {
+            return jsonResponse(makeStatus({ state: 'restarting', target_version: '1.0.2' }));
+          }
+          if (mode === 'after_timeout') {
+            return jsonResponse(makeStatus({ state: 'idle', latest_version: '1.0.3' }));
+          }
+          return jsonResponse(makeStatus({ state: 'idle', latest_version: '1.0.2' }));
+        }
+        if (url === '/health' && method === 'GET') {
+          healthPolls += 1;
+          if (mode === 'timeout_err' && healthPolls > 1) {
+            throw new TypeError('Failed to fetch');
+          }
+          return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-1' });
+        }
+        if (url === '/api/v1/system/update/apply' && method === 'POST') {
+          return jsonResponse(makeStatus({ state: 'downloading', target_version: '1.0.2' }), 202);
+        }
+        if (url === '/api/v1/system/update/config' && method === 'PUT') {
+          const body = JSON.parse(String(init?.body));
+          return jsonResponse(
+            makeStatus({
+              state: 'idle',
+              auto_check_enabled: body.auto_check_enabled,
+              check_interval_hours: body.check_interval_hours,
+              mirror_url: body.mirror_url,
+            }),
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <UpdateProvider pollIntervalMs={15} healthPollIntervalMs={15} restartTimeoutMs={70}>
+        <UpdateHarness />
+      </UpdateProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('current-version')).toHaveTextContent('1.0.1');
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '开始更新' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-error')).toHaveTextContent('poll failed 500');
+    });
+    expect(screen.getByTestId('restart-phase')).toHaveTextContent('idle');
+    expect(screen.getByTestId('applying')).toHaveTextContent('false');
+
+    // saveConfig clears restartError
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('mirror')).toHaveTextContent('https://gh-proxy.com');
+    });
+    expect(screen.getByTestId('restart-error')).toHaveTextContent('');
+
+    // Trigger another idle poll 500 error, then refreshStatus clears restartError
+    statusPolls = 1;
+    await user.click(screen.getByRole('button', { name: '开始更新' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-error')).toHaveTextContent('poll failed 500');
+    });
+    await user.click(screen.getByRole('button', { name: '刷新状态' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-error')).toHaveTextContent('');
+    });
+
+    // In timeout phase, refreshStatus preserves restartError when backend reports idle
+    mode = 'timeout_err';
+    healthPolls = 0;
+    await user.click(screen.getByRole('button', { name: '开始更新' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-phase')).toHaveTextContent('timeout');
+    });
+    const timeoutErr = screen.getByTestId('restart-error').textContent;
+    expect(timeoutErr).toMatch(/超时/);
+
+    mode = 'after_timeout';
+    await user.click(screen.getByRole('button', { name: '刷新状态' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('latest-version')).toHaveTextContent('1.0.3');
+    });
+    expect(screen.getByTestId('restart-error')).toHaveTextContent(timeoutErr!);
+  });
 });
 
 function makeSettingsResponse() {
@@ -1607,5 +1714,213 @@ describe('SystemUpdate UI — Layout & SettingsPage', () => {
     expect(screen.getByText('暂未获取到版本更新状态。')).toBeInTheDocument();
     expect(screen.queryByText(/加载系统设置失败/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /保存设置/ })).toBeEnabled();
+  });
+
+  it('unblocks UI, hides progressbar, displays restartError on HTTP 500 poll failure during downloading, and clears restartError on checkNow', async () => {
+    let statusCalls = 0;
+    let resolveThirdPoll!: (res: Response) => void;
+    const thirdPollPromise = new Promise<Response>((resolve) => {
+      resolveThirdPoll = resolve;
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/health' && method === 'GET') {
+          return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-1' });
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            return jsonResponse(makeStatus({ state: 'idle', update_available: true, latest_version: '1.0.2' }));
+          }
+          if (statusCalls === 2) {
+            return jsonResponse(
+              makeStatus({
+                state: 'downloading',
+                target_version: '1.0.2',
+                progress_bytes: 5242880,
+                total_bytes: 14820352,
+                progress_percent: 35,
+              }),
+            );
+          }
+          return thirdPollPromise;
+        }
+        if (url === '/api/v1/system/update/apply' && method === 'POST') {
+          return jsonResponse(
+            makeStatus({
+              state: 'downloading',
+              target_version: '1.0.2',
+              progress_percent: 0,
+            }),
+            202,
+          );
+        }
+        if (url === '/api/v1/system/update/check' && method === 'POST') {
+          return jsonResponse(
+            makeStatus({
+              state: 'idle',
+              latest_version: '1.0.3',
+              update_available: true,
+              last_error: '',
+            }),
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    function RestartErrorProbe() {
+      const { restartError } = useUpdate();
+      return <div data-testid="restart-error-probe">{restartError ?? ''}</div>;
+    }
+
+    render(
+      <ToastProvider>
+        <UpdateProvider pollIntervalMs={15} healthPollIntervalMs={15} restartTimeoutMs={500}>
+          <MemoryRouter initialEntries={['/settings']}>
+            <RestartErrorProbe />
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /立即更新到 v1\.0\.2/ }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: /确认更新/ }));
+
+    // First active poll shows 35% progressbar while downloading
+    await waitFor(() => {
+      expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '35');
+    });
+    expect(screen.getByRole('button', { name: /检查更新/ })).toBeDisabled();
+
+    // Next status poll fails with HTTP 500 (non-disconnect error)
+    resolveThirdPoll(jsonResponse({ error: 'internal server error' }, 500));
+
+    const sectionEl = screen
+      .getByRole('heading', { name: '系统版本与在线更新' })
+      .closest('#system-update') as HTMLElement;
+    expect(await within(sectionEl).findByText('internal server error')).toBeInTheDocument();
+    expect(screen.getByTestId('restart-error-probe')).toHaveTextContent('internal server error');
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /检查更新/ })).toBeEnabled();
+    expect(screen.getByLabelText(/自动检查更新/)).toBeEnabled();
+    expect(screen.getByLabelText(/检查间隔/)).toBeEnabled();
+    expect(screen.getByLabelText(/GitHub 加速代理前缀/)).toBeEnabled();
+    expect(screen.getByRole('button', { name: '保存更新配置' })).toBeEnabled();
+
+    // Subsequent successful checkNow clears restartError and hides error banner
+    await user.click(screen.getByRole('button', { name: /检查更新/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId('restart-error-probe')).toHaveTextContent('');
+    });
+    expect(within(sectionEl).queryByText('internal server error')).not.toBeInTheDocument();
+  });
+
+  it('shows inlineError during timeout, clears configError on input change, and re-scrolls when #system-update pill is clicked again', async () => {
+    let statusCalls = 0;
+    let healthCalls = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            return jsonResponse(makeStatus({ state: 'idle' }));
+          }
+          return jsonResponse(makeStatus({ state: 'restarting', target_version: '1.0.2' }));
+        }
+        if (url === '/health' && method === 'GET') {
+          healthCalls += 1;
+          if (healthCalls === 1) {
+            return jsonResponse({ status: 'ok', version: '1.0.1', boot_id: 'boot-1' });
+          }
+          throw new TypeError('Failed to fetch');
+        }
+        if (url === '/api/v1/system/update/apply' && method === 'POST') {
+          return jsonResponse(makeStatus({ state: 'downloading', target_version: '1.0.2' }), 202);
+        }
+        if (url === '/api/v1/system/update/check' && method === 'POST') {
+          return jsonResponse({ error: 'check failed after timeout' }, 502);
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <UpdateProvider pollIntervalMs={15} healthPollIntervalMs={15} restartTimeoutMs={70}>
+          <MemoryRouter initialEntries={['/settings#system-update']}>
+            <Layout>
+              <SettingsPage />
+            </Layout>
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+    });
+
+    // Re-click the top-bar pill while already on /settings#system-update -> re-scrolls
+    const user = userEvent.setup();
+    const pill = await screen.findByRole('link', { name: /新版本 v1\.0\.2/ });
+    await user.click(pill);
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(2);
+    });
+
+    // Invalid mirror triggers configError; editing input clears configError
+    const mirrorInput = screen.getByLabelText(/GitHub 加速代理前缀/);
+    await user.type(mirrorInput, 'ftp://bad.example');
+    await user.click(screen.getByRole('button', { name: '保存更新配置' }));
+    const sectionEl = mirrorInput.closest('#system-update') as HTMLElement;
+    expect(
+      within(sectionEl).getByText(/加速代理地址必须以 http:\/\/ 或 https:\/\/ 开头/),
+    ).toBeInTheDocument();
+
+    await user.type(mirrorInput, 'x');
+    expect(
+      within(sectionEl).queryByText(/加速代理地址必须以 http:\/\/ 或 https:\/\/ 开头/),
+    ).not.toBeInTheDocument();
+
+    // Enter timeout phase, then trigger checkNow failure -> inlineError displays despite timeout phase
+    await user.click(screen.getByRole('button', { name: /立即更新到 v1\.0\.2/ }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: /确认更新/ }));
+    expect(await screen.findByText(/等待服务重启超时/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /检查更新/ }));
+    expect(await within(sectionEl).findByText('check failed after timeout')).toBeInTheDocument();
   });
 });

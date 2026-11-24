@@ -159,6 +159,7 @@ type Service struct {
 	wg              sync.WaitGroup
 	restartCh       chan RestartRequest
 	configChangedCh chan struct{}
+	renameFn        func(oldpath, newpath string) error
 
 	state           string
 	latestVersion   string
@@ -428,6 +429,7 @@ func (s *Service) CheckNow(ctx context.Context) (Status, error) {
 	case http.StatusNotModified:
 		s.mu.Lock()
 		s.state = stateIdle
+		s.clearApplyProgressLocked()
 		s.lastCheckedAt = nowStr
 		s.lastError = ""
 		st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
@@ -437,6 +439,7 @@ func (s *Service) CheckNow(ctx context.Context) (Status, error) {
 	case http.StatusNotFound:
 		s.mu.Lock()
 		s.state = stateIdle
+		s.clearApplyProgressLocked()
 		s.clearReleaseLocked()
 		s.cachedETag = ""
 		s.cachedETagSource = ""
@@ -465,6 +468,7 @@ func (s *Service) CheckNow(ctx context.Context) (Status, error) {
 		if rel.Draft || rel.Prerelease {
 			s.mu.Lock()
 			s.state = stateIdle
+			s.clearApplyProgressLocked()
 			s.clearReleaseLocked()
 			s.updateETagLocked(respETag, usedSource, repo, cfg.mirrorURL)
 			s.lastCheckedAt = nowStr
@@ -505,6 +509,7 @@ func (s *Service) CheckNow(ctx context.Context) (Status, error) {
 
 		s.mu.Lock()
 		s.state = stateIdle
+		s.clearApplyProgressLocked()
 		s.latestVersion = latestVer
 		s.updateAvailable = updateAvailable
 		s.releaseName = rel.Name
@@ -575,10 +580,18 @@ func (s *Service) StartPeriodicLoop(ctx context.Context) {
 func (s *Service) finishCheckError(cfg persistentSettings, err error) (Status, error) {
 	s.mu.Lock()
 	s.state = stateIdle
+	s.clearApplyProgressLocked()
 	s.lastError = err.Error()
 	st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
 	s.mu.Unlock()
 	return s.finalizeStatus(st, s.evaluateEnvironmentEligibility(), assetURL, checksumsURL), err
+}
+
+func (s *Service) clearApplyProgressLocked() {
+	s.targetVersion = ""
+	s.progressBytes = 0
+	s.totalBytes = 0
+	s.progressPercent = 0
 }
 
 func (s *Service) isBusyLocked() bool {

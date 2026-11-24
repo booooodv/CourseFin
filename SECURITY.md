@@ -35,7 +35,7 @@ CourseFin 定位为面向个人与内网/NAS 的自托管课程管理平台。�
 5. **图片接口匿名访问说明**
    - 为了兼容官方 Jellyfin 客户端与第三方播放器对 `<img>` 封面的加载行为，`GET /Items/{itemId}/Images/*` 允许免 Token 访问，依靠 32 位随机 UUID 隔离；请勿在课程封面上存放敏感隐私图片。
 6. **内置自更新（Self-Update）安全边界**
-   - **仅限管理员认证调用**：`/api/v1/system/update`、`PUT /api/v1/system/update/config`、`POST /api/v1/system/update/check` 与 `POST /api/v1/system/update/apply` 均位于鉴权路由组内（CourseFin v1.0 为单管理员模式），未登录请求一律拒绝。
+   - **仅限管理员认证调用**：`GET /api/v1/system/update`、`PUT /api/v1/system/update/config`、`POST /api/v1/system/update/check` 与 `POST /api/v1/system/update/apply` 均位于鉴权路由组内（CourseFin v1.0 为单管理员模式），未登录请求一律拒绝。
    - **强制 `SHA-256` 校验与归档安全**：应用内更新必须同时存在匹配的平台归档与 `checksums.txt`，下载后执行恒定时间 `SHA-256` 摘要比对，并严格校验大小上限与 tar 路径（拒绝符号链接、硬链接与 `..` 路径穿越）；校验失败或缺少哈希项会在触及运行中二进制前立即中止。
    - **`--version` 预检与回滚保护**：新二进制先解压至目标执行目录本身并赋予 `0755` 权限，在替换前以超时限制执行 `--version` 自检（同时验证架构兼容性与目标挂载目录是否允许执行，避免 `noexec` 导致启动失败）；替换前保留 `.bak` 备份，Docker 模式通过 `/data/updates/bin/.pending_update` 在启动崩溃时自动回滚。
    - **零 `docker.sock` 依赖**：容器内自更新通过轻量入口脚本（`scripts/docker-entrypoint.sh`）将更新二进制持久化至 `${COURSEFIN_DATA_DIR}/updates/bin`，无需挂载 `/var/run/docker.sock` 或引入特权守护容器，避免容器逃逸风险。

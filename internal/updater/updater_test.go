@@ -1579,3 +1579,170 @@ func TestStartApplyChecksumAndArchiveEdgeCases(t *testing.T) {
 		assertNoMatchingEntry(t, managedDir, ".coursefin.new.")
 	})
 }
+
+func TestStartApplyPendingUpdateWriteFailureKeepsBinaryUntouched(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	dataDir := t.TempDir()
+	managedDir := t.TempDir()
+	activeBin := filepath.Join(managedDir, "coursefin")
+	if err := os.WriteFile(activeBin, versionStubScript("1.0.1"), 0o755); err != nil {
+		t.Fatalf("write initial binary: %v", err)
+	}
+	// Block .pending_update atomic rename by placing a non-empty directory there.
+	pendingBlocker := filepath.Join(managedDir, ".pending_update")
+	if err := os.MkdirAll(filepath.Join(pendingBlocker, "keep"), 0o755); err != nil {
+		t.Fatalf("mkdir pending blocker: %v", err)
+	}
+
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildReleaseTarGz(t, "coursefin", versionStubScript("1.2.0"), 0o755)
+	checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+	svc := updater.NewService(updater.Options{
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		ManagedBinDir:     managedDir,
+		HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+		RestartGraceDelay: 5 * time.Millisecond,
+	})
+
+	ctx := context.Background()
+	if _, err := svc.CheckNow(ctx); err != nil {
+		t.Fatalf("CheckNow: %v", err)
+	}
+	if _, err := svc.StartApply(ctx); err != nil {
+		t.Fatalf("StartApply: %v", err)
+	}
+	svc.Wait()
+
+	select {
+	case req := <-svc.RestartCh():
+		t.Fatalf("unexpected RestartRequest when .pending_update cannot be written: %+v", req)
+	default:
+	}
+
+	st := svc.Status(ctx)
+	if st.State != "failed" || !strings.Contains(st.LastError, "pending update") {
+		t.Fatalf("expected failed state mentioning pending update, got %+v", st)
+	}
+	if got := runBinaryVersion(t, activeBin); got != "1.0.1" {
+		t.Fatalf("active binary must remain untouched at 1.0.1 when .pending_update fails, got %q", got)
+	}
+	assertNoMatchingEntry(t, managedDir, ".coursefin.new.")
+	assertNoMatchingEntry(t, filepath.Join(dataDir, "updates", "staging"), assetName+".part")
+}
+
+func TestStartApplyRenameFailureCleansUpPendingUpdateMarker(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	dataDir := t.TempDir()
+	managedDir := t.TempDir()
+	activeBin := filepath.Join(managedDir, "coursefin")
+	if err := os.WriteFile(activeBin, versionStubScript("1.0.1"), 0o755); err != nil {
+		t.Fatalf("write initial binary: %v", err)
+	}
+	pendingPath := filepath.Join(managedDir, ".pending_update")
+
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildReleaseTarGz(t, "coursefin", versionStubScript("1.2.0"), 0o755)
+	checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+	svc := updater.NewService(updater.Options{
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		ManagedBinDir:     managedDir,
+		HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+		RestartGraceDelay: 5 * time.Millisecond,
+	})
+
+	var pendingExistedDuringRename bool
+	updater.SetRenameFuncForTest(svc, func(oldpath, newpath string) error {
+		if data, err := os.ReadFile(pendingPath); err == nil && string(data) == "tried\n" {
+			pendingExistedDuringRename = true
+		}
+		return errors.New("simulated rename failure")
+	})
+
+	ctx := context.Background()
+	if _, err := svc.CheckNow(ctx); err != nil {
+		t.Fatalf("CheckNow: %v", err)
+	}
+	if _, err := svc.StartApply(ctx); err != nil {
+		t.Fatalf("StartApply: %v", err)
+	}
+	svc.Wait()
+
+	if !pendingExistedDuringRename {
+		t.Fatalf("expected .pending_update marker to be written before os.Rename")
+	}
+	if _, err := os.Stat(pendingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected .pending_update to be cleaned up after rename failure, got err=%v", err)
+	}
+	st := svc.Status(ctx)
+	if st.State != "failed" || !strings.Contains(st.LastError, "simulated rename failure") {
+		t.Fatalf("expected failed state with rename error, got %+v", st)
+	}
+	if got := runBinaryVersion(t, activeBin); got != "1.0.1" {
+		t.Fatalf("active binary must remain untouched at 1.0.1 on rename failure, got %q", got)
+	}
+	assertNoMatchingEntry(t, managedDir, ".coursefin.new.")
+	assertNoMatchingEntry(t, filepath.Join(dataDir, "updates", "staging"), assetName+".part")
+}
+
+func TestCheckNowClearsStaleFailedApplyProgress(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	dataDir := t.TempDir()
+	managedDir := t.TempDir()
+	activeBin := filepath.Join(managedDir, "coursefin")
+	if err := os.WriteFile(activeBin, versionStubScript("1.0.1"), 0o755); err != nil {
+		t.Fatalf("write initial binary: %v", err)
+	}
+
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildReleaseTarGz(t, "coursefin", versionStubScript("1.2.0"), 0o755)
+	badChecksums := fmt.Sprintf("%s  %s\n", strings.Repeat("0", 64), assetName)
+
+	svc := updater.NewService(updater.Options{
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		ManagedBinDir:     managedDir,
+		HTTPClient:        newApplyMockClient(t, assetName, archive, badChecksums),
+		RestartGraceDelay: 5 * time.Millisecond,
+	})
+
+	ctx := context.Background()
+	if _, err := svc.CheckNow(ctx); err != nil {
+		t.Fatalf("initial CheckNow: %v", err)
+	}
+	if _, err := svc.StartApply(ctx); err != nil {
+		t.Fatalf("StartApply: %v", err)
+	}
+	svc.Wait()
+
+	failedSt := svc.Status(ctx)
+	if failedSt.State != "failed" || failedSt.TargetVersion != "1.2.0" || failedSt.ProgressBytes == 0 || failedSt.TotalBytes == 0 || failedSt.ProgressPercent == 0 {
+		t.Fatalf("expected failed apply to populate progress fields first, got %+v", failedSt)
+	}
+
+	checkedSt, err := svc.CheckNow(ctx)
+	if err != nil {
+		t.Fatalf("second CheckNow: %v", err)
+	}
+	if checkedSt.State != "idle" {
+		t.Fatalf("expected State == idle after CheckNow, got %+v", checkedSt)
+	}
+	if checkedSt.TargetVersion != "" || checkedSt.ProgressBytes != 0 || checkedSt.TotalBytes != 0 || checkedSt.ProgressPercent != 0 || checkedSt.LastError != "" {
+		t.Fatalf("expected stale apply progress fields cleared on CheckNow, got %+v", checkedSt)
+	}
+}
