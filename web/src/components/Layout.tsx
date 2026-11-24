@@ -112,12 +112,12 @@ function SidebarContent({
   const updateTip = `发现新版本 ${latestVersionLabel}，点击前往设置页查看并更新`;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full w-full min-h-0 flex-col overflow-x-hidden">
       {/* Brand header */}
       <div
         className={`shrink-0 border-b border-subtle ${
           collapsed
-            ? 'flex flex-col items-center gap-2.5 px-2 py-3.5'
+            ? 'flex flex-col items-center gap-2.5 px-2.5 py-3.5'
             : 'flex h-16 items-center justify-between px-4'
         }`}
       >
@@ -125,7 +125,11 @@ function SidebarContent({
           to="/"
           aria-label="CourseFin"
           onClick={onAfterNavigate}
-          className="group flex min-w-0 items-center gap-2.5"
+          className={
+            collapsed
+              ? 'group flex items-center justify-center'
+              : 'group flex min-w-0 items-center gap-2.5'
+          }
         >
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-sky-500 text-ink-inverse shadow-accent transition-transform group-hover:scale-105">
             <GraduationCap className="h-5 w-5" />
@@ -165,7 +169,7 @@ function SidebarContent({
       </div>
 
       {/* Primary Navigation */}
-      <div className={collapsed ? 'px-2 pt-4 pb-2' : 'px-3 pt-4 pb-2'}>
+      <div className={collapsed ? 'px-2.5 pt-4 pb-2' : 'px-3 pt-4 pb-2'}>
         {!collapsed && (
           <div className="mb-1.5 px-3 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">
             导航
@@ -255,8 +259,8 @@ function SidebarContent({
           )}
 
           <div
-            className={`min-h-0 flex-1 overflow-y-auto ${
-              collapsed ? 'px-2 space-y-1.5' : 'px-3 space-y-1'
+            className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden ${
+              collapsed ? 'px-2.5 space-y-1.5' : 'px-3 space-y-1'
             }`}
           >
             {collapsed ? (
@@ -390,7 +394,7 @@ function SidebarContent({
       {/* Footer */}
       <div
         className={`shrink-0 border-t border-subtle ${
-          collapsed ? 'flex flex-col items-center gap-2.5 p-2.5' : 'space-y-3 p-3.5'
+          collapsed ? 'flex flex-col items-center gap-2.5 px-2.5 py-3' : 'space-y-3 p-3.5'
         }`}
       >
         {hasUpdate && (
@@ -424,7 +428,11 @@ function SidebarContent({
               : 'flex items-center justify-between gap-2 rounded-2xl bg-subtle/60 px-2.5 py-2'
           }
         >
-          <div className="flex min-w-0 items-center gap-2.5">
+          <div
+            className={
+              collapsed ? 'flex items-center justify-center' : 'flex min-w-0 items-center gap-2.5'
+            }
+          >
             <span
               aria-hidden="true"
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-bold text-accent-ink"
@@ -617,8 +625,8 @@ export default function Layout({ children }: LayoutProps): JSX.Element {
       <aside
         aria-label="主侧边栏"
         data-collapsed={effectiveCollapsed ? 'true' : 'false'}
-        className={`hidden lg:flex sticky top-0 h-screen shrink-0 bg-sidebar border-r border-subtle shadow-sidebar flex-col transition-[width] duration-200 ${
-          effectiveCollapsed ? 'w-[76px]' : 'w-[260px]'
+        className={`hidden lg:flex sticky top-0 h-screen min-w-0 shrink-0 overflow-x-hidden bg-sidebar border-r border-subtle shadow-sidebar flex-col transition-[width] duration-200 ${
+          effectiveCollapsed ? 'w-[76px] max-w-[76px]' : 'w-[260px]'
         }`}
       >
         <SidebarContent

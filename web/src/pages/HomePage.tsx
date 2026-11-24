@@ -874,8 +874,8 @@ export default function HomePage(): JSX.Element {
           </div>
         </div>
 
-        <div className="flex flex-wrap sm:flex-nowrap items-center gap-3 w-full lg:w-auto">
-          <div className="relative flex-1 sm:w-72 lg:w-80">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full lg:w-auto">
+          <div className="relative w-full sm:flex-1 lg:flex-none lg:w-80">
             <Search
               aria-hidden="true"
               className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-muted"
@@ -912,7 +912,7 @@ export default function HomePage(): JSX.Element {
                   setShowCreateCourse((v) => !v);
                   setCreateCourseError(null);
                 }}
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-accent/20 bg-accent-soft px-4 py-2.5 text-sm font-semibold text-accent-ink hover:bg-accent hover:text-ink-inverse hover:border-transparent hover:shadow-accent transition-all cursor-pointer"
+                className="inline-flex self-start sm:self-auto shrink-0 items-center gap-1.5 rounded-full border border-accent/20 bg-accent-soft px-4 py-2.5 text-sm font-semibold text-accent-ink hover:bg-accent hover:text-ink-inverse hover:border-transparent hover:shadow-accent transition-all cursor-pointer"
               >
                 <Plus className="h-4 w-4" />
                 <span>新建空白课程</span>

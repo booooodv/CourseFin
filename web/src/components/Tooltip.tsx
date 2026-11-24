@@ -18,6 +18,7 @@ interface TriggerProps {
   onMouseLeave?: (e: MouseEvent<HTMLElement>) => void;
   onFocus?: (e: FocusEvent<HTMLElement>) => void;
   onBlur?: (e: FocusEvent<HTMLElement>) => void;
+  onClick?: (e: MouseEvent<HTMLElement>) => void;
   'aria-describedby'?: string;
 }
 
@@ -203,6 +204,12 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
     setOpen(false);
   };
 
+  const handleClick = (e: MouseEvent<HTMLElement>) => {
+    clearOpenTimer();
+    setOpen(false);
+    childProps.onClick?.(e);
+  };
+
   const mergedDescribedBy = open
     ? [childProps['aria-describedby'], tooltipId].filter(Boolean).join(' ')
     : childProps['aria-describedby'];
@@ -212,6 +219,7 @@ export default function Tooltip({ content, placement = 'top', children }: Toolti
     onMouseLeave: handleMouseLeave,
     onFocus: handleFocus,
     onBlur: handleBlur,
+    onClick: handleClick,
     'aria-describedby': mergedDescribedBy,
   });
 
