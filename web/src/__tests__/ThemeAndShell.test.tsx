@@ -953,8 +953,8 @@ describe('LibraryContext, Layout AppShell, & AppRoutes', () => {
 
     // Persistent AuthenticatedShell did NOT remount LibraryProvider or re-fetch /api/v1/auth/me
     expect(meFetchCount).toBe(1);
-    // Only StoragePage's own pre-Task-7 fetch ran (+1), not an extra LibraryProvider mount fetch
-    expect(libraryFetchCount).toBe(libsAfterHomeMount + 1);
+    // StoragePage consumes useLibrary() directly, so navigating to /storage triggers zero redundant fetches
+    expect(libraryFetchCount).toBe(libsAfterHomeMount);
 
     // Logout clears token and redirects to /login
     await user.click(screen.getByRole('button', { name: '退出登录' }));
