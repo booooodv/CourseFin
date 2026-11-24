@@ -1,13 +1,19 @@
 package updater_test
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -725,4 +731,851 @@ func TestCheckNowConcurrentBusy(t *testing.T) {
 	if err := <-errCh; err != nil {
 		t.Fatalf("first CheckNow failed: %v", err)
 	}
+}
+
+type tarTestEntry struct {
+	name     string
+	content  []byte
+	mode     int64
+	typeflag byte
+	linkname string
+}
+
+func buildReleaseTarGz(t *testing.T, entryName string, content []byte, mode int64) []byte {
+	t.Helper()
+	return buildTarGzWithEntries(t, []tarTestEntry{
+		{
+			name:     entryName,
+			content:  content,
+			mode:     mode,
+			typeflag: tar.TypeReg,
+		},
+	})
+}
+
+func buildTarGzWithEntries(t *testing.T, entries []tarTestEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	for _, entry := range entries {
+		tf := entry.typeflag
+		if tf == 0 {
+			tf = tar.TypeReg
+		}
+		hdr := &tar.Header{
+			Name:     entry.name,
+			Mode:     entry.mode,
+			Size:     int64(len(entry.content)),
+			Typeflag: tf,
+			Linkname: entry.linkname,
+		}
+		if tf == tar.TypeSymlink || tf == tar.TypeLink || tf == tar.TypeDir {
+			hdr.Size = 0
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("tar WriteHeader(%q): %v", entry.name, err)
+		}
+		if hdr.Size > 0 {
+			if _, err := tw.Write(entry.content); err != nil {
+				t.Fatalf("tar Write(%q): %v", entry.name, err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar Close: %v", err)
+	}
+	if err := gzw.Close(); err != nil {
+		t.Fatalf("gzip Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func versionStubScript(version string) []byte {
+	return []byte(fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo %q\n  exit 0\nfi\nexit 1\n", version))
+}
+
+func sha256HexBytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func runBinaryVersion(t *testing.T, binPath string) string {
+	t.Helper()
+	out, err := exec.Command(binPath, "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("exec %q --version failed: %v (output: %s)", binPath, err, string(out))
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func assertNoMatchingEntry(t *testing.T, dir, prefix string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		t.Fatalf("ReadDir(%q): %v", dir, err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			t.Fatalf("unexpected leftover temp file %q in %q", entry.Name(), dir)
+		}
+	}
+}
+
+func newApplyMockClient(t *testing.T, assetName string, archiveBytes []byte, checksumsContent string) *http.Client {
+	t.Helper()
+	releaseURL := "https://api.github.example/repos/booooodv/CourseFin/releases/latest"
+	assetURL := "https://github.example/booooodv/CourseFin/releases/download/v1.2.0/" + assetName
+	checksumsURL := "https://github.example/booooodv/CourseFin/releases/download/v1.2.0/checksums.txt"
+
+	return newHandlerHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.String() {
+		case releaseURL:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{
+				"tag_name": "v1.2.0",
+				"name": "CourseFin v1.2.0",
+				"body": "Notes",
+				"html_url": "https://github.example/booooodv/CourseFin/releases/tag/v1.2.0",
+				"published_at": "2026-11-24T12:00:00Z",
+				"draft": false,
+				"prerelease": false,
+				"assets": [
+					{"name": %q, "size": %d, "browser_download_url": %q},
+					{"name": "checksums.txt", "size": %d, "browser_download_url": %q}
+				]
+			}`, assetName, len(archiveBytes), assetURL, len(checksumsContent), checksumsURL)
+		case checksumsURL:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(checksumsContent))
+		case assetURL:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(archiveBytes)))
+			_, _ = w.Write(archiveBytes)
+		default:
+			t.Errorf("unexpected HTTP request URL: %s", r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestStartApplyDockerModeSuccess(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	dataDir := t.TempDir()
+	managedDir := filepath.Join(t.TempDir(), "managed-bin")
+	if err := os.MkdirAll(managedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	activeBin := filepath.Join(managedDir, "coursefin")
+	if err := os.WriteFile(activeBin, versionStubScript("1.0.1"), 0o755); err != nil {
+		t.Fatalf("write initial stub: %v", err)
+	}
+
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildReleaseTarGz(t, "coursefin", versionStubScript("1.2.0"), 0o755)
+	checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+	svc := updater.NewService(updater.Options{
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		ManagedBinDir:     managedDir,
+		HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+		RestartGraceDelay: 10 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := svc.CheckNow(ctx); err != nil {
+		t.Fatalf("CheckNow failed: %v", err)
+	}
+
+	startSt, err := svc.StartApply(ctx)
+	if err != nil {
+		t.Fatalf("StartApply failed: %v", err)
+	}
+	if startSt.State != "downloading" || startSt.TargetVersion != "1.2.0" {
+		t.Fatalf("unexpected initial StartApply status: %+v", startSt)
+	}
+
+	var req updater.RestartRequest
+	select {
+	case req = <-svc.RestartCh():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for RestartCh; current status: %+v", svc.Status(ctx))
+	}
+	svc.Wait()
+
+	if req.ExecPath != activeBin {
+		t.Fatalf("expected ExecPath %q, got %q", activeBin, req.ExecPath)
+	}
+	backupBin := filepath.Join(managedDir, "coursefin.bak")
+	if req.BackupPath != backupBin {
+		t.Fatalf("expected BackupPath %q, got %q", backupBin, req.BackupPath)
+	}
+	if got := runBinaryVersion(t, activeBin); got != "1.2.0" {
+		t.Fatalf("expected new active binary --version 1.2.0, got %q", got)
+	}
+	if got := runBinaryVersion(t, backupBin); got != "1.0.1" {
+		t.Fatalf("expected backup binary --version 1.0.1, got %q", got)
+	}
+
+	pendingBytes, err := os.ReadFile(filepath.Join(managedDir, ".pending_update"))
+	if err != nil {
+		t.Fatalf("read .pending_update: %v", err)
+	}
+	if strings.TrimSpace(string(pendingBytes)) != "tried" {
+		t.Fatalf("expected .pending_update to contain %q, got %q", "tried", string(pendingBytes))
+	}
+
+	finalSt := svc.Status(ctx)
+	if finalSt.State != "restarting" || finalSt.ProgressPercent != 100 || finalSt.LastError != "" {
+		t.Fatalf("unexpected final status: %+v", finalSt)
+	}
+	assertNoMatchingEntry(t, managedDir, ".coursefin.new.")
+	assertNoMatchingEntry(t, filepath.Join(dataDir, "updates", "staging"), assetName+".part")
+}
+
+func TestStartApplyStandaloneBinarySuccess(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	dataDir := t.TempDir()
+	binDir := t.TempDir()
+	exePath := filepath.Join(binDir, "coursefin")
+	if err := os.WriteFile(exePath, versionStubScript("1.0.1"), 0o755); err != nil {
+		t.Fatalf("write initial binary: %v", err)
+	}
+	resolvedExePath, err := filepath.EvalSymlinks(exePath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", exePath, err)
+	}
+
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildReleaseTarGz(t, "coursefin_1.2.0/coursefin", versionStubScript("1.2.0"), 0o644)
+	checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+	svc := updater.NewService(updater.Options{
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+		ExecutablePath:    func() (string, error) { return exePath, nil },
+		RestartGraceDelay: 10 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := svc.CheckNow(ctx); err != nil {
+		t.Fatalf("CheckNow failed: %v", err)
+	}
+	if _, err := svc.StartApply(ctx); err != nil {
+		t.Fatalf("StartApply failed: %v", err)
+	}
+
+	var req updater.RestartRequest
+	select {
+	case req = <-svc.RestartCh():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for RestartCh; status: %+v", svc.Status(ctx))
+	}
+	svc.Wait()
+
+	if req.ExecPath != resolvedExePath {
+		t.Fatalf("expected ExecPath %q, got %q", resolvedExePath, req.ExecPath)
+	}
+	if req.BackupPath != resolvedExePath+".bak" {
+		t.Fatalf("expected BackupPath %q, got %q", resolvedExePath+".bak", req.BackupPath)
+	}
+	if got := runBinaryVersion(t, resolvedExePath); got != "1.2.0" {
+		t.Fatalf("expected updated binary --version 1.2.0, got %q", got)
+	}
+	if got := runBinaryVersion(t, resolvedExePath+".bak"); got != "1.0.1" {
+		t.Fatalf("expected backup binary --version 1.0.1, got %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(resolvedExePath), ".pending_update")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no .pending_update in standalone mode, got err=%v", err)
+	}
+	finalSt := svc.Status(ctx)
+	if finalSt.State != "restarting" || finalSt.ProgressPercent != 100 {
+		t.Fatalf("unexpected final status: %+v", finalSt)
+	}
+}
+
+func TestStartApplyRejectsTamperedChecksum(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	dataDir := t.TempDir()
+	managedDir := t.TempDir()
+	activeBin := filepath.Join(managedDir, "coursefin")
+	if err := os.WriteFile(activeBin, versionStubScript("1.0.1"), 0o755); err != nil {
+		t.Fatalf("write initial binary: %v", err)
+	}
+
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildReleaseTarGz(t, "coursefin", versionStubScript("1.2.0"), 0o755)
+	badChecksums := fmt.Sprintf("%s  %s\n", strings.Repeat("0", 64), assetName)
+
+	svc := updater.NewService(updater.Options{
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		ManagedBinDir:     managedDir,
+		HTTPClient:        newApplyMockClient(t, assetName, archive, badChecksums),
+		RestartGraceDelay: 5 * time.Millisecond,
+	})
+
+	ctx := context.Background()
+	if _, err := svc.CheckNow(ctx); err != nil {
+		t.Fatalf("CheckNow failed: %v", err)
+	}
+	if _, err := svc.StartApply(ctx); err != nil {
+		t.Fatalf("StartApply failed: %v", err)
+	}
+	svc.Wait()
+
+	select {
+	case req := <-svc.RestartCh():
+		t.Fatalf("unexpected RestartRequest on tampered checksum: %+v", req)
+	default:
+	}
+
+	st := svc.Status(ctx)
+	if st.State != "failed" {
+		t.Fatalf("expected State == failed, got %+v", st)
+	}
+	if !strings.Contains(strings.ToLower(st.LastError), "checksum mismatch") {
+		t.Fatalf("expected LastError to mention checksum mismatch, got %q", st.LastError)
+	}
+	if got := runBinaryVersion(t, activeBin); got != "1.0.1" {
+		t.Fatalf("active binary must remain untouched (1.0.1), got %q", got)
+	}
+	assertNoMatchingEntry(t, filepath.Join(dataDir, "updates", "staging"), assetName+".part")
+}
+
+func TestStartApplyRejectsTarTraversalAndSymlink(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	cases := []struct {
+		name    string
+		entries []tarTestEntry
+	}{
+		{
+			name: "path traversal entry",
+			entries: []tarTestEntry{
+				{name: "coursefin", content: versionStubScript("1.2.0"), mode: 0o755, typeflag: tar.TypeReg},
+				{name: "../evil", content: []byte("boom"), mode: 0o755, typeflag: tar.TypeReg},
+			},
+		},
+		{
+			name: "symlink coursefin entry",
+			entries: []tarTestEntry{
+				{name: "coursefin", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
+			},
+		},
+		{
+			name: "hardlink entry",
+			entries: []tarTestEntry{
+				{name: "coursefin", content: versionStubScript("1.2.0"), mode: 0o755, typeflag: tar.TypeReg},
+				{name: "extra", mode: 0o755, typeflag: tar.TypeLink, linkname: "coursefin"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			managedDir := t.TempDir()
+			activeBin := filepath.Join(managedDir, "coursefin")
+			if err := os.WriteFile(activeBin, versionStubScript("1.0.1"), 0o755); err != nil {
+				t.Fatalf("write initial binary: %v", err)
+			}
+
+			assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+			archive := buildTarGzWithEntries(t, tc.entries)
+			checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+			svc := updater.NewService(updater.Options{
+				DataDir:           dataDir,
+				CurrentVersion:    "1.0.1",
+				APIBase:           "https://api.github.example",
+				ManagedBinDir:     managedDir,
+				HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+				RestartGraceDelay: 5 * time.Millisecond,
+			})
+
+			ctx := context.Background()
+			if _, err := svc.CheckNow(ctx); err != nil {
+				t.Fatalf("CheckNow failed: %v", err)
+			}
+			if _, err := svc.StartApply(ctx); err != nil {
+				t.Fatalf("StartApply failed: %v", err)
+			}
+			svc.Wait()
+
+			select {
+			case req := <-svc.RestartCh():
+				t.Fatalf("unexpected RestartRequest on unsafe tar: %+v", req)
+			default:
+			}
+
+			st := svc.Status(ctx)
+			if st.State != "failed" || st.LastError == "" {
+				t.Fatalf("expected failed state with error, got %+v", st)
+			}
+			if got := runBinaryVersion(t, activeBin); got != "1.0.1" {
+				t.Fatalf("active binary must remain untouched (1.0.1), got %q", got)
+			}
+			assertNoMatchingEntry(t, managedDir, ".coursefin.new.")
+			assertNoMatchingEntry(t, filepath.Join(dataDir, "updates", "staging"), assetName+".part")
+		})
+	}
+}
+
+func TestStartApplyRejectsFailedVersionPreflight(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	cases := []struct {
+		name   string
+		script []byte
+	}{
+		{
+			name:   "mismatched version output",
+			script: versionStubScript("9.9.9"),
+		},
+		{
+			name:   "non-zero exit code",
+			script: []byte("#!/bin/sh\necho '1.2.0'\nexit 1\n"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			managedDir := t.TempDir()
+			activeBin := filepath.Join(managedDir, "coursefin")
+			if err := os.WriteFile(activeBin, versionStubScript("1.0.1"), 0o755); err != nil {
+				t.Fatalf("write initial binary: %v", err)
+			}
+
+			assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+			archive := buildReleaseTarGz(t, "coursefin", tc.script, 0o755)
+			checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+			svc := updater.NewService(updater.Options{
+				DataDir:           dataDir,
+				CurrentVersion:    "1.0.1",
+				APIBase:           "https://api.github.example",
+				ManagedBinDir:     managedDir,
+				HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+				RestartGraceDelay: 5 * time.Millisecond,
+			})
+
+			ctx := context.Background()
+			if _, err := svc.CheckNow(ctx); err != nil {
+				t.Fatalf("CheckNow failed: %v", err)
+			}
+			if _, err := svc.StartApply(ctx); err != nil {
+				t.Fatalf("StartApply failed: %v", err)
+			}
+			svc.Wait()
+
+			select {
+			case req := <-svc.RestartCh():
+				t.Fatalf("unexpected RestartRequest on failed preflight: %+v", req)
+			default:
+			}
+
+			st := svc.Status(ctx)
+			if st.State != "failed" || st.LastError == "" {
+				t.Fatalf("expected failed state with error, got %+v", st)
+			}
+			if got := runBinaryVersion(t, activeBin); got != "1.0.1" {
+				t.Fatalf("active binary must remain untouched (1.0.1), got %q", got)
+			}
+			assertNoMatchingEntry(t, managedDir, ".coursefin.new.")
+			if _, err := os.Stat(activeBin + ".bak"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("backup file must not be created when preflight fails, got err=%v", err)
+			}
+		})
+	}
+}
+
+func TestStartApplyConcurrencyBusy(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	dataDir := t.TempDir()
+	managedDir := t.TempDir()
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildReleaseTarGz(t, "coursefin", versionStubScript("1.2.0"), 0o755)
+	checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+	releaseURL := "https://api.github.example/repos/booooodv/CourseFin/releases/latest"
+	assetURL := "https://github.example/booooodv/CourseFin/releases/download/v1.2.0/" + assetName
+	checksumsURL := "https://github.example/booooodv/CourseFin/releases/download/v1.2.0/checksums.txt"
+
+	downloadStarted := make(chan struct{})
+	releaseDownload := make(chan struct{})
+
+	client := newHandlerHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.String() {
+		case releaseURL:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{
+				"tag_name": "v1.2.0",
+				"name": "CourseFin v1.2.0",
+				"assets": [
+					{"name": %q, "size": %d, "browser_download_url": %q},
+					{"name": "checksums.txt", "size": %d, "browser_download_url": %q}
+				]
+			}`, assetName, len(archive), assetURL, len(checksums), checksumsURL)
+		case checksumsURL:
+			_, _ = w.Write([]byte(checksums))
+		case assetURL:
+			close(downloadStarted)
+			select {
+			case <-releaseDownload:
+			case <-r.Context().Done():
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(archive)))
+			_, _ = w.Write(archive)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	svc := updater.NewService(updater.Options{
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		ManagedBinDir:     managedDir,
+		HTTPClient:        client,
+		RestartGraceDelay: 5 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := svc.CheckNow(ctx); err != nil {
+		t.Fatalf("CheckNow failed: %v", err)
+	}
+	if _, err := svc.StartApply(ctx); err != nil {
+		t.Fatalf("StartApply failed: %v", err)
+	}
+
+	select {
+	case <-downloadStarted:
+	case <-time.After(3 * time.Second):
+		close(releaseDownload)
+		t.Fatalf("timed out waiting for download to start")
+	}
+
+	if st := svc.Status(ctx); st.State != "downloading" {
+		close(releaseDownload)
+		t.Fatalf("expected Status.State == downloading while paused, got %+v", st)
+	}
+	if _, err := svc.StartApply(ctx); !errors.Is(err, updater.ErrBusy) {
+		close(releaseDownload)
+		t.Fatalf("expected ErrBusy for second StartApply, got %v", err)
+	}
+	if _, err := svc.CheckNow(ctx); !errors.Is(err, updater.ErrBusy) {
+		close(releaseDownload)
+		t.Fatalf("expected ErrBusy for CheckNow during apply, got %v", err)
+	}
+
+	close(releaseDownload)
+
+	select {
+	case <-svc.RestartCh():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for RestartCh after unblocking")
+	}
+	svc.Wait()
+}
+
+func TestStartApplyCannotApplyAndMirrorFallback(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	ctx := context.Background()
+
+	// 1. CannotApply before any update is found.
+	noUpdateSvc := updater.NewService(updater.Options{
+		DataDir:        t.TempDir(),
+		CurrentVersion: "1.0.1",
+		ManagedBinDir:  t.TempDir(),
+	})
+	if _, err := noUpdateSvc.StartApply(ctx); !errors.Is(err, updater.ErrCannotApply) {
+		t.Fatalf("expected ErrCannotApply when no update is available, got %v", err)
+	}
+
+	// 2. Mirror-first downloads with direct fallback and no GitHub token sent to mirror.
+	conn, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	dataDir := t.TempDir()
+	managedDir := t.TempDir()
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildReleaseTarGz(t, "coursefin", versionStubScript("1.2.0"), 0o755)
+	checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+	var mu sync.Mutex
+	var mirrorPaths []string
+	var mirrorAuths []string
+	var directPaths []string
+	var directAuths []string
+
+	client := newHandlerHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch r.URL.Host {
+		case "mirror.example":
+			mirrorPaths = append(mirrorPaths, r.URL.Path)
+			mirrorAuths = append(mirrorAuths, r.Header.Get("Authorization"))
+			if strings.HasSuffix(r.URL.Path, "/checksums.txt") {
+				// Simulate mirror failure on checksums.txt so direct fallback runs.
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			if strings.HasSuffix(r.URL.Path, "/"+assetName) {
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(archive)))
+				_, _ = w.Write(archive)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{
+				"tag_name": "v1.2.0",
+				"name": "v1.2.0",
+				"assets": [
+					{"name": %q, "size": %d, "browser_download_url": "https://github.example/booooodv/CourseFin/releases/download/v1.2.0/%s"},
+					{"name": "checksums.txt", "size": %d, "browser_download_url": "https://github.example/booooodv/CourseFin/releases/download/v1.2.0/checksums.txt"}
+				]
+			}`, assetName, len(archive), assetName, len(checksums))
+		case "github.example":
+			directPaths = append(directPaths, r.URL.Path)
+			directAuths = append(directAuths, r.Header.Get("Authorization"))
+			if strings.HasSuffix(r.URL.Path, "/checksums.txt") {
+				_, _ = w.Write([]byte(checksums))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected host %q", r.URL.Host)
+			w.WriteHeader(http.StatusBadGateway)
+		}
+	}))
+
+	svc := updater.NewService(updater.Options{
+		DB:                conn,
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		GitHubToken:       "secret-tok",
+		ManagedBinDir:     managedDir,
+		HTTPClient:        client,
+		RestartGraceDelay: 5 * time.Millisecond,
+	})
+	if _, err := svc.UpdateConfig(ctx, updater.ConfigInput{MirrorURL: strPtr("https://mirror.example")}); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	if _, err := svc.CheckNow(ctx); err != nil {
+		t.Fatalf("CheckNow: %v", err)
+	}
+	if _, err := svc.StartApply(ctx); err != nil {
+		t.Fatalf("StartApply: %v", err)
+	}
+	select {
+	case <-svc.RestartCh():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for RestartCh; status: %+v", svc.Status(ctx))
+	}
+	svc.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, auth := range mirrorAuths {
+		if auth != "" {
+			t.Fatalf("mirror must never receive Authorization header, got %v", mirrorAuths)
+		}
+	}
+	for _, auth := range directAuths {
+		if auth != "" {
+			t.Fatalf("asset download direct host must not receive API Authorization token, got %v", directAuths)
+		}
+	}
+	if len(directPaths) != 1 || !strings.HasSuffix(directPaths[0], "/checksums.txt") {
+		t.Fatalf("expected direct fallback only for checksums.txt, got %v", directPaths)
+	}
+	if len(mirrorPaths) != 3 {
+		t.Fatalf("expected mirror tried for release, checksums, and asset, got %v", mirrorPaths)
+	}
+}
+
+func TestStartApplyChecksumAndArchiveEdgeCases(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hot-exec apply requires linux or darwin")
+	}
+
+	ctx := context.Background()
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+
+	// 1. Uppercase hex in checksums.txt succeeds (case-insensitive verify).
+	t.Run("uppercase checksum accepted", func(t *testing.T) {
+		managedDir := t.TempDir()
+		archive := buildReleaseTarGz(t, "./coursefin", versionStubScript("1.2.0"), 0o755)
+		checksums := fmt.Sprintf("%s  *%s\n", strings.ToUpper(sha256HexBytes(archive)), assetName)
+
+		svc := updater.NewService(updater.Options{
+			DataDir:           t.TempDir(),
+			CurrentVersion:    "1.0.1",
+			APIBase:           "https://api.github.example",
+			ManagedBinDir:     managedDir,
+			HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+			RestartGraceDelay: 5 * time.Millisecond,
+		})
+		if _, err := svc.CheckNow(ctx); err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if _, err := svc.StartApply(ctx); err != nil {
+			t.Fatalf("StartApply: %v", err)
+		}
+		select {
+		case <-svc.RestartCh():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for RestartCh; status: %+v", svc.Status(ctx))
+		}
+		svc.Wait()
+	})
+
+	// 2. Missing entry in checksums.txt fails before download completes.
+	t.Run("missing checksum entry", func(t *testing.T) {
+		managedDir := t.TempDir()
+		archive := buildReleaseTarGz(t, "coursefin", versionStubScript("1.2.0"), 0o755)
+		checksums := fmt.Sprintf("%s  other_platform.tar.gz\n", sha256HexBytes(archive))
+
+		svc := updater.NewService(updater.Options{
+			DataDir:           t.TempDir(),
+			CurrentVersion:    "1.0.1",
+			APIBase:           "https://api.github.example",
+			ManagedBinDir:     managedDir,
+			HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+			RestartGraceDelay: 5 * time.Millisecond,
+		})
+		if _, err := svc.CheckNow(ctx); err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if _, err := svc.StartApply(ctx); err != nil {
+			t.Fatalf("StartApply: %v", err)
+		}
+		svc.Wait()
+		if st := svc.Status(ctx); st.State != "failed" || st.LastError == "" {
+			t.Fatalf("expected failed state when checksum entry missing, got %+v", st)
+		}
+	})
+
+	// 3. Archive without coursefin entry fails cleanly.
+	t.Run("missing coursefin binary in tar", func(t *testing.T) {
+		managedDir := t.TempDir()
+		archive := buildReleaseTarGz(t, "README.md", []byte("hello"), 0o644)
+		checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+
+		svc := updater.NewService(updater.Options{
+			DataDir:           t.TempDir(),
+			CurrentVersion:    "1.0.1",
+			APIBase:           "https://api.github.example",
+			ManagedBinDir:     managedDir,
+			HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+			RestartGraceDelay: 5 * time.Millisecond,
+		})
+		if _, err := svc.CheckNow(ctx); err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if _, err := svc.StartApply(ctx); err != nil {
+			t.Fatalf("StartApply: %v", err)
+		}
+		svc.Wait()
+		if st := svc.Status(ctx); st.State != "failed" || st.LastError == "" {
+			t.Fatalf("expected failed state when binary missing, got %+v", st)
+		}
+	})
+
+	// 4. Oversized (>128 MiB) decompressed entry inside compressed tar is rejected.
+	t.Run("rejects oversized decompressed entry", func(t *testing.T) {
+		const oversized = (128 << 20) + 1024
+		var buf bytes.Buffer
+		gzw := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gzw)
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     "coursefin",
+			Mode:     0o755,
+			Size:     oversized,
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("WriteHeader: %v", err)
+		}
+		zeroChunk := make([]byte, 1<<20)
+		rem := int64(oversized)
+		for rem > 0 {
+			n := int64(len(zeroChunk))
+			if rem < n {
+				n = rem
+			}
+			if _, err := tw.Write(zeroChunk[:n]); err != nil {
+				t.Fatalf("tar Write: %v", err)
+			}
+			rem -= n
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatalf("tar Close: %v", err)
+		}
+		if err := gzw.Close(); err != nil {
+			t.Fatalf("gzip Close: %v", err)
+		}
+
+		archive := buf.Bytes()
+		checksums := fmt.Sprintf("%s  %s\n", sha256HexBytes(archive), assetName)
+		managedDir := t.TempDir()
+
+		svc := updater.NewService(updater.Options{
+			DataDir:           t.TempDir(),
+			CurrentVersion:    "1.0.1",
+			APIBase:           "https://api.github.example",
+			ManagedBinDir:     managedDir,
+			HTTPClient:        newApplyMockClient(t, assetName, archive, checksums),
+			RestartGraceDelay: 5 * time.Millisecond,
+		})
+		if _, err := svc.CheckNow(ctx); err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if _, err := svc.StartApply(ctx); err != nil {
+			t.Fatalf("StartApply: %v", err)
+		}
+		svc.Wait()
+		if st := svc.Status(ctx); st.State != "failed" || st.LastError == "" {
+			t.Fatalf("expected failed state for >128 MiB tar entry, got %+v", st)
+		}
+		assertNoMatchingEntry(t, managedDir, ".coursefin.new.")
+	})
 }

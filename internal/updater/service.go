@@ -219,8 +219,18 @@ func NewService(opts Options) *Service {
 				if len(via) >= 10 {
 					return errors.New("stopped after 10 redirects")
 				}
-				if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
-					req.Header.Del("Authorization")
+				if len(via) > 0 && via[0].URL != nil {
+					initial := via[0].URL
+					schemeDowngraded := strings.EqualFold(initial.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https")
+					for _, prev := range via {
+						if prev.URL != nil && strings.EqualFold(prev.URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+							schemeDowngraded = true
+							break
+						}
+					}
+					if !strings.EqualFold(req.URL.Host, initial.Host) || schemeDowngraded {
+						req.Header.Del("Authorization")
+					}
 				}
 				return nil
 			},
@@ -290,9 +300,11 @@ func (s *Service) Wait() {
 // and runtime eligibility.
 func (s *Service) Status(ctx context.Context) Status {
 	cfg := s.loadSettings(ctx)
+	env := s.evaluateEnvironmentEligibility()
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.statusLocked(cfg)
+	st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
+	s.mu.RUnlock()
+	return s.finalizeStatus(st, env, assetURL, checksumsURL)
 }
 
 // UpdateConfig validates and persists update preferences into app_settings.
@@ -418,9 +430,9 @@ func (s *Service) CheckNow(ctx context.Context) (Status, error) {
 		s.state = stateIdle
 		s.lastCheckedAt = nowStr
 		s.lastError = ""
-		st := s.statusLocked(cfg)
+		st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
 		s.mu.Unlock()
-		return st, nil
+		return s.finalizeStatus(st, s.evaluateEnvironmentEligibility(), assetURL, checksumsURL), nil
 
 	case http.StatusNotFound:
 		s.mu.Lock()
@@ -430,9 +442,9 @@ func (s *Service) CheckNow(ctx context.Context) (Status, error) {
 		s.cachedETagSource = ""
 		s.lastCheckedAt = nowStr
 		s.lastError = ""
-		st := s.statusLocked(cfg)
+		st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
 		s.mu.Unlock()
-		return st, nil
+		return s.finalizeStatus(st, s.evaluateEnvironmentEligibility(), assetURL, checksumsURL), nil
 
 	case http.StatusOK:
 		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxReleaseJSONBytes+1))
@@ -457,9 +469,9 @@ func (s *Service) CheckNow(ctx context.Context) (Status, error) {
 			s.updateETagLocked(respETag, usedSource, repo, cfg.mirrorURL)
 			s.lastCheckedAt = nowStr
 			s.lastError = ""
-			st := s.statusLocked(cfg)
+			st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
 			s.mu.Unlock()
-			return st, nil
+			return s.finalizeStatus(st, s.evaluateEnvironmentEligibility(), assetURL, checksumsURL), nil
 		}
 
 		if _, parseErr := ParseVersion(rel.TagName); parseErr != nil {
@@ -506,9 +518,9 @@ func (s *Service) CheckNow(ctx context.Context) (Status, error) {
 		s.updateETagLocked(respETag, usedSource, repo, cfg.mirrorURL)
 		s.lastCheckedAt = nowStr
 		s.lastError = ""
-		st := s.statusLocked(cfg)
+		st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
 		s.mu.Unlock()
-		return st, nil
+		return s.finalizeStatus(st, s.evaluateEnvironmentEligibility(), assetURL, checksumsURL), nil
 
 	default:
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -564,9 +576,9 @@ func (s *Service) finishCheckError(cfg persistentSettings, err error) (Status, e
 	s.mu.Lock()
 	s.state = stateIdle
 	s.lastError = err.Error()
-	st := s.statusLocked(cfg)
+	st, assetURL, checksumsURL := s.snapshotStatusLocked(cfg)
 	s.mu.Unlock()
-	return st, err
+	return s.finalizeStatus(st, s.evaluateEnvironmentEligibility(), assetURL, checksumsURL), err
 }
 
 func (s *Service) isBusyLocked() bool {
@@ -604,8 +616,7 @@ func (s *Service) updateETagLocked(etag, source, repo, mirrorURL string) {
 	s.cachedETagMirror = mirrorURL
 }
 
-func (s *Service) statusLocked(cfg persistentSettings) Status {
-	deployMode, canApply, cannotReason := s.evaluateEligibility(s.updateAvailable, s.assetURL, s.checksumsURL)
+func (s *Service) snapshotStatusLocked(cfg persistentSettings) (Status, string, string) {
 	return Status{
 		CurrentVersion:       s.currentVersion,
 		LatestVersion:        s.latestVersion,
@@ -616,10 +627,7 @@ func (s *Service) statusLocked(cfg persistentSettings) Status {
 		PublishedAt:          s.publishedAt,
 		AssetName:            s.assetName,
 		AssetSize:            s.assetSize,
-		DeployMode:           deployMode,
 		Platform:             fmt.Sprintf("%s/%s", s.goos, s.goarch),
-		CanApply:             canApply,
-		CannotApplyReason:    cannotReason,
 		AutoCheckEnabled:     cfg.autoCheckEnabled,
 		AutoCheckLockedByEnv: cfg.autoCheckLockedByEnv,
 		CheckIntervalHours:   cfg.checkIntervalHours,
@@ -631,7 +639,15 @@ func (s *Service) statusLocked(cfg persistentSettings) Status {
 		ProgressPercent:      s.progressPercent,
 		LastCheckedAt:        s.lastCheckedAt,
 		LastError:            s.lastError,
-	}
+	}, s.assetURL, s.checksumsURL
+}
+
+func (s *Service) finalizeStatus(st Status, env environmentEligibility, assetURL, checksumsURL string) Status {
+	deployMode, canApply, cannotReason := s.applyReleaseEligibility(env, st.UpdateAvailable, assetURL, checksumsURL)
+	st.DeployMode = deployMode
+	st.CanApply = canApply
+	st.CannotApplyReason = cannotReason
+	return st
 }
 
 func (s *Service) loadSettings(ctx context.Context) persistentSettings {
@@ -679,39 +695,71 @@ func (s *Service) loadSettings(ctx context.Context) persistentSettings {
 	return res
 }
 
-func (s *Service) evaluateEligibility(updateAvailable bool, assetURL, checksumsURL string) (deployMode string, canApply bool, reason string) {
-	deployMode = "binary"
+type environmentEligibility struct {
+	deployMode string
+	targetPath string
+	canApply   bool
+	reason     string
+}
+
+func (s *Service) evaluateEnvironmentEligibility() environmentEligibility {
+	deployMode := "binary"
 	if s.managedBinDir != "" {
 		deployMode = "docker"
 	}
 
 	if (s.goos != "linux" && s.goos != "darwin") || (s.goos == runtime.GOOS && !SupportsHotExec()) {
-		return deployMode, false, "当前操作系统不支持应用内热替换，请前往 GitHub Releases 手动下载更新"
+		return environmentEligibility{
+			deployMode: deployMode,
+			reason:     "当前操作系统不支持应用内热替换，请前往 GitHub Releases 手动下载更新",
+		}
 	}
 
 	if !IsValidSemVer(s.currentVersion) {
-		return deployMode, false, "当前为开发构建版本，不支持自动覆盖更新"
+		return environmentEligibility{
+			deployMode: deployMode,
+			reason:     "当前为开发构建版本，不支持自动覆盖更新",
+		}
 	}
 
 	targetPath, err := s.resolveTargetBinaryPath()
 	if err != nil {
-		return deployMode, false, "程序所在目录无写入权限，无法执行自动更新"
+		return environmentEligibility{
+			deployMode: deployMode,
+			reason:     "程序所在目录无写入权限，无法执行自动更新",
+		}
 	}
 	targetDir := filepath.Dir(targetPath)
 	if s.managedBinDir != "" {
 		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			return deployMode, false, "程序所在目录无写入权限，无法执行自动更新"
+			return environmentEligibility{
+				deployMode: deployMode,
+				reason:     "程序所在目录无写入权限，无法执行自动更新",
+			}
 		}
 	}
 	if err := checkDirWritable(targetDir); err != nil {
-		return deployMode, false, "程序所在目录无写入权限，无法执行自动更新"
+		return environmentEligibility{
+			deployMode: deployMode,
+			reason:     "程序所在目录无写入权限，无法执行自动更新",
+		}
 	}
 
+	return environmentEligibility{
+		deployMode: deployMode,
+		targetPath: targetPath,
+		canApply:   true,
+	}
+}
+
+func (s *Service) applyReleaseEligibility(env environmentEligibility, updateAvailable bool, assetURL, checksumsURL string) (deployMode string, canApply bool, reason string) {
+	if !env.canApply {
+		return env.deployMode, false, env.reason
+	}
 	if updateAvailable && (assetURL == "" || checksumsURL == "") {
-		return deployMode, false, fmt.Sprintf("该发布版本缺少当前平台 (%s/%s) 的更新包或校验文件", s.goos, s.goarch)
+		return env.deployMode, false, fmt.Sprintf("该发布版本缺少当前平台 (%s/%s) 的更新包或校验文件", s.goos, s.goarch)
 	}
-
-	return deployMode, true, ""
+	return env.deployMode, true, ""
 }
 
 func (s *Service) resolveTargetBinaryPath() (string, error) {
