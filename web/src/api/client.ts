@@ -10,6 +10,7 @@ import type {
   CreateCourseInput,
   DeleteLibraryOptions,
   FsBrowseResponse,
+  HealthStatus,
   HomeResponse,
   ImportPreview,
   IndexedDir,
@@ -30,8 +31,10 @@ import type {
   SetupStatusResponse,
   StorageSource,
   Tag,
+  UpdateConfigInput,
   UpdateCourseInput,
   UpdateSettingsInput,
+  UpdateStatus,
 } from '../types/coursefin';
 
 export const TOKEN_STORAGE_KEY = 'coursefin_token';
@@ -483,5 +486,29 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input),
     });
+  },
+
+  // System Update & Health
+  getUpdateStatus(): Promise<UpdateStatus> {
+    return request<UpdateStatus>('/api/v1/system/update', { cache: 'no-store' });
+  },
+  updateUpdateConfig(input: UpdateConfigInput): Promise<UpdateStatus> {
+    return request<UpdateStatus>('/api/v1/system/update/config', {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  },
+  checkForUpdate(): Promise<UpdateStatus> {
+    return request<UpdateStatus>('/api/v1/system/update/check', {
+      method: 'POST',
+    });
+  },
+  applyUpdate(): Promise<UpdateStatus> {
+    return request<UpdateStatus>('/api/v1/system/update/apply', {
+      method: 'POST',
+    });
+  },
+  getHealth(): Promise<HealthStatus> {
+    return request<HealthStatus>('/health', { cache: 'no-store' }, false);
   },
 };

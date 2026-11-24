@@ -423,3 +423,51 @@ export interface ApplyAIProposalInput {
   tags: string[];
   chapters: ProposalChapter[];
 }
+
+export type UpdateState =
+  | 'idle'
+  | 'checking'
+  | 'downloading'
+  | 'verifying'
+  | 'applying'
+  | 'restarting'
+  | 'failed';
+
+export interface UpdateStatus {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  release_name: string;
+  release_notes: string;
+  release_url: string;
+  published_at: string;
+  asset_name: string;
+  asset_size: number;
+  deploy_mode: string;
+  platform: string;
+  can_apply: boolean;
+  cannot_apply_reason: string;
+  auto_check_enabled: boolean;
+  auto_check_locked_by_env: boolean;
+  check_interval_hours: number;
+  mirror_url: string;
+  state: UpdateState;
+  target_version: string;
+  progress_bytes: number;
+  total_bytes: number;
+  progress_percent: number;
+  last_checked_at: string;
+  last_error: string;
+}
+
+export interface UpdateConfigInput {
+  auto_check_enabled?: boolean;
+  check_interval_hours?: number;
+  mirror_url?: string;
+}
+
+export interface HealthStatus {
+  status: string;
+  version: string;
+  boot_id: string;
+}

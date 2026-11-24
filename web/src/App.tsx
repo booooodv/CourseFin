@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { getToken } from './api/client';
 import Layout from './components/Layout';
 import { ToastProvider } from './components/Toast';
+import { UpdateProvider } from './components/UpdateContext';
 import CourseDetailPage from './pages/CourseDetailPage';
 import CourseEditorPage from './pages/CourseEditorPage';
 import HomePage from './pages/HomePage';
@@ -80,9 +81,11 @@ export function AppRoutes() {
 export default function App() {
   return (
     <ToastProvider>
-      <BrowserRouter basename="/web">
-        <AppRoutes />
-      </BrowserRouter>
+      <UpdateProvider>
+        <BrowserRouter basename="/web">
+          <AppRoutes />
+        </BrowserRouter>
+      </UpdateProvider>
     </ToastProvider>
   );
 }
