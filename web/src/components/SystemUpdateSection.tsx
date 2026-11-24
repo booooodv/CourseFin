@@ -25,6 +25,9 @@ export interface SystemUpdateSectionProps {
 
 const DEFAULT_INTERVAL_OPTIONS = [1, 6, 12, 24];
 
+const FIELD_INPUT_CLASS =
+  'w-full rounded-xl border border-default bg-subtle/60 px-3.5 py-2 text-sm text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors disabled:opacity-50';
+
 function defaultReload(): void {
   if (typeof window !== 'undefined' && window.location) {
     window.location.reload();
@@ -355,17 +358,17 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
   return (
     <section
       id="system-update"
-      className="rounded-2xl border border-slate-800 bg-slate-900/75 p-5 space-y-5"
+      className="rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-5"
     >
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-300">
+        <div className="flex items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-status-success-soft text-status-success-ink">
             <ArrowUpCircle className="h-4 w-4" aria-hidden="true" />
           </span>
           <div>
-            <h2 className="text-base font-semibold text-white">系统版本与在线更新</h2>
-            <p className="text-xs text-slate-400">
+            <h2 className="text-base font-semibold text-ink-primary">系统版本与在线更新</h2>
+            <p className="text-xs text-ink-muted">
               查看当前运行版本、自动检查 GitHub Releases 新版本并一键热更新。
             </p>
           </div>
@@ -376,7 +379,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
             type="button"
             disabled={checking || isUpdateBusy || loading}
             onClick={() => void handleCheckNow()}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-3.5 py-2 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary disabled:opacity-50 transition-colors cursor-pointer"
           >
             {checking ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
@@ -390,64 +393,64 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
 
       {/* Status metadata badges */}
       {loading && !status ? (
-        <div className="flex items-center gap-2 text-xs text-slate-400 py-2">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" aria-hidden="true" />
+        <div className="flex items-center gap-2 text-xs text-ink-muted py-2">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden="true" />
           <span>正在获取版本与更新状态...</span>
         </div>
       ) : !status ? (
-        <p className="text-xs text-slate-500">暂未获取到版本更新状态。</p>
+        <p className="text-xs text-ink-muted">暂未获取到版本更新状态。</p>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1 text-slate-300">
-              <span className="text-slate-400">当前版本</span>
-              <span className="font-mono font-semibold text-white">{currentVersionLabel}</span>
+            <span className="inline-flex items-center gap-1.5 rounded-xl border border-subtle bg-subtle px-2.5 py-1 text-ink-secondary">
+              <span className="text-ink-muted">当前版本</span>
+              <span className="font-mono font-semibold text-ink-primary">{currentVersionLabel}</span>
             </span>
-            <span className="inline-flex items-center rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 font-medium text-indigo-300">
+            <span className="inline-flex items-center rounded-xl border border-accent-ring bg-accent-soft px-2.5 py-1 font-medium text-accent-ink">
               {deployModeLabel}
             </span>
             {status.platform && (
-              <span className="inline-flex items-center rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1 font-mono text-slate-300">
+              <span className="inline-flex items-center rounded-xl border border-subtle bg-subtle px-2.5 py-1 font-mono text-ink-secondary">
                 {status.platform}
               </span>
             )}
-            <span className="text-slate-400 ml-auto">
+            <span className="text-ink-muted ml-auto">
               上次检查：{formatTimestamp(status.last_checked_at)}
             </span>
           </div>
 
           {/* Restart recovery banners */}
           {restartPhase === 'waiting' && (
-            <div className="flex items-center gap-2.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-xs text-indigo-200">
-              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-indigo-400" aria-hidden="true" />
+            <div className="flex items-center gap-2.5 rounded-2xl border border-accent-ring bg-accent-soft px-4 py-3 text-xs font-medium text-accent-ink">
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-accent" aria-hidden="true" />
               <span>正在等待服务重启完成，新版本就绪后将自动刷新页面...</span>
             </div>
           )}
 
           {restartPhase === 'succeeded' && (
-            <div className="flex items-center gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-xs text-emerald-200">
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" aria-hidden="true" />
+            <div className="flex items-center gap-2.5 rounded-2xl border border-status-success/30 bg-status-success-soft px-4 py-3 text-xs font-medium text-status-success-ink">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success-ink" aria-hidden="true" />
               <span>已更新至 {currentVersionLabel}，正在刷新页面...</span>
             </div>
           )}
 
           {restartPhase === 'rolled_back' && (
-            <div className="flex items-start gap-2.5 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-200">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
+            <div className="flex items-start gap-2.5 rounded-2xl border border-status-danger/30 bg-status-danger-soft px-4 py-3 text-xs font-medium text-status-danger-ink">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-danger-ink" aria-hidden="true" />
               <span>{restartError || '新版本启动失败，已自动回滚至原版本'}</span>
             </div>
           )}
 
           {restartPhase === 'timeout' && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-status-warning/30 bg-status-warning-soft px-4 py-3 text-xs font-medium text-status-warning-ink">
               <div className="flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+                <AlertTriangle className="h-4 w-4 shrink-0 text-status-warning-ink" aria-hidden="true" />
                 <span>{restartError || '等待服务重启超时，请点击“立即刷新”检查服务状态。'}</span>
               </div>
               <button
                 type="button"
                 onClick={() => (onReload ?? defaultReload)()}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/40 bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-500/30 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-status-warning/40 bg-card px-3 py-1.5 text-xs font-semibold text-status-warning-ink hover:bg-subtle transition-colors cursor-pointer"
               >
                 <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>立即刷新</span>
@@ -456,26 +459,26 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
           )}
 
           {displayError && (
-            <div className="flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3.5 py-2.5 text-xs text-rose-200">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
+            <div className="flex items-start gap-2 rounded-2xl border border-status-danger/30 bg-status-danger-soft px-3.5 py-2.5 text-xs font-medium text-status-danger-ink">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-danger-ink" aria-hidden="true" />
               <span>{displayError}</span>
             </div>
           )}
 
           {/* Live download / verify / apply progress */}
           {showProgressPanel && (
-            <div className="rounded-xl border border-indigo-500/30 bg-slate-950/70 p-4 space-y-2.5">
+            <div className="rounded-2xl border border-accent-ring bg-subtle p-4 space-y-2.5">
               <div className="flex items-center justify-between gap-2 text-xs">
-                <div className="flex items-center gap-2 font-medium text-indigo-200">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" aria-hidden="true" />
+                <div className="flex items-center gap-2 font-medium text-accent-ink">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" aria-hidden="true" />
                   <span>{getProgressStageLabel(status.state)}</span>
                   {(status.target_version || status.latest_version) && (
-                    <span className="font-mono text-emerald-300">
+                    <span className="font-mono font-semibold text-status-success-ink">
                       {formatVersionLabel(status.target_version || status.latest_version)}
                     </span>
                   )}
                 </div>
-                <span className="font-mono font-semibold text-white">{progressPercent}%</span>
+                <span className="font-mono font-semibold text-ink-primary">{progressPercent}%</span>
               </div>
 
               <div
@@ -484,16 +487,16 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                 aria-valuenow={progressPercent}
                 aria-valuemin={0}
                 aria-valuemax={100}
-                className="h-2.5 w-full overflow-hidden rounded-full bg-slate-800"
+                className="h-2.5 w-full overflow-hidden rounded-full bg-muted"
               >
                 <div
-                  className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-indigo-500 transition-all duration-300"
+                  className="h-full rounded-full bg-gradient-to-r from-status-success to-accent transition-all duration-300"
                   style={{ width: `${progressPercent}%` }}
                 />
               </div>
 
               {(status.state === 'downloading' || status.total_bytes > 0 || status.progress_bytes > 0) && (
-                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <div className="flex items-center justify-between text-[11px] text-ink-muted">
                   <span>{status.asset_name || '更新包'}</span>
                   <span className="font-mono">
                     {status.total_bytes > 0
@@ -508,24 +511,24 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
           {/* Up-to-date vs Update available card */}
           {!status.update_available ? (
             !showProgressPanel && (
-              <div className="flex items-center gap-2.5 rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-xs text-slate-300">
-                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" aria-hidden="true" />
+              <div className="flex items-center gap-2.5 rounded-2xl border border-subtle bg-subtle/70 px-4 py-3 text-xs text-ink-secondary">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success-ink" aria-hidden="true" />
                 <span>当前已是最新版本（{currentVersionLabel}）。</span>
               </div>
             )
           ) : (
-            <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 space-y-3.5">
+            <div className="rounded-2xl border border-status-success/30 bg-status-success-soft p-4 space-y-3.5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-semibold text-white">
+                    <span className="text-sm font-semibold text-ink-primary">
                       {status.release_name || `新版本 ${latestVersionLabel}`}
                     </span>
-                    <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 font-mono text-[11px] font-semibold text-emerald-300">
+                    <span className="rounded-full border border-status-success/40 bg-card px-2.5 py-0.5 font-mono text-[11px] font-semibold text-status-success-ink">
                       {latestVersionLabel}
                     </span>
                   </div>
-                  <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] text-ink-secondary">
                     {status.published_at && (
                       <span>发布时间：{formatTimestamp(status.published_at)}</span>
                     )}
@@ -543,7 +546,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                     href={safeReleaseUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-xs font-medium text-indigo-300 hover:text-indigo-200 underline underline-offset-2"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-accent-ink hover:opacity-80 underline underline-offset-2"
                   >
                     <span>GitHub Releases</span>
                     <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
@@ -552,19 +555,19 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
               </div>
 
               {status.release_notes && (
-                <div className="rounded-xl border border-slate-800 bg-slate-950/75 p-3 max-h-52 overflow-y-auto">
-                  <p className="text-[11px] font-medium text-slate-400 mb-1.5">
+                <div className="rounded-2xl border border-subtle bg-card/85 p-3.5 max-h-52 overflow-y-auto">
+                  <p className="text-[11px] font-medium text-ink-muted mb-1.5">
                     更新说明（Release Notes）
                   </p>
-                  <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-relaxed text-slate-200">
+                  <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-relaxed text-ink-primary">
                     {status.release_notes}
                   </pre>
                 </div>
               )}
 
               {!status.can_apply && (
-                <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-200">
-                  <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+                <div className="flex items-start gap-2 rounded-2xl border border-status-warning/30 bg-status-warning-soft px-3.5 py-2.5 text-xs font-medium text-status-warning-ink">
+                  <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-status-warning-ink" aria-hidden="true" />
                   <span>
                     {status.cannot_apply_reason ||
                       '当前环境不支持应用内一键更新，请前往 GitHub Releases 手动下载更新。'}
@@ -587,7 +590,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                       setModalError(null);
                       setConfirmOpen(true);
                     }}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-status-success px-4 py-2 text-xs font-semibold text-ink-inverse shadow-card hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>立即更新到 {latestVersionLabel}</span>
@@ -598,12 +601,12 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
           )}
 
           {/* Update preferences sub-form */}
-          <form onSubmit={handleSaveConfig} className="border-t border-slate-800/80 pt-4 space-y-4">
-            <h3 className="text-xs font-semibold text-slate-300">自动检查与加速代理设置</h3>
+          <form onSubmit={handleSaveConfig} className="border-t border-subtle pt-5 space-y-4">
+            <h3 className="text-xs font-semibold text-ink-secondary">自动检查与加速代理设置</h3>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-200 cursor-pointer">
+                <label className="inline-flex items-center gap-2 text-xs font-medium text-ink-primary cursor-pointer">
                   <input
                     id="update-auto-check"
                     type="checkbox"
@@ -614,16 +617,16 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                       setConfigDirty(true);
                       setConfigError(null);
                     }}
-                    className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-indigo-500 disabled:opacity-50"
+                    className="h-4 w-4 rounded border-default bg-card text-accent focus:ring-2 focus:ring-accent-ring disabled:opacity-50"
                   />
                   <span>自动检查更新</span>
                 </label>
                 {status.auto_check_locked_by_env ? (
-                  <p className="text-[11px] text-amber-300/90">
+                  <p className="text-[11px] font-medium text-status-warning-ink">
                     已由环境变量 COURSEFIN_UPDATE_AUTO_CHECK 锁定，无法在此修改。
                   </p>
                 ) : (
-                  <p className="text-[11px] text-slate-400">
+                  <p className="text-[11px] text-ink-muted">
                     开启后将在后台按设定周期静默检测新版本并提示。
                   </p>
                 )}
@@ -632,7 +635,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
               <div className="space-y-1.5">
                 <label
                   htmlFor="update-check-interval"
-                  className="block text-xs font-medium text-slate-300"
+                  className="block text-xs font-medium text-ink-secondary"
                 >
                   检查间隔
                 </label>
@@ -645,7 +648,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                     setConfigDirty(true);
                     setConfigError(null);
                   }}
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none disabled:opacity-50"
+                  className={FIELD_INPUT_CLASS}
                 >
                   {intervalOptions.map((hrs) => (
                     <option key={hrs} value={String(hrs)}>
@@ -658,7 +661,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
               <div className="space-y-1.5 sm:col-span-2">
                 <label
                   htmlFor="update-mirror-url"
-                  className="block text-xs font-medium text-slate-300"
+                  className="block text-xs font-medium text-ink-secondary"
                 >
                   GitHub 加速代理前缀
                 </label>
@@ -674,16 +677,16 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                     setConfigError(null);
                   }}
                   placeholder="https://gh-proxy.com"
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none disabled:opacity-50"
+                  className={FIELD_INPUT_CLASS}
                 />
-                <p className="text-[11px] text-slate-400">
+                <p className="text-[11px] text-ink-muted">
                   可选。仅填写可信加速代理地址（支持 http:// 或 https://），留空则直连 GitHub；失败时将自动回退直连。
                 </p>
               </div>
             </div>
 
             {configError && (
-              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3.5 py-2 text-xs text-rose-200">
+              <div className="rounded-2xl border border-status-danger/30 bg-status-danger-soft px-3.5 py-2.5 text-xs font-medium text-status-danger-ink">
                 {configError}
               </div>
             )}
@@ -693,7 +696,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                 <button
                   type="submit"
                   disabled={savingConfig || isUpdateBusy}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-4 py-2 text-xs font-semibold text-ink-primary hover:bg-muted disabled:opacity-50 transition-colors cursor-pointer"
                 >
                   {savingConfig ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
@@ -711,18 +714,18 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
       {/* Confirmation Modal */}
       {confirmOpen && status && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="system-update-confirm-title"
         >
-          <div className="w-full max-w-md overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
+          <div className="w-full max-w-md overflow-hidden rounded-3xl border border-subtle bg-popover shadow-float">
+            <div className="flex items-center justify-between border-b border-subtle px-6 py-4">
               <div className="flex items-center gap-2.5">
-                <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-300">
+                <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-status-success-soft text-status-success-ink">
                   <ArrowUpCircle className="h-4 w-4" aria-hidden="true" />
                 </span>
-                <h3 id="system-update-confirm-title" className="text-base font-bold text-white">
+                <h3 id="system-update-confirm-title" className="text-base font-bold text-ink-primary">
                   确认更新到 {latestVersionLabel}
                 </h3>
               </div>
@@ -733,38 +736,38 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                   aria-label="关闭"
                   disabled={submittingApply}
                   onClick={() => setConfirmOpen(false)}
-                  className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors disabled:opacity-50"
+                  className="rounded-lg p-1.5 text-ink-muted hover:bg-subtle hover:text-ink-primary transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   <X className="h-5 w-5" />
                 </button>
               </Tooltip>
             </div>
 
-            <div className="p-5 space-y-3.5">
-              <p className="text-sm text-slate-200">
+            <div className="p-6 space-y-3.5">
+              <p className="text-sm text-ink-secondary">
                 即将把 CourseFin 从{' '}
-                <strong className="font-mono text-white">{currentVersionLabel}</strong> 更新到{' '}
-                <strong className="font-mono text-emerald-300">{latestVersionLabel}</strong>（
+                <strong className="font-mono text-ink-primary">{currentVersionLabel}</strong> 更新到{' '}
+                <strong className="font-mono text-status-success-ink">{latestVersionLabel}</strong>（
                 {deployModeLabel}）。
               </p>
 
-              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-200">
+              <div className="rounded-2xl border border-status-warning/30 bg-status-warning-soft p-3.5 text-xs leading-relaxed text-status-warning-ink">
                 更新校验完成后服务将自动重启，正在进行的视频播放会短暂中断；您的全部课程目录、媒体库配置与观看进度将完整保留，若新版本启动异常会自动回滚。
               </div>
 
               {modalError && (
-                <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3.5 py-2 text-xs text-rose-200">
+                <div className="rounded-2xl border border-status-danger/30 bg-status-danger-soft px-3.5 py-2.5 text-xs font-medium text-status-danger-ink">
                   {modalError}
                 </div>
               )}
             </div>
 
-            <div className="flex items-center justify-end gap-2.5 border-t border-slate-800 bg-slate-900/95 px-5 py-3.5">
+            <div className="flex items-center justify-end gap-2.5 border-t border-subtle bg-subtle/40 px-6 py-3.5">
               <button
                 type="button"
                 disabled={submittingApply}
                 onClick={() => setConfirmOpen(false)}
-                className="rounded-xl border border-slate-700 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-50 transition-colors"
+                className="rounded-xl border border-default bg-card px-4 py-2 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary disabled:opacity-50 transition-colors cursor-pointer"
               >
                 取消
               </button>
@@ -772,7 +775,7 @@ export function SystemUpdateSection({ onReload }: SystemUpdateSectionProps) {
                 type="button"
                 disabled={submittingApply}
                 onClick={() => void handleConfirmApply()}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-status-success px-4 py-2 text-xs font-semibold text-ink-inverse shadow-card hover:opacity-90 disabled:opacity-50 transition-all cursor-pointer"
               >
                 {submittingApply ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />

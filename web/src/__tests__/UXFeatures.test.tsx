@@ -1012,4 +1012,73 @@ describe('SettingsPage copy fallback & tooltips', () => {
     await user.click(copyUrlBtn);
     expect(await screen.findByText('复制失败，请手动选中复制')).toBeInTheDocument();
   });
+
+  it('renders SettingsPage cards and active sessions with dual-theme semantic classes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse({
+            server_name: 'CourseFin Studio',
+            scan_interval_minutes: 60,
+            base_url_hint: 'http://192.168.1.20:8096',
+            jellyfin_username: 'admin',
+            ai_base_url: 'https://api.openai.com/v1',
+            ai_api_key: '****',
+            ai_api_key_set: true,
+            ai_model: 'gpt-4o-mini',
+            ai_max_subtitle_chars: 4000,
+          });
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({
+            sessions: [
+              {
+                token: 'test-token',
+                user_id: 'u1',
+                device_id: 'web-main',
+                device_name: 'Chrome Desktop',
+                client_name: 'CourseFin Web',
+                client_version: '1.0.1',
+                last_active_at: '2026-11-24T12:00:00Z',
+                created_at: '2026-11-24T10:00:00Z',
+              },
+            ],
+          });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse({
+            user: { id: 'u1', username: 'admin', created_at: '', updated_at: '' },
+            session: {
+              token: 'test-token',
+              user_id: 'u1',
+              device_id: 'web-main',
+              device_name: 'Chrome Desktop',
+              client_name: 'CourseFin Web',
+              client_version: '1.0.1',
+              last_active_at: '2026-11-24T12:00:00Z',
+              created_at: '2026-11-24T10:00:00Z',
+            },
+          });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const { container } = render(
+      <ToastProvider>
+        <MemoryRouter>
+          <SettingsPage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText('Jellyfin 客户端连接指南')).toBeInTheDocument();
+    expect(screen.getByText('当前会话')).toBeInTheDocument();
+    expect(document.getElementById('system-update')).toBeInTheDocument();
+    expect(container.innerHTML).not.toMatch(
+      /\b(?:bg|text|border|ring|from|to|via)-(?:slate|indigo|rose|emerald|amber|sky)-/,
+    );
+  });
 });

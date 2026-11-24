@@ -1923,4 +1923,67 @@ describe('SystemUpdate UI — Layout & SettingsPage', () => {
     await user.click(screen.getByRole('button', { name: /检查更新/ }));
     expect(await within(sectionEl).findByText('check failed after timeout')).toBeInTheDocument();
   });
+
+  it('renders SystemUpdateSection and confirmation modal with dual-theme semantic classes and closes modal on Escape', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/settings')) {
+          return jsonResponse(makeSettingsResponse());
+        }
+        if (url.endsWith('/api/v1/sessions')) {
+          return jsonResponse({ sessions: [] });
+        }
+        if (url.endsWith('/api/v1/auth/me')) {
+          return jsonResponse(makeMeResponse());
+        }
+        if (url === '/api/v1/system/update' && method === 'GET') {
+          return jsonResponse(
+            makeStatus({
+              update_available: true,
+              latest_version: '1.0.2',
+              can_apply: true,
+              release_notes: 'Semantic dual-theme release notes',
+            }),
+          );
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    const { container } = render(
+      <ToastProvider>
+        <UpdateProvider>
+          <MemoryRouter initialEntries={['/settings']}>
+            <SettingsPage />
+          </MemoryRouter>
+        </UpdateProvider>
+      </ToastProvider>,
+    );
+
+    const updateBtn = await screen.findByRole('button', { name: /立即更新到 v1\.0\.2/ });
+    const sectionEl = updateBtn.closest('#system-update') as HTMLElement;
+    expect(sectionEl).toBeInTheDocument();
+    expect(sectionEl.innerHTML).not.toMatch(
+      /\b(?:bg|text|border|ring|from|to|via)-(?:slate|indigo|rose|emerald|amber|sky)-/,
+    );
+
+    const user = userEvent.setup();
+    await user.click(updateBtn);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.className).toContain('bg-overlay');
+    expect(within(dialog).getByRole('heading', { name: '确认更新到 v1.0.2' })).toBeInTheDocument();
+    expect(container.innerHTML).not.toMatch(
+      /\b(?:bg|text|border|ring|from|to|via)-(?:slate|indigo|rose|emerald|amber|sky)-/,
+    );
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+  });
 });

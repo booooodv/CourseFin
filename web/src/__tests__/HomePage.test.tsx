@@ -6,7 +6,7 @@ import { api, itemPrimaryImageUrl, withApiKey } from '../api/client';
 import Layout from '../components/Layout';
 import { ToastProvider } from '../components/Toast';
 import { LibraryProvider } from '../contexts/LibraryContext';
-import { ThemeProvider } from '../contexts/ThemeContext';
+import { THEME_STORAGE_KEY, ThemeProvider } from '../contexts/ThemeContext';
 import HomePage from '../pages/HomePage';
 import SetupLoginPage from '../pages/SetupLoginPage';
 
@@ -1108,6 +1108,9 @@ describe('HomePage', () => {
 describe('SetupLoginPage', () => {
   afterEach(() => {
     localStorage.clear();
+    delete document.documentElement.dataset.theme;
+    document.documentElement.classList.remove('dark');
+    document.documentElement.style.colorScheme = '';
     vi.restoreAllMocks();
   });
 
@@ -1198,6 +1201,50 @@ describe('SetupLoginPage', () => {
     expect(await screen.findByText(/登录 CourseFin/)).toBeInTheDocument();
     expect(screen.getByLabelText(/用户名/)).toBeInTheDocument();
     expect(screen.getByLabelText(/密码/)).toBeInTheDocument();
+  });
+
+  it('renders top-right theme switcher and updates theme before authentication', async () => {
+    localStorage.clear();
+    delete document.documentElement.dataset.theme;
+    document.documentElement.classList.remove('dark');
+    document.documentElement.style.colorScheme = '';
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/setup/status')) {
+          return jsonResponse({ needs_setup: false });
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/login']}>
+          <SetupLoginPage />
+        </MemoryRouter>
+      </ThemeProvider>,
+    );
+
+    expect(await screen.findByText(/登录 CourseFin/)).toBeInTheDocument();
+    expect(document.documentElement.dataset.theme).toBe('light');
+
+    const toggleBtn = screen.getByRole('button', { name: '切换主题模式' });
+    const user = userEvent.setup();
+
+    await user.click(toggleBtn);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(document.documentElement.dataset.theme).toBe('light');
+
+    await user.click(toggleBtn);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+    expect(document.documentElement.dataset.theme).toBe('dark');
+
+    expect(container.innerHTML).not.toMatch(
+      /\b(?:bg|text|border|ring|from|to|via)-(?:slate|indigo|rose|emerald|amber|sky)-/,
+    );
   });
 });
 

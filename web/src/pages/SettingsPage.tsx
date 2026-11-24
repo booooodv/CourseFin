@@ -23,6 +23,9 @@ import type { Session, SettingsPayload, UpdateSettingsInput } from '../types/cou
 
 const MASKED_KEY_PLACEHOLDER = '****';
 
+const FIELD_INPUT_CLASS =
+  'w-full rounded-xl border border-default bg-subtle/60 px-3.5 py-2 text-sm text-ink-primary placeholder:text-ink-muted focus:border-accent focus:bg-card focus:outline-none focus:ring-2 focus:ring-accent-ring transition-colors disabled:opacity-50';
+
 export default function SettingsPage() {
   const { toast } = useToast();
   const location = useLocation();
@@ -275,59 +278,70 @@ export default function SettingsPage() {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3">
-        <Loader2 className="h-7 w-7 animate-spin text-indigo-400" />
-        <p className="text-sm">正在加载系统设置...</p>
+      <div className="flex flex-col items-center justify-center py-24 text-ink-muted gap-3">
+        <Loader2 className="h-7 w-7 animate-spin text-accent" />
+        <p className="text-sm font-medium">正在加载系统设置...</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
+    <div className="max-w-4xl mx-auto space-y-6">
       <div>
-        <h1 className="text-xl font-bold text-white">系统与连接设置</h1>
-        <p className="text-xs text-slate-400 mt-0.5">
+        <h1 className="text-2xl font-bold tracking-tight text-ink-primary">系统与连接设置</h1>
+        <p className="text-xs text-ink-muted mt-1">
           配置 Jellyfin 客户端连接、AI 课程整理模型、管理员密码与多端登录会话。
         </p>
       </div>
 
       {error && (
-        <div className="flex items-center justify-between rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-sm text-rose-200">
+        <div className="flex items-center justify-between rounded-2xl border border-status-danger/30 bg-status-danger-soft px-4 py-3 text-sm text-status-danger-ink">
           <span>{error}</span>
-          <button type="button" onClick={() => setError(null)} className="text-rose-300 hover:text-white">
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="rounded-lg p-1 text-status-danger-ink hover:bg-card/60 transition-colors cursor-pointer"
+          >
             <X className="h-4 w-4" />
           </button>
         </div>
       )}
 
       {/* Jellyfin Client Connection Guide */}
-      <section className="rounded-2xl border border-indigo-500/30 bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950/40 p-5 space-y-4">
-        <div className="flex items-center gap-2.5">
-          <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-500/20 text-indigo-300">
+      <section className="relative overflow-hidden rounded-3xl bg-card border border-accent-ring/60 shadow-card p-6 space-y-5">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -top-24 -right-24 h-56 w-56 rounded-full bg-accent/10 blur-3xl"
+        />
+
+        <div className="relative flex items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-ink">
             <Tv className="h-4 w-4" />
           </span>
           <div>
-            <h2 className="text-base font-semibold text-white">Jellyfin 客户端连接指南</h2>
-            <p className="text-xs text-slate-400">
+            <h2 className="text-base font-semibold text-ink-primary">Jellyfin 客户端连接指南</h2>
+            <p className="text-xs text-ink-muted">
               在支持 Jellyfin 协议的播放器中填入以下信息，即可同步课程目录与观看进度。
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-1.5">
-            <span className="text-xs text-slate-400">服务器地址（Server URL）</span>
+        <div className="relative grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="rounded-2xl border border-subtle bg-subtle p-4 space-y-1.5">
+            <span className="text-xs text-ink-muted">服务器地址（Server URL）</span>
             <div className="flex items-center justify-between gap-2">
-              <code className="text-sm font-mono text-indigo-300 break-all">{jellyfinUrl}</code>
+              <code className="text-sm font-mono font-medium text-accent-ink break-all">
+                {jellyfinUrl}
+              </code>
               <Tooltip content="复制 Jellyfin 服务器地址到剪贴板">
                 <button
                   type="button"
                   aria-label="复制服务器地址"
                   onClick={() => void handleCopyServerUrl()}
-                  className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-700 transition-colors"
+                  className="shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-default bg-card px-2.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors cursor-pointer shadow-card"
                 >
                   {copiedUrl ? (
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    <Check className="h-3.5 w-3.5 text-status-success-ink" />
                   ) : (
                     <Copy className="h-3.5 w-3.5" />
                   )}
@@ -337,19 +351,21 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-1.5">
-            <span className="text-xs text-slate-400">登录用户名（Username）</span>
+          <div className="rounded-2xl border border-subtle bg-subtle p-4 space-y-1.5">
+            <span className="text-xs text-ink-muted">登录用户名（Username）</span>
             <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-mono font-semibold text-white">{jellyfinUsername}</p>
+              <p className="text-sm font-mono font-semibold text-ink-primary">
+                {jellyfinUsername}
+              </p>
               <Tooltip content="复制 Jellyfin 登录用户名">
                 <button
                   type="button"
                   aria-label="复制用户名"
                   onClick={() => void handleCopyUsername()}
-                  className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-700 transition-colors"
+                  className="shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-default bg-card px-2.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors cursor-pointer shadow-card"
                 >
                   {copiedUser ? (
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    <Check className="h-3.5 w-3.5 text-status-success-ink" />
                   ) : (
                     <Copy className="h-3.5 w-3.5" />
                   )}
@@ -360,22 +376,22 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-slate-300">
-          <div className="rounded-xl border border-slate-800/80 bg-slate-950/50 p-3 space-y-1">
-            <p className="font-semibold text-white">Infuse (iOS / macOS / tvOS)</p>
-            <p className="text-slate-400 leading-relaxed">
+        <div className="relative grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-ink-secondary">
+          <div className="rounded-2xl border border-subtle bg-subtle/60 p-3.5 space-y-1">
+            <p className="font-semibold text-ink-primary">Infuse (iOS / macOS / tvOS)</p>
+            <p className="text-ink-muted leading-relaxed">
               新增文件来源 → 连接 Emby / Jellyfin → 协议选择 Jellyfin，输入服务器地址与管理员账号密码即可。
             </p>
           </div>
-          <div className="rounded-xl border border-slate-800/80 bg-slate-950/50 p-3 space-y-1">
-            <p className="font-semibold text-white">VidHub</p>
-            <p className="text-slate-400 leading-relaxed">
+          <div className="rounded-2xl border border-subtle bg-subtle/60 p-3.5 space-y-1">
+            <p className="font-semibold text-ink-primary">VidHub</p>
+            <p className="text-ink-muted leading-relaxed">
               添加媒体库 → 选择 Jellyfin → 填写服务器地址和端口，开启进度同步即可按课程章节顺序连播。
             </p>
           </div>
-          <div className="rounded-xl border border-slate-800/80 bg-slate-950/50 p-3 space-y-1">
-            <p className="font-semibold text-white">SenPlayer</p>
-            <p className="text-slate-400 leading-relaxed">
+          <div className="rounded-2xl border border-subtle bg-subtle/60 p-3.5 space-y-1">
+            <p className="font-semibold text-ink-primary">SenPlayer</p>
+            <p className="text-ink-muted leading-relaxed">
               媒体服务 → 添加 Jellyfin 服务器 → 填入上方地址、用户名与密码，支持外挂字幕与续播进度同步。
             </p>
           </div>
@@ -388,16 +404,18 @@ export default function SettingsPage() {
       {/* Server & AI Config Form */}
       <form
         onSubmit={handleSaveSettings}
-        className="rounded-2xl border border-slate-800 bg-slate-900/75 p-5 space-y-5"
+        className="rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-5"
       >
-        <div className="flex items-center gap-2.5">
-          <Server className="h-4 w-4 text-indigo-400" />
-          <h2 className="text-base font-semibold text-white">服务器与 AI 接口配置</h2>
+        <div className="flex items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-ink">
+            <Server className="h-4 w-4" />
+          </span>
+          <h2 className="text-base font-semibold text-ink-primary">服务器与 AI 接口配置</h2>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5">
-            <label htmlFor="settings-server-name" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="settings-server-name" className="block text-xs font-medium text-ink-secondary">
               服务器名称
             </label>
             <input
@@ -405,13 +423,13 @@ export default function SettingsPage() {
               type="text"
               value={serverName}
               onChange={(e) => setServerName(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              className={FIELD_INPUT_CLASS}
               required
             />
           </div>
 
           <div className="space-y-1.5">
-            <label htmlFor="settings-scan-interval" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="settings-scan-interval" className="block text-xs font-medium text-ink-secondary">
               定时扫描间隔（分钟）
             </label>
             <input
@@ -420,20 +438,20 @@ export default function SettingsPage() {
               min={1}
               value={scanIntervalMinutes}
               onChange={(e) => setScanIntervalMinutes(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              className={FIELD_INPUT_CLASS}
               required
             />
           </div>
 
-          <div className="space-y-1.5 sm:col-span-2 pt-2 border-t border-slate-800/80">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-300">
+          <div className="space-y-1.5 sm:col-span-2 pt-3 border-t border-subtle">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-accent-ink">
               <Sparkles className="h-3.5 w-3.5" />
               <span>OpenAI 兼容接口（用于 AI 智能整理课程）</span>
             </div>
           </div>
 
           <div className="space-y-1.5">
-            <label htmlFor="settings-ai-base-url" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="settings-ai-base-url" className="block text-xs font-medium text-ink-secondary">
               AI Base URL
             </label>
             <input
@@ -442,12 +460,12 @@ export default function SettingsPage() {
               value={aiBaseUrl}
               onChange={(e) => setAiBaseUrl(e.target.value)}
               placeholder="https://api.openai.com/v1"
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              className={FIELD_INPUT_CLASS}
             />
           </div>
 
           <div className="space-y-1.5">
-            <label htmlFor="settings-ai-model" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="settings-ai-model" className="block text-xs font-medium text-ink-secondary">
               AI 模型名称
             </label>
             <input
@@ -456,22 +474,22 @@ export default function SettingsPage() {
               value={aiModel}
               onChange={(e) => setAiModel(e.target.value)}
               placeholder="gpt-4o-mini"
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              className={FIELD_INPUT_CLASS}
             />
           </div>
 
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <label htmlFor="settings-ai-key" className="block text-xs font-medium text-slate-300">
+              <label htmlFor="settings-ai-key" className="block text-xs font-medium text-ink-secondary">
                 AI API Key
               </label>
               {settings?.ai_api_key_set && (
-                <label className="inline-flex items-center gap-1 text-[11px] text-slate-400 cursor-pointer">
+                <label className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted cursor-pointer">
                   <input
                     type="checkbox"
                     checked={clearAiKey}
                     onChange={(e) => setClearAiKey(e.target.checked)}
-                    className="h-3 w-3 rounded border-slate-600 bg-slate-800 text-rose-500"
+                    className="h-3.5 w-3.5 rounded border-default bg-card text-status-danger focus:ring-2 focus:ring-accent-ring"
                   />
                   <span>清除已存 Key</span>
                 </label>
@@ -487,12 +505,12 @@ export default function SettingsPage() {
                 settings?.ai_api_key_set ? '已配置（留空则保留当前密钥）' : '输入 API Key（sk-...）'
               }
               autoComplete="off"
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none disabled:opacity-50"
+              className={FIELD_INPUT_CLASS}
             />
           </div>
 
           <div className="space-y-1.5">
-            <label htmlFor="settings-ai-sub-chars" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="settings-ai-sub-chars" className="block text-xs font-medium text-ink-secondary">
               最大字幕上下文字符数
             </label>
             <input
@@ -501,17 +519,17 @@ export default function SettingsPage() {
               min={0}
               value={aiMaxSubtitleChars}
               onChange={(e) => setAiMaxSubtitleChars(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              className={FIELD_INPUT_CLASS}
             />
           </div>
         </div>
 
         {aiTestMessage && (
           <div
-            className={`rounded-xl border px-3.5 py-2 text-xs ${
+            className={`rounded-2xl border px-3.5 py-2.5 text-xs font-medium ${
               aiTestMessage.ok
-                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                : 'border-rose-500/30 bg-rose-500/10 text-rose-200'
+                ? 'border-status-success/30 bg-status-success-soft text-status-success-ink'
+                : 'border-status-danger/30 bg-status-danger-soft text-status-danger-ink'
             }`}
           >
             {aiTestMessage.text}
@@ -519,7 +537,7 @@ export default function SettingsPage() {
         )}
 
         {settingsSuccess && (
-          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-2 text-xs text-emerald-200">
+          <div className="rounded-2xl border border-status-success/30 bg-status-success-soft px-3.5 py-2.5 text-xs font-medium text-status-success-ink">
             {settingsSuccess}
           </div>
         )}
@@ -530,7 +548,7 @@ export default function SettingsPage() {
               type="button"
               disabled={testingAI}
               onClick={() => void handleTestAI()}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-3.5 py-2 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary disabled:opacity-50 transition-colors cursor-pointer"
             >
               {testingAI ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
               <span>{testingAI ? '测试中...' : '测试连接'}</span>
@@ -541,7 +559,7 @@ export default function SettingsPage() {
             <button
               type="submit"
               disabled={savingSettings}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
             >
               {savingSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
               <span>{savingSettings ? '保存中...' : '保存设置'}</span>
@@ -553,16 +571,18 @@ export default function SettingsPage() {
       {/* Admin Password Change */}
       <form
         onSubmit={handleChangePassword}
-        className="rounded-2xl border border-slate-800 bg-slate-900/75 p-5 space-y-4"
+        className="rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-4"
       >
-        <div className="flex items-center gap-2.5">
-          <KeyRound className="h-4 w-4 text-indigo-400" />
-          <h2 className="text-base font-semibold text-white">修改管理员密码</h2>
+        <div className="flex items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-ink">
+            <KeyRound className="h-4 w-4" />
+          </span>
+          <h2 className="text-base font-semibold text-ink-primary">修改管理员密码</h2>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="space-y-1.5">
-            <label htmlFor="pwd-old" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="pwd-old" className="block text-xs font-medium text-ink-secondary">
               当前密码
             </label>
             <input
@@ -570,11 +590,11 @@ export default function SettingsPage() {
               type="password"
               value={oldPassword}
               onChange={(e) => setOldPassword(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              className={FIELD_INPUT_CLASS}
             />
           </div>
           <div className="space-y-1.5">
-            <label htmlFor="pwd-new" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="pwd-new" className="block text-xs font-medium text-ink-secondary">
               新密码
             </label>
             <input
@@ -582,11 +602,11 @@ export default function SettingsPage() {
               type="password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              className={FIELD_INPUT_CLASS}
             />
           </div>
           <div className="space-y-1.5">
-            <label htmlFor="pwd-confirm" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="pwd-confirm" className="block text-xs font-medium text-ink-secondary">
               确认新密码
             </label>
             <input
@@ -594,15 +614,15 @@ export default function SettingsPage() {
               type="password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+              className={FIELD_INPUT_CLASS}
             />
           </div>
         </div>
 
         {passwordFeedback && (
           <p
-            className={`text-xs ${
-              passwordFeedback.ok ? 'text-emerald-300' : 'text-rose-400'
+            className={`text-xs font-medium ${
+              passwordFeedback.ok ? 'text-status-success-ink' : 'text-status-danger-ink'
             }`}
           >
             {passwordFeedback.text}
@@ -614,7 +634,7 @@ export default function SettingsPage() {
             <button
               type="submit"
               disabled={changingPassword}
-              className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
+              className="rounded-xl border border-default bg-subtle px-4 py-2 text-xs font-semibold text-ink-primary hover:bg-muted disabled:opacity-50 transition-colors cursor-pointer"
             >
               {changingPassword ? '更新中...' : '更新密码'}
             </button>
@@ -623,21 +643,27 @@ export default function SettingsPage() {
       </form>
 
       {/* Active Sessions */}
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/75 p-5 space-y-4">
+      <section className="rounded-3xl bg-card border border-subtle shadow-card p-6 space-y-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <Laptop className="h-4 w-4 text-indigo-400" />
-            <h2 className="text-base font-semibold text-white">已登录设备会话 ({sessions.length})</h2>
+          <div className="flex items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-ink">
+              <Laptop className="h-4 w-4" />
+            </span>
+            <h2 className="text-base font-semibold text-ink-primary">
+              已登录设备会话 ({sessions.length})
+            </h2>
           </div>
         </div>
 
         {sessions.length === 0 ? (
-          <p className="text-xs text-slate-500 py-4 text-center">暂无活动会话。</p>
+          <p className="text-xs text-ink-muted py-6 text-center rounded-2xl border border-dashed border-default">
+            暂无活动会话。
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead>
-                <tr className="border-b border-slate-800 text-slate-400">
+                <tr className="border-b border-subtle text-ink-muted">
                   <th className="py-2.5 pr-4 font-medium">客户端</th>
                   <th className="py-2.5 pr-4 font-medium">设备名称</th>
                   <th className="py-2.5 pr-4 font-medium">设备 ID</th>
@@ -645,28 +671,28 @@ export default function SettingsPage() {
                   <th className="py-2.5 text-right font-medium">操作</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800/70">
+              <tbody className="divide-y divide-subtle">
                 {sessions.map((sess) => {
                   const isCurrent = currentToken && sess.token === currentToken;
                   return (
-                    <tr key={sess.token} className="text-slate-200">
+                    <tr key={sess.token} className="text-ink-primary hover:bg-subtle/40 transition-colors">
                       <td className="py-3 pr-4 font-medium">
                         {sess.client_name} {sess.client_version}
                         {isCurrent && (
-                          <span className="ml-2 rounded-full bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 text-[10px] text-emerald-300">
+                          <span className="ml-2 inline-flex items-center rounded-full border border-status-success/30 bg-status-success-soft px-2 py-0.5 text-[10px] font-medium text-status-success-ink">
                             当前会话
                           </span>
                         )}
                       </td>
-                      <td className="py-3 pr-4">{sess.device_name || '未知设备'}</td>
-                      <td className="py-3 pr-4 font-mono text-slate-400">{sess.device_id}</td>
-                      <td className="py-3 pr-4 text-slate-400">{sess.last_active_at}</td>
+                      <td className="py-3 pr-4 text-ink-secondary">{sess.device_name || '未知设备'}</td>
+                      <td className="py-3 pr-4 font-mono text-ink-muted">{sess.device_id}</td>
+                      <td className="py-3 pr-4 text-ink-muted">{sess.last_active_at}</td>
                       <td className="py-3 text-right">
                         <Tooltip content="强制下线该设备会话，需重新登录">
                           <button
                             type="button"
                             onClick={() => void handleRevokeSession(sess.token)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[11px] font-medium text-rose-300 hover:bg-rose-500/20 transition-colors"
+                            className="inline-flex items-center gap-1 rounded-lg border border-status-danger/30 bg-status-danger-soft px-2.5 py-1 text-[11px] font-medium text-status-danger-ink hover:opacity-85 transition-colors cursor-pointer"
                           >
                             <Trash2 className="h-3 w-3" />
                             <span>注销</span>
