@@ -15,6 +15,7 @@ import (
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
+	"coursefin/internal/updater"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -41,6 +42,7 @@ type Deps struct {
 	Scanner      *scanner.Service
 	Catalog      *catalog.Service
 	Media        *media.Service
+	Updater      *updater.Service
 	AIHTTPClient *http.Client
 	LifecycleCtx context.Context
 }
@@ -54,6 +56,7 @@ type handler struct {
 	scanner      *scanner.Service
 	cat          *catalog.Service
 	media        *media.Service
+	updater      *updater.Service
 	aiHTTPClient *http.Client
 	lifecycleCtx context.Context
 }
@@ -77,6 +80,7 @@ func NewHandler(deps Deps) http.Handler {
 		scanner:      deps.Scanner,
 		cat:          deps.Catalog,
 		media:        deps.Media,
+		updater:      deps.Updater,
 		aiHTTPClient: deps.AIHTTPClient,
 		lifecycleCtx: lctx,
 	}
@@ -151,6 +155,12 @@ func NewHandler(deps Deps) http.Handler {
 			pr.Post("/settings/ai/test", h.handleTestAI)
 			pr.Post("/courses/{id}/ai/organize", h.handleAIOrganize)
 			pr.Post("/courses/{id}/ai/apply", h.handleAIApply)
+
+			// System updates
+			pr.Get("/system/update", h.handleGetUpdateStatus)
+			pr.Put("/system/update/config", h.handleUpdateUpdateConfig)
+			pr.Post("/system/update/check", h.handleCheckUpdate)
+			pr.Post("/system/update/apply", h.handleApplyUpdate)
 		})
 	})
 

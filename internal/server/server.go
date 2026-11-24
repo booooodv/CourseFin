@@ -3,7 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,6 +26,7 @@ import (
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
+	"coursefin/internal/updater"
 )
 
 const defaultScanInterval = 60 * time.Minute
@@ -34,6 +38,9 @@ type Server struct {
 	db        *sql.DB
 	media     *media.Service
 	scanner   *scanner.Service
+	updater   *updater.Service
+	bootID    string
+	version   string
 	handler   http.Handler
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -42,6 +49,16 @@ type Server struct {
 
 // New initializes all CourseFin backend services and builds the unified router.
 func New(cfg config.Config) (*Server, error) {
+	bootID, err := newBootID()
+	if err != nil {
+		return nil, fmt.Errorf("generate boot id: %w", err)
+	}
+
+	version := updater.NormalizeVersion(cfg.Version)
+	if version == "" {
+		version = "0.0.0-dev"
+	}
+
 	conn, err := db.Open(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -61,6 +78,16 @@ func New(cfg config.Config) (*Server, error) {
 	catSvc := catalog.NewService(conn, cfg.DataDir)
 	catSvc.SetRegistry(reg)
 	mediaSvc := media.NewService(conn, cfg.DataDir, reg, "")
+	updaterSvc := updater.NewService(updater.Options{
+		DB:             conn,
+		DataDir:        cfg.DataDir,
+		CurrentVersion: version,
+		Repo:           cfg.UpdateRepo,
+		APIBase:        cfg.UpdateAPIBase,
+		GitHubToken:    cfg.UpdateGitHubToken,
+		AutoCheckEnv:   cfg.UpdateAutoCheckEnv,
+		ManagedBinDir:  cfg.ManagedBinDir,
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -73,6 +100,7 @@ func New(cfg config.Config) (*Server, error) {
 		Scanner:      scanSvc,
 		Catalog:      catSvc,
 		Media:        mediaSvc,
+		Updater:      updaterSvc,
 		LifecycleCtx: ctx,
 	})
 	jfHandler := jellyfin.NewHandler(conn, authSvc, catSvc, mediaSvc)
@@ -90,6 +118,9 @@ func New(cfg config.Config) (*Server, error) {
 		db:      conn,
 		media:   mediaSvc,
 		scanner: scanSvc,
+		updater: updaterSvc,
+		bootID:  bootID,
+		version: version,
 		cancel:  cancel,
 	}
 
@@ -101,7 +132,13 @@ func New(cfg config.Config) (*Server, error) {
 		})
 	}()
 
-	srv.handler = buildTopHandler(apiHandler, jfHandler, webSubFS)
+	srv.wg.Add(1)
+	go func() {
+		defer srv.wg.Done()
+		updaterSvc.StartPeriodicLoop(ctx)
+	}()
+
+	srv.handler = buildTopHandler(apiHandler, jfHandler, webSubFS, version, bootID)
 	return srv, nil
 }
 
@@ -110,7 +147,15 @@ func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
-// Close cancels background tasks (including periodic scans and active FFmpeg remuxers)
+// RestartCh returns the channel notified when a staged update is ready for hot-exec.
+func (s *Server) RestartCh() <-chan updater.RestartRequest {
+	if s.updater == nil {
+		return nil
+	}
+	return s.updater.RestartCh()
+}
+
+// Close cancels background tasks (including periodic scans, updates, and active FFmpeg remuxers)
 // and closes the SQLite database connection.
 func (s *Server) Close() error {
 	var closeErr error
@@ -121,6 +166,9 @@ func (s *Server) Close() error {
 		s.wg.Wait()
 		if s.scanner != nil {
 			s.scanner.Wait()
+		}
+		if s.updater != nil {
+			s.updater.Wait()
 		}
 
 		var errs []error
@@ -139,6 +187,14 @@ func (s *Server) Close() error {
 	return closeErr
 }
 
+func newBootID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
 func readScanInterval(ctx context.Context, conn *sql.DB) time.Duration {
 	var raw string
 	err := conn.QueryRowContext(ctx, `SELECT value FROM app_settings WHERE key = 'scan_interval_minutes'`).Scan(&raw)
@@ -151,17 +207,32 @@ func readScanInterval(ctx context.Context, conn *sql.DB) time.Duration {
 	return defaultScanInterval
 }
 
-func buildTopHandler(apiHandler, jfHandler http.Handler, webSubFS fs.FS) http.Handler {
+func buildTopHandler(apiHandler, jfHandler http.Handler, webSubFS fs.FS, version, bootID string) http.Handler {
 	fileServer := http.FileServerFS(webSubFS)
+
+	healthJSON, err := json.Marshal(struct {
+		Status  string `json:"status"`
+		Version string `json:"version"`
+		BootID  string `json:"boot_id"`
+	}{
+		Status:  "ok",
+		Version: version,
+		BootID:  bootID,
+	})
+	if err != nil {
+		healthJSON = []byte(`{"status":"ok"}`)
+	}
+	healthBody := append(healthJSON, '\n')
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqPath := r.URL.Path
 
 		if reqPath == "/health" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusOK)
 			if r.Method != http.MethodHead {
-				_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
+				_, _ = w.Write(healthBody)
 			}
 			return
 		}

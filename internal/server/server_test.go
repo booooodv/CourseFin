@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -225,5 +226,142 @@ func TestServerCloseWaitsForInFlightAsyncScan(t *testing.T) {
 	// Close immediately while async scan is running; must wait cleanly with no error or race.
 	if err := appSrv.Close(); err != nil {
 		t.Fatalf("appSrv.Close() returned error: %v", err)
+	}
+}
+
+func TestHealthReturnsVersionAndBootID(t *testing.T) {
+	srv1, err := server.New(config.Config{
+		Port:      "0",
+		DataDir:   t.TempDir(),
+		AdminUser: "admin",
+		AdminPass: "secret123",
+		LogLevel:  "error",
+		Version:   "v1.2.3",
+	})
+	if err != nil {
+		t.Fatalf("server.New srv1: %v", err)
+	}
+	defer func() {
+		if err := srv1.Close(); err != nil {
+			t.Fatalf("srv1.Close: %v", err)
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv1.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /health status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("GET /health Cache-Control = %q, want no-store", got)
+	}
+
+	var h1 struct {
+		Status  string `json:"status"`
+		Version string `json:"version"`
+		BootID  string `json:"boot_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &h1); err != nil {
+		t.Fatalf("unmarshal /health: %v (%s)", err, rec.Body.String())
+	}
+	if h1.Status != "ok" {
+		t.Fatalf("status = %q, want ok", h1.Status)
+	}
+	if h1.Version != "1.2.3" {
+		t.Fatalf("version = %q, want 1.2.3", h1.Version)
+	}
+	if len(h1.BootID) != 16 {
+		t.Fatalf("boot_id = %q (len=%d), want 16-hex", h1.BootID, len(h1.BootID))
+	}
+	if _, err := hex.DecodeString(h1.BootID); err != nil {
+		t.Fatalf("boot_id %q is not valid hex: %v", h1.BootID, err)
+	}
+
+	headReq := httptest.NewRequest(http.MethodHead, "/health", nil)
+	headRec := httptest.NewRecorder()
+	srv1.Handler().ServeHTTP(headRec, headReq)
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("HEAD /health status = %d, want 200", headRec.Code)
+	}
+	if got := headRec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("HEAD /health Cache-Control = %q, want no-store", got)
+	}
+	if headRec.Body.Len() != 0 {
+		t.Fatalf("HEAD /health expected empty body, got %q", headRec.Body.String())
+	}
+
+	srv2, err := server.New(config.Config{
+		Port:     "0",
+		DataDir:  t.TempDir(),
+		LogLevel: "error",
+	})
+	if err != nil {
+		t.Fatalf("server.New srv2: %v", err)
+	}
+	defer func() {
+		if err := srv2.Close(); err != nil {
+			t.Fatalf("srv2.Close: %v", err)
+		}
+	}()
+
+	if srv2.RestartCh() == nil {
+		t.Fatalf("expected non-nil RestartCh on server")
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec2 := httptest.NewRecorder()
+	srv2.Handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("srv2 GET /health = %d, want 200", rec2.Code)
+	}
+	var h2 struct {
+		Status  string `json:"status"`
+		Version string `json:"version"`
+		BootID  string `json:"boot_id"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &h2); err != nil {
+		t.Fatalf("unmarshal srv2 /health: %v", err)
+	}
+	if h2.Version != "0.0.0-dev" {
+		t.Fatalf("default version = %q, want 0.0.0-dev", h2.Version)
+	}
+	if len(h2.BootID) != 16 || h2.BootID == h1.BootID {
+		t.Fatalf("expected unique 16-hex boot_id, got %q vs %q", h2.BootID, h1.BootID)
+	}
+
+	// Verify server.New wired Updater service & normalized version into /api/v1/system/update
+	loginBody := strings.NewReader(`{"username":"admin","password":"secret123","device_id":"srv-health-test"}`)
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", loginBody)
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	srv1.Handler().ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/v1/auth/login = %d: %s", loginRec.Code, loginRec.Body.String())
+	}
+	var loginRes struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginRes); err != nil || loginRes.Token == "" {
+		t.Fatalf("unmarshal login: %v (%s)", err, loginRec.Body.String())
+	}
+
+	updReq := httptest.NewRequest(http.MethodGet, "/api/v1/system/update", nil)
+	updReq.Header.Set("Authorization", "Bearer "+loginRes.Token)
+	updRec := httptest.NewRecorder()
+	srv1.Handler().ServeHTTP(updRec, updReq)
+	if updRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/system/update = %d, want 200: %s", updRec.Code, updRec.Body.String())
+	}
+	var updStatus struct {
+		CurrentVersion string `json:"current_version"`
+		State          string `json:"state"`
+	}
+	if err := json.Unmarshal(updRec.Body.Bytes(), &updStatus); err != nil {
+		t.Fatalf("unmarshal /api/v1/system/update: %v", err)
+	}
+	if updStatus.CurrentVersion != "1.2.3" || updStatus.State != "idle" {
+		t.Fatalf("unexpected wired updater status: %+v", updStatus)
 	}
 }

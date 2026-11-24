@@ -1,10 +1,15 @@
 package api_test
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -19,6 +24,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +36,7 @@ import (
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
+	"coursefin/internal/updater"
 )
 
 type fakeProber struct{}
@@ -471,9 +478,9 @@ func TestAIOrganizeDoesNotMutateUntilApply(t *testing.T) {
 
 	// Save settings with API key
 	resp, raw := env.doJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
-		"ai_base_url":          mockAI.URL + "/v1",
-		"ai_api_key":           "sk-secret-12345",
-		"ai_model":             "gpt-4o-mini",
+		"ai_base_url":           mockAI.URL + "/v1",
+		"ai_api_key":            "sk-secret-12345",
+		"ai_model":              "gpt-4o-mini",
 		"ai_max_subtitle_chars": 2000,
 	}, token)
 	if resp.StatusCode != http.StatusOK {
@@ -1250,5 +1257,392 @@ func TestDeleteLibraryAPIModes(t *testing.T) {
 	resp, _ = env.doJSON(t, http.MethodGet, "/api/v1/courses/"+course.ID, nil, token)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET course after force delete = %d, want 404", resp.StatusCode)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func buildTestReleaseTarGz(t *testing.T, script []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	hdr := &tar.Header{
+		Name:     "coursefin",
+		Mode:     0o755,
+		Size:     int64(len(script)),
+		Typeflag: tar.TypeReg,
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("tar WriteHeader: %v", err)
+	}
+	if _, err := tw.Write(script); err != nil {
+		t.Fatalf("tar Write: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar Close: %v", err)
+	}
+	if err := gzw.Close(); err != nil {
+		t.Fatalf("gzip Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestSystemUpdateEndpoints(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("self-update apply test requires linux or darwin")
+	}
+
+	dataDir := t.TempDir()
+	managedDir := filepath.Join(t.TempDir(), "managed-bin")
+	if err := os.MkdirAll(managedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedDir, "coursefin"), []byte("#!/bin/sh\necho '1.0.1'\n"), 0o755); err != nil {
+		t.Fatalf("write initial binary stub: %v", err)
+	}
+
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	authSvc := auth.NewService(conn)
+	if _, err := authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "upd-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	assetName := fmt.Sprintf("coursefin_1.2.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	archive := buildTestReleaseTarGz(t, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"1.2.0\"\n  exit 0\nfi\nexit 1\n"))
+	sum := sha256.Sum256(archive)
+	checksums := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), assetName)
+
+	releaseURL := "https://api.github.example/repos/booooodv/CourseFin/releases/latest"
+	assetURL := "https://github.example/booooodv/CourseFin/releases/download/v1.2.0/" + assetName
+	checksumsURL := "https://github.example/booooodv/CourseFin/releases/download/v1.2.0/checksums.txt"
+
+	var failUpstream atomic.Bool
+	failUpstream.Store(true)
+	downloadStarted := make(chan struct{})
+	releaseDownload := make(chan struct{})
+	var downloadStartedOnce sync.Once
+	var releaseDownloadOnce sync.Once
+
+	mockGitHubClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if err := req.Context().Err(); err != nil {
+				return nil, err
+			}
+			rec := httptest.NewRecorder()
+			switch req.URL.String() {
+			case releaseURL:
+				if failUpstream.Load() {
+					rec.WriteHeader(http.StatusBadGateway)
+					_, _ = rec.WriteString("upstream unavailable")
+				} else {
+					rec.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprintf(rec, `{
+						"tag_name": "v1.2.0",
+						"name": "CourseFin v1.2.0",
+						"body": "Release notes v1.2.0",
+						"html_url": "https://github.example/booooodv/CourseFin/releases/tag/v1.2.0",
+						"published_at": "2026-11-24T12:00:00Z",
+						"draft": false,
+						"prerelease": false,
+						"assets": [
+							{"name": %q, "size": %d, "browser_download_url": %q},
+							{"name": "checksums.txt", "size": %d, "browser_download_url": %q}
+						]
+					}`, assetName, len(archive), assetURL, len(checksums), checksumsURL)
+				}
+			case checksumsURL:
+				rec.Header().Set("Content-Type", "text/plain")
+				_, _ = rec.WriteString(checksums)
+			case assetURL:
+				downloadStartedOnce.Do(func() { close(downloadStarted) })
+				select {
+				case <-releaseDownload:
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				}
+				rec.Header().Set("Content-Type", "application/octet-stream")
+				rec.Header().Set("Content-Length", fmt.Sprintf("%d", len(archive)))
+				_, _ = rec.Write(archive)
+			default:
+				rec.WriteHeader(http.StatusNotFound)
+			}
+			resp := rec.Result()
+			resp.Request = req
+			return resp, nil
+		}),
+	}
+
+	updaterSvc := updater.NewService(updater.Options{
+		DB:                conn,
+		DataDir:           dataDir,
+		CurrentVersion:    "1.0.1",
+		APIBase:           "https://api.github.example",
+		ManagedBinDir:     managedDir,
+		HTTPClient:        mockGitHubClient,
+		RestartGraceDelay: 5 * time.Millisecond,
+	})
+
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		releaseDownloadOnce.Do(func() { close(releaseDownload) })
+		cancelLifecycle()
+		updaterSvc.Wait()
+	})
+
+	h := api.NewHandler(api.Deps{
+		DB:           conn,
+		DataDir:      dataDir,
+		Auth:         authSvc,
+		Updater:      updaterSvc,
+		LifecycleCtx: lifecycleCtx,
+	})
+
+	doReq := func(method, reqPath string, body any, authToken string) (*httptest.ResponseRecorder, []byte) {
+		t.Helper()
+		var r io.Reader
+		if body != nil {
+			switch v := body.(type) {
+			case string:
+				r = strings.NewReader(v)
+			default:
+				b, err := json.Marshal(v)
+				if err != nil {
+					t.Fatalf("marshal body: %v", err)
+				}
+				r = bytes.NewReader(b)
+			}
+		}
+		req := httptest.NewRequest(method, reqPath, r)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if authToken != "" {
+			req.Header.Set("Authorization", "Bearer "+authToken)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec, rec.Body.Bytes()
+	}
+
+	// 1. Unauthenticated GET /api/v1/system/update returns 401
+	rec, raw := doReq(http.MethodGet, "/api/v1/system/update", nil, "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET /api/v1/system/update = %d, want 401: %s", rec.Code, raw)
+	}
+
+	// 2. Authenticated GET /api/v1/system/update returns 200 with current_version
+	rec, raw = doReq(http.MethodGet, "/api/v1/system/update", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/system/update = %d, want 200: %s", rec.Code, raw)
+	}
+	var st updater.Status
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("unmarshal status: %v (%s)", err, raw)
+	}
+	if st.CurrentVersion != "1.0.1" {
+		t.Fatalf("current_version = %q, want 1.0.1", st.CurrentVersion)
+	}
+	if st.UpdateAvailable {
+		t.Fatalf("expected initial update_available=false")
+	}
+
+	// 3. PUT /api/v1/system/update/config validates and persists settings
+	rec, raw = doReq(http.MethodPut, "/api/v1/system/update/config", map[string]any{
+		"auto_check_enabled":   false,
+		"check_interval_hours": 12,
+		"mirror_url":           "https://gh-proxy.example/",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/v1/system/update/config valid = %d, want 200: %s", rec.Code, raw)
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("unmarshal config status: %v", err)
+	}
+	if st.AutoCheckEnabled || st.CheckIntervalHours != 12 || st.MirrorURL != "https://gh-proxy.example" {
+		t.Fatalf("unexpected persisted config response: %+v", st)
+	}
+
+	// Confirm persisted on subsequent GET
+	rec, raw = doReq(http.MethodGet, "/api/v1/system/update", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET after PUT config = %d: %s", rec.Code, raw)
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("unmarshal GET after PUT: %v", err)
+	}
+	if st.AutoCheckEnabled || st.CheckIntervalHours != 12 || st.MirrorURL != "https://gh-proxy.example" {
+		t.Fatalf("config did not persist across GET: %+v", st)
+	}
+
+	// Invalid mirror scheme -> 400
+	rec, raw = doReq(http.MethodPut, "/api/v1/system/update/config", map[string]any{
+		"mirror_url": "ftp://bad",
+	}, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT invalid mirror scheme = %d, want 400: %s", rec.Code, raw)
+	}
+
+	// Invalid interval 0 -> 400
+	rec, raw = doReq(http.MethodPut, "/api/v1/system/update/config", map[string]any{
+		"check_interval_hours": 0,
+	}, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT interval 0 = %d, want 400: %s", rec.Code, raw)
+	}
+
+	// Malformed JSON -> 400
+	rec, raw = doReq(http.MethodPut, "/api/v1/system/update/config", "{bad-json", token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT malformed JSON = %d, want 400: %s", rec.Code, raw)
+	}
+
+	// Clear mirror_url so subsequent check hits mock releaseURL cleanly
+	rec, raw = doReq(http.MethodPut, "/api/v1/system/update/config", map[string]any{
+		"mirror_url": "",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT clear mirror_url = %d: %s", rec.Code, raw)
+	}
+
+	// 4a. POST /api/v1/system/update/apply before any update available -> 400
+	rec, raw = doReq(http.MethodPost, "/api/v1/system/update/apply", nil, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /apply before update available = %d, want 400: %s", rec.Code, raw)
+	}
+
+	// 4b. POST /api/v1/system/update/check returns 502 when upstream fails
+	rec, raw = doReq(http.MethodPost, "/api/v1/system/update/check", nil, token)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("POST /check upstream error = %d, want 502: %s", rec.Code, raw)
+	}
+
+	// 4c. POST /api/v1/system/update/check returns 200 with update_available=true
+	failUpstream.Store(false)
+	rec, raw = doReq(http.MethodPost, "/api/v1/system/update/check", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /check success = %d, want 200: %s", rec.Code, raw)
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("unmarshal check response: %v", err)
+	}
+	if !st.UpdateAvailable || st.LatestVersion != "1.2.0" || !st.CanApply {
+		t.Fatalf("expected update_available=true, latest_version=1.2.0, can_apply=true, got %+v", st)
+	}
+
+	// 5. POST /api/v1/system/update/apply returns 202 and enforces 409 while busy
+	rec, raw = doReq(http.MethodPost, "/api/v1/system/update/apply", nil, token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /apply = %d, want 202: %s", rec.Code, raw)
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("unmarshal apply response: %v", err)
+	}
+	if st.State != "downloading" || st.TargetVersion != "1.2.0" {
+		t.Fatalf("expected downloading state for 1.2.0, got %+v", st)
+	}
+
+	select {
+	case <-downloadStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for mock download to start")
+	}
+
+	// Concurrent apply and check while downloading -> 409
+	rec, raw = doReq(http.MethodPost, "/api/v1/system/update/apply", nil, token)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("concurrent POST /apply = %d, want 409: %s", rec.Code, raw)
+	}
+	rec, raw = doReq(http.MethodPost, "/api/v1/system/update/check", nil, token)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("concurrent POST /check = %d, want 409: %s", rec.Code, raw)
+	}
+
+	releaseDownloadOnce.Do(func() { close(releaseDownload) })
+
+	select {
+	case req := <-updaterSvc.RestartCh():
+		if req.ExecPath != filepath.Join(managedDir, "coursefin") {
+			t.Fatalf("unexpected RestartRequest ExecPath: %q", req.ExecPath)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for RestartCh")
+	}
+	updaterSvc.Wait()
+
+	rec, raw = doReq(http.MethodGet, "/api/v1/system/update", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET final status = %d: %s", rec.Code, raw)
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("unmarshal final status: %v", err)
+	}
+	if st.State != "restarting" || st.ProgressPercent != 100 {
+		t.Fatalf("expected restarting state with 100%%, got %+v", st)
+	}
+}
+
+func TestSystemUpdateEndpointsUnavailableWhenNilUpdater(t *testing.T) {
+	dataDir := t.TempDir()
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	authSvc := auth.NewService(conn)
+	if _, err := authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "nil-upd"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	h := api.NewHandler(api.Deps{
+		DB:      conn,
+		DataDir: dataDir,
+		Auth:    authSvc,
+	})
+
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/v1/system/update", ""},
+		{http.MethodPut, "/api/v1/system/update/config", "{}"},
+		{http.MethodPost, "/api/v1/system/update/check", ""},
+		{http.MethodPost, "/api/v1/system/update/apply", ""},
+	}
+	for _, tc := range cases {
+		var r io.Reader
+		if tc.body != "" {
+			r = strings.NewReader(tc.body)
+		}
+		req := httptest.NewRequest(tc.method, tc.path, r)
+		req.Header.Set("Authorization", "Bearer "+sess.Token)
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s %s with nil updater = %d, want 503: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
 	}
 }
