@@ -1,3 +1,4 @@
+import { createRef } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -5,6 +6,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import VideoPlayer, {
   SUBTITLE_PREF_STORAGE_KEY,
   pickInitialSubtitle,
+  type VideoPlayerHandle,
 } from '../components/VideoPlayer';
 import LessonProgressIcon from '../components/LessonProgressIcon';
 import CourseDetailPage from '../pages/CourseDetailPage';
@@ -818,6 +820,134 @@ describe('VideoPlayer', () => {
     });
     unmount3();
     expect(progressCalls).toHaveLength(1);
+  });
+
+  it('exposes seekTo via ref to jump video playback safely clamped to duration', () => {
+    const ref = createRef<VideoPlayerHandle>();
+    const onTimeProgress = vi.fn();
+    const playback = makePlayback({ duration_ms: 120_000 });
+
+    const { container, rerender } = render(
+      <VideoPlayer ref={ref} playback={playback} onTimeProgress={onTimeProgress} />,
+    );
+    const video = container.querySelector('video') as HTMLVideoElement;
+    expect(video).toBeTruthy();
+    expect(ref.current).toBeTruthy();
+
+    Object.defineProperty(video, 'duration', { value: 200, configurable: true });
+    const playSpy = vi.spyOn(video, 'play').mockResolvedValue();
+
+    act(() => {
+      ref.current!.seekTo(75);
+    });
+    expect(video.currentTime).toBe(75);
+    expect(playSpy).toHaveBeenCalledTimes(1);
+    expect(onTimeProgress).toHaveBeenCalledWith('l1', 75, 200);
+
+    act(() => {
+      ref.current!.seekTo(999, false);
+    });
+    expect(video.currentTime).toBe(200);
+    expect(playSpy).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      ref.current!.seekTo(-15, false);
+    });
+    expect(video.currentTime).toBe(0);
+    expect(playSpy).toHaveBeenCalledTimes(1);
+
+    // Fallback to playback.duration_ms when video.duration is not ready (NaN)
+    Object.defineProperty(video, 'duration', { value: Number.NaN, configurable: true });
+    rerender(<VideoPlayer ref={ref} playback={playback} onTimeProgress={onTimeProgress} />);
+    act(() => {
+      ref.current!.seekTo(500, false);
+    });
+    expect(video.currentTime).toBe(120);
+  });
+
+  it('updates subtitle selectors in-place without destroying Artplayer when subtitles prop updates for the same lesson', () => {
+    const initialPlayback = makePlayback({ subtitles: [] });
+    const { rerender } = render(<VideoPlayer playback={initialPlayback} />);
+
+    expect(artMockInstances).toHaveLength(1);
+    const art = artMockInstances[0];
+    expect(art.destroy).not.toHaveBeenCalled();
+    expect(screen.getByText('无可用字幕')).toBeInTheDocument();
+
+    const aiSub: PlaybackSubtitleItem = {
+      index: 100,
+      language: 'zh',
+      title: 'AI 转写字幕',
+      format: 'vtt',
+      is_default: false,
+      is_external: true,
+      is_text: true,
+      url: '/Videos/l1/mf1/Subtitles/100/Stream.vtt',
+    };
+    const updatedPlayback = makePlayback({ subtitles: [aiSub] });
+    rerender(<VideoPlayer playback={updatedPlayback} />);
+
+    expect(artMockInstances).toHaveLength(1);
+    expect(art.destroy).not.toHaveBeenCalled();
+
+    const lastControlCall = art.controls.update.mock.calls.at(-1)?.[0] as Record<string, any>;
+    expect(lastControlCall).toEqual(
+      expect.objectContaining({
+        name: 'coursefin-subtitle',
+        position: 'right',
+        index: 15,
+      }),
+    );
+    expect(lastControlCall.selector.map((s: any) => s.html)).toEqual(['关闭', 'AI 转写字幕']);
+
+    const settingSubCall = art.setting.update.mock.calls
+      .map((c) => c[0] as Record<string, any>)
+      .filter((arg) => arg.name === 'coursefin-subtitle-setting')
+      .at(-1);
+    expect(settingSubCall).toBeTruthy();
+    expect(settingSubCall!.selector.map((s: any) => s.html)).toEqual(['关闭', 'AI 转写字幕']);
+
+    const settingSizeCall = art.setting.update.mock.calls
+      .map((c) => c[0] as Record<string, any>)
+      .filter((arg) => arg.html === '字幕字号')
+      .at(-1);
+    expect(settingSizeCall).toBeTruthy();
+
+    // Selecting newly injected AI subtitle via control bar works (no stale closure)
+    const aiItem = lastControlCall.selector[1];
+    act(() => {
+      lastControlCall.onSelect.call(art, aiItem);
+    });
+    expect(art.subtitle.switch).toHaveBeenCalledWith(
+      '/Videos/l1/mf1/Subtitles/100/Stream.vtt?api_key=test-token-123',
+      expect.objectContaining({ name: 'AI 转写字幕', type: 'vtt', escape: true }),
+    );
+    expect(art.subtitle.show).toBe(true);
+    expect(screen.getByText('AI 转写字幕')).toBeInTheDocument();
+
+    // Subsequent subtitle update keeps already-active selection intact
+    const enSub: PlaybackSubtitleItem = {
+      index: 101,
+      language: 'en',
+      title: 'English',
+      format: 'vtt',
+      is_default: false,
+      is_external: true,
+      is_text: true,
+      url: '/Videos/l1/mf1/Subtitles/101/Stream.vtt',
+    };
+    art.subtitle.switch.mockClear();
+    rerender(<VideoPlayer playback={makePlayback({ subtitles: [aiSub, enSub] })} />);
+    expect(artMockInstances).toHaveLength(1);
+    expect(art.destroy).not.toHaveBeenCalled();
+    expect(art.subtitle.switch).not.toHaveBeenCalled();
+    const afterControlCall = art.controls.update.mock.calls.at(-1)?.[0] as Record<string, any>;
+    expect(afterControlCall.selector.find((s: any) => s.value === '100')?.default).toBe(true);
+    expect(afterControlCall.selector.map((s: any) => s.html)).toEqual([
+      '关闭',
+      'AI 转写字幕',
+      'English',
+    ]);
   });
 });
 

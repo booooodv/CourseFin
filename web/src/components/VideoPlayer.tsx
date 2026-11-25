@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import Artplayer from 'artplayer';
 import type { Option as ArtOption, Setting } from 'artplayer';
 import Hls from 'hls.js';
@@ -189,6 +197,72 @@ function buildSubtitleStyle(fontSize: string): Partial<CSSStyleDeclaration> {
   };
 }
 
+function areTextSubtitlesEqual(
+  a: PlaybackSubtitleItem[],
+  b: PlaybackSubtitleItem[],
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const prev = a[i];
+    const next = b[i];
+    if (
+      prev.index !== next.index ||
+      prev.url !== next.url ||
+      prev.title !== next.title ||
+      prev.language !== next.language ||
+      prev.is_default !== next.is_default ||
+      prev.is_external !== next.is_external ||
+      prev.is_text !== next.is_text ||
+      prev.format !== next.format
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function buildSubtitleSelectors(subtitles: PlaybackSubtitleItem[], activeIdx: number | null) {
+  return [
+    {
+      default: activeIdx === null,
+      html: '关闭',
+      value: 'off',
+    },
+    ...subtitles.map((sub) => ({
+      default: activeIdx === sub.index,
+      html: escapeHtml(formatSubtitleLabel(sub)),
+      value: String(sub.index),
+    })),
+  ];
+}
+
+function buildSubtitleSizeSetting(savedSize: string): Setting {
+  const currentSizeMeta =
+    SUBTITLE_FONT_SIZES.find((s) => s.fontSize === savedSize) ?? SUBTITLE_FONT_SIZES[1];
+
+  return {
+    name: 'coursefin-subtitle-size',
+    html: '字幕字号',
+    tooltip: currentSizeMeta.label,
+    selector: SUBTITLE_FONT_SIZES.map((item) => ({
+      default: item.fontSize === savedSize,
+      html: item.label,
+      fontSize: item.fontSize,
+    })),
+    onSelect(item) {
+      const nextSize = String(item.fontSize ?? '20px');
+      this.subtitle.style({ fontSize: nextSize });
+      saveSubtitleSize(nextSize);
+      return String(item.html ?? currentSizeMeta.label);
+    },
+  };
+}
+
+export interface VideoPlayerHandle {
+  seekTo: (seconds: number, autoPlay?: boolean) => void;
+}
+
 export interface VideoPlayerProps {
   playback: LessonPlaybackInfo;
   lessonTitle?: string;
@@ -198,14 +272,17 @@ export interface VideoPlayerProps {
   onRequestTranscodeFallback?: () => void;
 }
 
-export default function VideoPlayer({
-  playback,
-  lessonTitle,
-  onProgressSaved,
-  onEnded,
-  onTimeProgress,
-  onRequestTranscodeFallback,
-}: VideoPlayerProps) {
+const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function VideoPlayer(
+  {
+    playback,
+    lessonTitle,
+    onProgressSaved,
+    onEnded,
+    onTimeProgress,
+    onRequestTranscodeFallback,
+  },
+  ref,
+) {
   const containerRef = useRef<HTMLDivElement>(null);
   const artMountRef = useRef<HTMLDivElement>(null);
   const artRef = useRef<Artplayer | null>(null);
@@ -227,16 +304,27 @@ export default function VideoPlayer({
   onTimeProgressRef.current = onTimeProgress;
   const onRequestTranscodeFallbackRef = useRef(onRequestTranscodeFallback);
   onRequestTranscodeFallbackRef.current = onRequestTranscodeFallback;
+  const playbackRef = useRef(playback);
+  playbackRef.current = playback;
 
   const textSubtitles = useMemo(
     () => (playback.subtitles ?? []).filter((sub) => sub.is_text && Boolean(sub.url)),
     [playback.subtitles],
   );
+  const textSubtitlesRef = useRef<PlaybackSubtitleItem[]>(textSubtitles);
+  textSubtitlesRef.current = textSubtitles;
 
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(() => {
     const initial = pickInitialSubtitle(textSubtitles, readSavedSubtitlePref());
     return initial ? initial.index : null;
   });
+  const selectedSubtitleIndexRef = useRef<number | null>(selectedSubtitleIndex);
+  const subtitleMenusMountedRef = useRef<boolean>(false);
+  const lastSyncedSubtitlesRef = useRef<{
+    art: Artplayer;
+    subtitles: PlaybackSubtitleItem[];
+  } | null>(null);
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [hlsUnsupportedBrowser, setHlsUnsupportedBrowser] = useState(false);
@@ -245,6 +333,165 @@ export default function VideoPlayer({
     if (!playback.stream_url) return '';
     return withApiKey(playback.stream_url);
   }, [playback.stream_url]);
+
+  const emitTimeProgress = useCallback((video: HTMLVideoElement, force: boolean) => {
+    const currentSec = video.currentTime;
+    if (!Number.isFinite(currentSec) || currentSec < 0) return;
+    latestTimeRef.current = currentSec;
+
+    const currentPlayback = playbackRef.current;
+    const durationSec =
+      Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : currentPlayback.duration_ms > 0
+          ? currentPlayback.duration_ms / 1000
+          : 0;
+    if (durationSec <= 0 || !onTimeProgressRef.current) return;
+
+    const pct = Math.min(1, Math.max(0, currentSec / durationSec));
+    const prev = lastTimeEmitRef.current;
+    if (
+      force ||
+      !prev ||
+      Math.abs(pct - prev.pct) >= 0.01 ||
+      Math.abs(currentSec - prev.time) >= 1
+    ) {
+      lastTimeEmitRef.current = { time: currentSec, pct };
+      onTimeProgressRef.current(currentPlayback.lesson_id, currentSec, durationSec);
+    }
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      seekTo(seconds: number, autoPlay = true) {
+        if (!Number.isFinite(seconds)) return;
+        const video = videoRef.current;
+        if (!video) return;
+
+        const fallbackDuration =
+          playbackRef.current.duration_ms > 0 ? playbackRef.current.duration_ms / 1000 : 0;
+        const duration =
+          Number.isFinite(video.duration) && video.duration > 0
+            ? video.duration
+            : fallbackDuration;
+        const clamped =
+          duration > 0 ? Math.min(duration, Math.max(0, seconds)) : Math.max(0, seconds);
+
+        video.currentTime = clamped;
+        latestTimeRef.current = clamped;
+        emitTimeProgress(video, true);
+
+        if (autoPlay && video.paused) {
+          void Promise.resolve(video.play()).catch(() => {});
+        }
+      },
+    }),
+    [emitTimeProgress],
+  );
+
+  const applySubtitleSelection = useCallback(
+    (
+      art: Artplayer,
+      rawValue: string | number | undefined,
+      source: 'control' | 'setting',
+    ): string => {
+      const currentSubtitles = textSubtitlesRef.current;
+      const value = rawValue === undefined ? 'off' : String(rawValue);
+      const targetIndex = value === 'off' ? null : Number(value);
+      const sub =
+        targetIndex !== null && !Number.isNaN(targetIndex)
+          ? currentSubtitles.find((item) => item.index === targetIndex) ?? null
+          : null;
+
+      let controlLabel = '字幕';
+      let settingLabel = '关闭';
+      let nextIdx: number | null = null;
+
+      if (!sub) {
+        art.subtitle.show = false;
+        saveSubtitlePref('off');
+        selectedSubtitleIndexRef.current = null;
+        setSelectedSubtitleIndex(null);
+      } else {
+        const label = formatSubtitleLabel(sub);
+        const escapedLabel = escapeHtml(label);
+        void art.subtitle.switch(withApiKey(sub.url), {
+          name: label,
+          type: 'vtt',
+          encoding: 'utf-8',
+          escape: true,
+        });
+        art.subtitle.show = true;
+        saveSubtitlePref(subtitlePrefValue(sub));
+        selectedSubtitleIndexRef.current = sub.index;
+        setSelectedSubtitleIndex(sub.index);
+        controlLabel = escapedLabel;
+        settingLabel = escapedLabel;
+        nextIdx = sub.index;
+      }
+
+      // Sync the sibling menu with freshly cloned selector items so control bar & settings stay consistent.
+      if (source === 'control') {
+        art.setting?.update?.({
+          name: 'coursefin-subtitle-setting',
+          html: '字幕轨道',
+          tooltip: settingLabel,
+          selector: buildSubtitleSelectors(currentSubtitles, nextIdx),
+          onSelect(item) {
+            return applySubtitleSelection(this, item.value, 'setting');
+          },
+        });
+      } else {
+        art.controls?.update?.({
+          name: 'coursefin-subtitle',
+          position: 'right',
+          index: 15,
+          html: controlLabel,
+          tooltip: '切换字幕',
+          selector: buildSubtitleSelectors(currentSubtitles, nextIdx),
+          onSelect(item) {
+            return applySubtitleSelection(this, item.value, 'control');
+          },
+        });
+      }
+
+      return source === 'setting' ? settingLabel : controlLabel;
+    },
+    [],
+  );
+
+  const buildSubtitleMenuOptions = useCallback(
+    (subtitles: PlaybackSubtitleItem[], activeSub: PlaybackSubtitleItem | null) => {
+      const activeIdx = activeSub ? activeSub.index : null;
+      const escapedLabel = activeSub ? escapeHtml(formatSubtitleLabel(activeSub)) : null;
+
+      const controlOption: Parameters<Artplayer['controls']['update']>[0] = {
+        name: 'coursefin-subtitle',
+        position: 'right',
+        index: 15,
+        html: escapedLabel ?? '字幕',
+        tooltip: '切换字幕',
+        selector: buildSubtitleSelectors(subtitles, activeIdx),
+        onSelect(item) {
+          return applySubtitleSelection(this, item.value, 'control');
+        },
+      };
+
+      const settingOption: Setting = {
+        name: 'coursefin-subtitle-setting',
+        html: '字幕轨道',
+        tooltip: escapedLabel ?? '关闭',
+        selector: buildSubtitleSelectors(subtitles, activeIdx),
+        onSelect(item) {
+          return applySubtitleSelection(this, item.value, 'setting');
+        },
+      };
+
+      return { controlOption, settingOption };
+    },
+    [applySubtitleSelection],
+  );
 
   const reportTicks = useCallback(
     async (ticks: number) => {
@@ -308,137 +555,29 @@ export default function VideoPlayer({
 
     const savedRate = readSavedPlaybackRate();
     const savedSize = readSavedSubtitleSize();
-    const initialSub = pickInitialSubtitle(textSubtitles, readSavedSubtitlePref());
-    setSelectedSubtitleIndex(initialSub ? initialSub.index : null);
+    const currentSubtitles = textSubtitlesRef.current;
+    const initialSub = pickInitialSubtitle(currentSubtitles, readSavedSubtitlePref());
+    const initialIdx = initialSub ? initialSub.index : null;
+    selectedSubtitleIndexRef.current = initialIdx;
+    setSelectedSubtitleIndex(initialIdx);
+    subtitleMenusMountedRef.current = currentSubtitles.length > 0;
 
     let hlsInstance: Hls | null = null;
     let usedNativeHls = false;
     const progressSnapshot = playback.progress;
     const durationMsSnapshot = playback.duration_ms;
 
-    const buildSubtitleSelectors = (activeIdx: number | null) => [
-      {
-        default: activeIdx === null,
-        html: '关闭',
-        value: 'off',
-      },
-      ...textSubtitles.map((sub) => ({
-        default: activeIdx === sub.index,
-        html: escapeHtml(formatSubtitleLabel(sub)),
-        value: String(sub.index),
-      })),
-    ];
-
-    const applySubtitleSelection = (
-      art: Artplayer,
-      rawValue: string | number | undefined,
-      source: 'control' | 'setting',
-    ): string => {
-      const value = rawValue === undefined ? 'off' : String(rawValue);
-      const targetIndex = value === 'off' ? null : Number(value);
-      const sub =
-        targetIndex !== null && !Number.isNaN(targetIndex)
-          ? textSubtitles.find((item) => item.index === targetIndex) ?? null
-          : null;
-
-      let controlLabel = '字幕';
-      let settingLabel = '关闭';
-      let nextIdx: number | null = null;
-
-      if (!sub) {
-        art.subtitle.show = false;
-        saveSubtitlePref('off');
-        setSelectedSubtitleIndex(null);
-      } else {
-        const label = formatSubtitleLabel(sub);
-        const escapedLabel = escapeHtml(label);
-        void art.subtitle.switch(withApiKey(sub.url), {
-          name: label,
-          type: 'vtt',
-          encoding: 'utf-8',
-          escape: true,
-        });
-        art.subtitle.show = true;
-        saveSubtitlePref(subtitlePrefValue(sub));
-        setSelectedSubtitleIndex(sub.index);
-        controlLabel = escapedLabel;
-        settingLabel = escapedLabel;
-        nextIdx = sub.index;
-      }
-
-      // Sync the sibling menu with freshly cloned selector items so control bar & settings stay consistent.
-      if (source === 'control') {
-        art.setting?.update?.({
-          name: 'coursefin-subtitle-setting',
-          html: '字幕轨道',
-          tooltip: settingLabel,
-          selector: buildSubtitleSelectors(nextIdx),
-          onSelect(item) {
-            return applySubtitleSelection(this, item.value, 'setting');
-          },
-        });
-      } else {
-        art.controls?.update?.({
-          name: 'coursefin-subtitle',
-          position: 'right',
-          index: 15,
-          html: controlLabel,
-          tooltip: '切换字幕',
-          selector: buildSubtitleSelectors(nextIdx),
-          onSelect(item) {
-            return applySubtitleSelection(this, item.value, 'control');
-          },
-        });
-      }
-
-      return source === 'setting' ? settingLabel : controlLabel;
-    };
-
     const controls: NonNullable<ArtOption['controls']> = [];
     const settings: Setting[] = [];
 
-    if (textSubtitles.length > 0) {
-      const initialIdx = initialSub ? initialSub.index : null;
-      controls.push({
-        name: 'coursefin-subtitle',
-        position: 'right',
-        index: 15,
-        html: initialSub ? escapeHtml(formatSubtitleLabel(initialSub)) : '字幕',
-        tooltip: '切换字幕',
-        selector: buildSubtitleSelectors(initialIdx),
-        onSelect(item) {
-          return applySubtitleSelection(this, item.value, 'control');
-        },
-      });
-
-      settings.push({
-        name: 'coursefin-subtitle-setting',
-        html: '字幕轨道',
-        tooltip: initialSub ? escapeHtml(formatSubtitleLabel(initialSub)) : '关闭',
-        selector: buildSubtitleSelectors(initialIdx),
-        onSelect(item) {
-          return applySubtitleSelection(this, item.value, 'setting');
-        },
-      });
-
-      const currentSizeMeta =
-        SUBTITLE_FONT_SIZES.find((s) => s.fontSize === savedSize) ?? SUBTITLE_FONT_SIZES[1];
-
-      settings.push({
-        html: '字幕字号',
-        tooltip: currentSizeMeta.label,
-        selector: SUBTITLE_FONT_SIZES.map((item) => ({
-          default: item.fontSize === savedSize,
-          html: item.label,
-          fontSize: item.fontSize,
-        })),
-        onSelect(item) {
-          const nextSize = String(item.fontSize ?? '20px');
-          this.subtitle.style({ fontSize: nextSize });
-          saveSubtitleSize(nextSize);
-          return String(item.html ?? currentSizeMeta.label);
-        },
-      });
+    if (currentSubtitles.length > 0) {
+      const { controlOption, settingOption } = buildSubtitleMenuOptions(
+        currentSubtitles,
+        initialSub,
+      );
+      controls.push(controlOption);
+      settings.push(settingOption);
+      settings.push(buildSubtitleSizeSetting(savedSize));
     }
 
     const artOption: ArtOption = {
@@ -505,37 +644,12 @@ export default function VideoPlayer({
 
     const art = new Artplayer(artOption);
     artRef.current = art;
+    lastSyncedSubtitlesRef.current = { art, subtitles: currentSubtitles };
     art.subtitle.show = Boolean(initialSub);
 
     const video = art.video;
     videoRef.current = video;
     video.playbackRate = savedRate;
-
-    const emitTimeProgress = (force: boolean) => {
-      const currentSec = video.currentTime;
-      if (!Number.isFinite(currentSec) || currentSec < 0) return;
-      latestTimeRef.current = currentSec;
-
-      const durationSec =
-        Number.isFinite(video.duration) && video.duration > 0
-          ? video.duration
-          : durationMsSnapshot > 0
-            ? durationMsSnapshot / 1000
-            : 0;
-      if (durationSec <= 0 || !onTimeProgressRef.current) return;
-
-      const pct = Math.min(1, Math.max(0, currentSec / durationSec));
-      const prev = lastTimeEmitRef.current;
-      if (
-        force ||
-        !prev ||
-        Math.abs(pct - prev.pct) >= 0.01 ||
-        Math.abs(currentSec - prev.time) >= 1
-      ) {
-        lastTimeEmitRef.current = { time: currentSec, pct };
-        onTimeProgressRef.current(playback.lesson_id, currentSec, durationSec);
-      }
-    };
 
     const handleLoadedMetadata = () => {
       video.playbackRate = readSavedPlaybackRate();
@@ -555,8 +669,8 @@ export default function VideoPlayer({
       }
     };
 
-    const handleTimeUpdate = () => emitTimeProgress(false);
-    const handleSeeked = () => emitTimeProgress(true);
+    const handleTimeUpdate = () => emitTimeProgress(video, false);
+    const handleSeeked = () => emitTimeProgress(video, true);
 
     const handlePlay = () => {
       setIsPlaying(true);
@@ -659,20 +773,96 @@ export default function VideoPlayer({
       art.destroy(false);
       artRef.current = null;
       videoRef.current = null;
+      subtitleMenusMountedRef.current = false;
+      lastSyncedSubtitlesRef.current = null;
 
       if (playback.mode === 'hls' && playback.play_session_id) {
         void api.stopActiveEncoding(playback.play_session_id).catch(() => {});
       }
     };
-    // Re-initialize Artplayer when lesson, session, stream URL, mode, or subtitle tracks change.
+    // Re-initialize Artplayer only when lesson, session, stream URL, or playback mode change.
+    // Subtitle track updates are applied in-place via the secondary effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     playback.lesson_id,
     playback.play_session_id,
     resolvedStreamUrl,
     playback.mode,
-    textSubtitles,
     reportTicks,
+    emitTimeProgress,
+    buildSubtitleMenuOptions,
+  ]);
+
+  // Refresh subtitle selectors in-place without destroying Artplayer or interrupting playback
+  useEffect(() => {
+    const art = artRef.current;
+    if (!art || art.isDestroy) return;
+
+    const lastSynced = lastSyncedSubtitlesRef.current;
+    if (
+      lastSynced &&
+      lastSynced.art === art &&
+      areTextSubtitlesEqual(lastSynced.subtitles, textSubtitles)
+    ) {
+      return;
+    }
+    lastSyncedSubtitlesRef.current = { art, subtitles: textSubtitles };
+
+    if (textSubtitles.length === 0) {
+      if (selectedSubtitleIndexRef.current !== null) {
+        selectedSubtitleIndexRef.current = null;
+        setSelectedSubtitleIndex(null);
+        art.subtitle.show = false;
+      }
+      if (subtitleMenusMountedRef.current) {
+        const controlsRecord = art.controls as unknown as Record<string, unknown> | undefined;
+        if (controlsRecord?.['coursefin-subtitle'] && typeof art.controls?.remove === 'function') {
+          art.controls.remove('coursefin-subtitle');
+        }
+        if (
+          art.setting?.find?.('coursefin-subtitle-setting') &&
+          typeof art.setting?.remove === 'function'
+        ) {
+          art.setting.remove('coursefin-subtitle-setting');
+        }
+        if (
+          art.setting?.find?.('coursefin-subtitle-size') &&
+          typeof art.setting?.remove === 'function'
+        ) {
+          art.setting.remove('coursefin-subtitle-size');
+        }
+        subtitleMenusMountedRef.current = false;
+      }
+      return;
+    }
+
+    const currentActiveIdx = selectedSubtitleIndexRef.current;
+    const activeSub =
+      currentActiveIdx !== null
+        ? textSubtitles.find((sub) => sub.index === currentActiveIdx) ?? null
+        : null;
+
+    if (currentActiveIdx !== null && !activeSub) {
+      selectedSubtitleIndexRef.current = null;
+      setSelectedSubtitleIndex(null);
+      art.subtitle.show = false;
+    }
+
+    const { controlOption, settingOption } = buildSubtitleMenuOptions(textSubtitles, activeSub);
+    art.controls?.update?.(controlOption);
+    art.setting?.update?.(settingOption);
+
+    if (!subtitleMenusMountedRef.current) {
+      art.setting?.update?.(buildSubtitleSizeSetting(readSavedSubtitleSize()));
+      subtitleMenusMountedRef.current = true;
+    }
+  }, [
+    textSubtitles,
+    playback.lesson_id,
+    playback.play_session_id,
+    resolvedStreamUrl,
+    playback.mode,
+    buildSubtitleMenuOptions,
   ]);
 
   // Periodic 10s progress sync while playing
@@ -874,4 +1064,6 @@ export default function VideoPlayer({
       </div>
     </div>
   );
-}
+});
+
+export default VideoPlayer;
