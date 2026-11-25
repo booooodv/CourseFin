@@ -45,12 +45,15 @@ func NewService(db *sql.DB, dataDir string, registry *storage.Registry, ffmpegBi
 		registry = storage.NewRegistry()
 	}
 	resolved := resolveBinaryPath(ffmpegBin, "ffmpeg")
-	ffprobeResolved := resolveBinaryPath("", "ffprobe")
-	if !isExecutableBinary(ffprobeResolved) && strings.ContainsRune(resolved, filepath.Separator) {
+	var ffprobeResolved string
+	if strings.ContainsRune(resolved, filepath.Separator) {
 		cand := filepath.Join(filepath.Dir(resolved), "ffprobe")
 		if isExecutableBinary(cand) {
 			ffprobeResolved = cand
 		}
+	}
+	if ffprobeResolved == "" {
+		ffprobeResolved = resolveBinaryPath("", "ffprobe")
 	}
 	s := &Service{
 		db:            db,

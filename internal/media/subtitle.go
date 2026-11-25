@@ -80,7 +80,8 @@ type ffprobeStreamEntry struct {
 
 // ResolveStreams returns all embedded streams (preserving ffprobe stream index)
 // followed sequentially by active external sidecar subtitle_files ordered by
-// is_default DESC, language ASC, id ASC.
+// is_default DESC, language ASC, id ASC, and finally any cached ASR transcript
+// track stored in media_transcripts.
 func (s *Service) ResolveStreams(ctx context.Context, mediaFileID string) ([]StreamDescriptor, error) {
 	rec, err := s.resolveMediaRecord(ctx, mediaFileID, false)
 	if err != nil {
@@ -608,8 +609,8 @@ func hasWebVTTContent(vtt string) bool {
 	if trimmed == "" {
 		return false
 	}
-	if strings.HasPrefix(strings.ToUpper(trimmed), "WEBVTT") {
-		return strings.TrimSpace(trimmed[len("WEBVTT"):]) != ""
+	if len(trimmed) >= 6 && strings.EqualFold(trimmed[:6], "WEBVTT") {
+		return strings.TrimSpace(trimmed[6:]) != ""
 	}
 	return true
 }

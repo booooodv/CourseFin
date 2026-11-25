@@ -925,14 +925,18 @@ func (s *Service) cancelQueuedOnShutdownLocked() {
 	s.batchQueue = nil
 }
 
-func finishBatchLocked(batch *batchEntry, stage JobStage) {
-	batch.pending = nil
-	batch.status.Running = false
+func clearBatchActiveFieldsLocked(batch *batchEntry, stage JobStage) {
 	batch.status.CurrentStage = stage
 	batch.status.CurrentLessonID = ""
 	batch.status.CurrentLessonTitle = ""
 	batch.status.ChunkIndex = 0
 	batch.status.ChunkTotal = 0
+}
+
+func finishBatchLocked(batch *batchEntry, stage JobStage) {
+	batch.pending = nil
+	batch.status.Running = false
+	clearBatchActiveFieldsLocked(batch, stage)
 	batch.status.FinishedAt = nowUTC()
 }
 
@@ -1017,6 +1021,8 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 			batch.status.Skipped++
 			if len(batch.pending) == 0 {
 				finishBatchLocked(batch, StageCompleted)
+			} else {
+				clearBatchActiveFieldsLocked(batch, StageQueued)
 			}
 			s.mu.Unlock()
 			return
@@ -1112,6 +1118,8 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 
 	if len(batch.pending) == 0 {
 		finishBatchLocked(batch, StageCompleted)
+	} else {
+		clearBatchActiveFieldsLocked(batch, StageQueued)
 	}
 }
 
@@ -1246,7 +1254,7 @@ func (s *Service) resolveLessonTranscript(
 	manual := strings.TrimSpace(opts.ManualTranscript)
 	if manual != "" {
 		vtt, plain, hasTS := DetectManualTranscript(manual)
-		if !hasTS && strings.TrimSpace(plain) == "" {
+		if strings.TrimSpace(plain) == "" {
 			return resolvedTranscript{}, &pipelineError{code: "invalid_input", err: fmt.Errorf("%w: manual_transcript is empty", ErrInvalidInput)}
 		}
 		if err := s.upsertMediaTranscript(ctx, mediaFileID, "manual", "und", "", vtt, plain); err != nil {
@@ -1262,25 +1270,27 @@ func (s *Service) resolveLessonTranscript(
 	}
 
 	if !opts.ForceRetranscribe {
-		vtt, st, sl, found, subErr := s.media.ExtractBestSubtitleVTT(ctx, mediaFileID)
-		if subErr != nil {
-			if ctx.Err() != nil {
-				return resolvedTranscript{}, ctx.Err()
+		if s.media != nil {
+			vtt, st, sl, found, subErr := s.media.ExtractBestSubtitleVTT(ctx, mediaFileID)
+			if subErr != nil {
+				if ctx.Err() != nil {
+					return resolvedTranscript{}, ctx.Err()
+				}
+				// If physical subtitle extraction failed (e.g. embedded subtitle without ffmpeg),
+				// still check cached transcript before failing.
+				if res, ok, cErr := s.resolveCachedTranscript(ctx, mediaFileID); cErr == nil && ok {
+					return res, nil
+				}
+				return resolvedTranscript{}, &pipelineError{code: "subtitle_extract_failed", err: subErr}
 			}
-			// If physical subtitle extraction failed (e.g. embedded subtitle without ffmpeg),
-			// still check cached transcript before failing.
-			if res, ok, cErr := s.resolveCachedTranscript(ctx, mediaFileID); cErr == nil && ok {
-				return res, nil
+			if found {
+				return resolvedTranscript{
+					sourceType:    st,
+					sourceLabel:   sl,
+					hasTimestamps: true,
+					vttText:       vtt,
+				}, nil
 			}
-			return resolvedTranscript{}, &pipelineError{code: "subtitle_extract_failed", err: subErr}
-		}
-		if found {
-			return resolvedTranscript{
-				sourceType:    st,
-				sourceLabel:   sl,
-				hasTimestamps: true,
-				vttText:       vtt,
-			}, nil
 		}
 
 		if res, ok, cacheErr := s.resolveCachedTranscript(ctx, mediaFileID); cacheErr != nil {
@@ -1451,6 +1461,9 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, cfg AI
 	}
 	if s.audioExtractor == nil || (!s.hasCustomExtractor && !s.media.HasFFmpeg()) {
 		return "", "", &pipelineError{code: "ffmpeg_unavailable", err: errors.New("ffmpeg is unavailable for audio extraction")}
+	}
+	if s.media == nil {
+		return "", "", &pipelineError{code: "media_unavailable", err: errors.New("media service is unavailable")}
 	}
 
 	info, err := s.media.ResolveLocalMediaInfo(ctx, mediaFileID)

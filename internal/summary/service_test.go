@@ -798,6 +798,29 @@ func TestSingleLessonManualTranscriptPlainTextAndSRT(t *testing.T) {
 	if state2.Summary.Timeline[0].StartSec == nil || *state2.Summary.Timeline[0].StartSec != 10 {
 		t.Fatalf("expected start_sec == 10, got %+v", state2.Summary.Timeline[0])
 	}
+
+	// Timed cue containing only markup/tags strips to empty plain text and must be rejected before touching media_transcripts.
+	if _, err := svc.StartLessonSummary(context.Background(), lessonID, summary.GenerateLessonOptions{
+		ManualTranscript: "1\n00:00:01,000 --> 00:00:02,000\n{\\an8}<i>   </i>\n",
+	}); err != nil {
+		t.Fatalf("StartLessonSummary empty-stripped timed manual transcript failed: %v", err)
+	}
+	svc.Wait()
+
+	state3, err := svc.GetLessonSummaryState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("GetLessonSummaryState 3 failed: %v", err)
+	}
+	if state3.Job == nil || state3.Job.Stage != summary.StageFailed || state3.Job.ErrorCode != "invalid_input" {
+		t.Fatalf("expected invalid_input failure for empty-stripped timed manual transcript, got %+v", state3.Job)
+	}
+	var cachedPlain string
+	if err := conn.QueryRow(`SELECT plain_text FROM media_transcripts WHERE media_file_id = (SELECT media_file_id FROM lessons WHERE id = ?)`, lessonID).Scan(&cachedPlain); err != nil {
+		t.Fatalf("query media_transcripts failed: %v", err)
+	}
+	if !strings.Contains(cachedPlain, "接口与多态实战") {
+		t.Fatalf("expected existing media_transcripts row preserved, got %q", cachedPlain)
+	}
 }
 
 func TestLongTranscriptUsesMapReduce(t *testing.T) {
@@ -1220,6 +1243,8 @@ func TestSingleLessonPriorityOverBatchAndIdempotencyAndCancelAndDelete(t *testin
 
 	a1Entered := make(chan struct{})
 	releaseA1 := make(chan struct{})
+	b1Entered := make(chan struct{})
+	releaseB1 := make(chan struct{})
 	var mu sync.Mutex
 	var execOrder []string
 
@@ -1243,6 +1268,12 @@ func TestSingleLessonPriorityOverBatchAndIdempotencyAndCancelAndDelete(t *testin
 			tag = "A3"
 		case strings.Contains(bodyStr, "LESSON_B1"):
 			tag = "B1"
+			close(b1Entered)
+			select {
+			case <-releaseB1:
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
 		}
 
 		mu.Lock()
@@ -1304,6 +1335,29 @@ func TestSingleLessonPriorityOverBatchAndIdempotencyAndCancelAndDelete(t *testin
 	}
 
 	close(releaseA1)
+
+	select {
+	case <-b1Entered:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for priority job B1 to preempt batch")
+	}
+
+	preemptStatus, err := svc.GetCourseSummaryStatus(context.Background(), courseAID)
+	if err != nil {
+		t.Fatalf("GetCourseSummaryStatus during preemption failed: %v", err)
+	}
+	if preemptStatus.BatchJob == nil || !preemptStatus.BatchJob.Running {
+		t.Fatalf("expected running batch job during preemption, got %+v", preemptStatus.BatchJob)
+	}
+	if preemptStatus.BatchJob.CurrentStage != summary.StageQueued ||
+		preemptStatus.BatchJob.CurrentLessonID != "" ||
+		preemptStatus.BatchJob.CurrentLessonTitle != "" ||
+		preemptStatus.BatchJob.ChunkIndex != 0 ||
+		preemptStatus.BatchJob.ChunkTotal != 0 {
+		t.Fatalf("expected stale batch fields cleared during priority preemption, got %+v", preemptStatus.BatchJob)
+	}
+
+	close(releaseB1)
 	svc.Wait()
 
 	wantOrder := []string{"A1", "B1", "A2", "A3"}

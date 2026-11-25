@@ -1072,6 +1072,50 @@ func TestHasFFmpegDetection(t *testing.T) {
 	}
 }
 
+func TestCustomFFmpegSiblingFFprobePrecedence(t *testing.T) {
+	conn, dataDir := openTestDB(t)
+	pathDir := t.TempDir()
+	pathFFprobe := filepath.Join(pathDir, "ffprobe")
+	if err := os.WriteFile(pathFFprobe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write PATH ffprobe: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	customDir := t.TempDir()
+	customFFmpeg := filepath.Join(customDir, "ffmpeg")
+	customFFprobe := filepath.Join(customDir, "ffprobe")
+	if err := os.WriteFile(customFFmpeg, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write custom ffmpeg: %v", err)
+	}
+	if err := os.WriteFile(customFFprobe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write custom ffprobe: %v", err)
+	}
+
+	svcWithSibling := media.NewService(conn, dataDir, nil, customFFmpeg)
+	defer svcWithSibling.Close()
+	if !svcWithSibling.HasFFprobe() {
+		t.Fatalf("expected HasFFprobe() == true")
+	}
+	if svcWithSibling.FFprobeBin() != customFFprobe {
+		t.Fatalf("FFprobeBin() = %q, want sibling %q over PATH %q", svcWithSibling.FFprobeBin(), customFFprobe, pathFFprobe)
+	}
+
+	noSiblingDir := t.TempDir()
+	noSiblingFFmpeg := filepath.Join(noSiblingDir, "ffmpeg")
+	if err := os.WriteFile(noSiblingFFmpeg, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write no-sibling ffmpeg: %v", err)
+	}
+
+	svcFallback := media.NewService(conn, dataDir, nil, noSiblingFFmpeg)
+	defer svcFallback.Close()
+	if !svcFallback.HasFFprobe() {
+		t.Fatalf("expected HasFFprobe() == true on PATH fallback")
+	}
+	if svcFallback.FFprobeBin() != pathFFprobe {
+		t.Fatalf("FFprobeBin() = %q, want PATH fallback %q", svcFallback.FFprobeBin(), pathFFprobe)
+	}
+}
+
 func TestServeMasterPlaylistPropagatesTranscodeVideoAndTranscodesMPEG4(t *testing.T) {
 	conn, dataDir := openTestDB(t)
 	mediaRoot := t.TempDir()
