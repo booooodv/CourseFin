@@ -146,7 +146,12 @@ func (s *Service) ServeMasterPlaylist(w http.ResponseWriter, r *http.Request, le
 		writeLookupError(w, err)
 		return
 	}
-	if rec.VideoCodec != "" && !s.CanRemuxVideoCodec(rec.VideoCodec) {
+	transcodeVideo := isTranscodeVideoRequested(r)
+	if transcodeVideo && !s.HasFFmpeg() {
+		http.Error(w, "ffmpeg is not available for video transcoding", http.StatusServiceUnavailable)
+		return
+	}
+	if !transcodeVideo && rec.VideoCodec != "" && !s.CanRemuxVideoCodec(rec.VideoCodec) {
 		http.Error(w, "video codec cannot be remuxed for HLS playback", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -199,7 +204,12 @@ func (s *Service) ServeMediaPlaylist(w http.ResponseWriter, r *http.Request, les
 		writeLookupError(w, err)
 		return
 	}
-	if rec.VideoCodec != "" && !s.CanRemuxVideoCodec(rec.VideoCodec) {
+	transcodeVideo := isTranscodeVideoRequested(r)
+	if transcodeVideo && !s.HasFFmpeg() {
+		http.Error(w, "ffmpeg is not available for video transcoding", http.StatusServiceUnavailable)
+		return
+	}
+	if !transcodeVideo && rec.VideoCodec != "" && !s.CanRemuxVideoCodec(rec.VideoCodec) {
 		http.Error(w, "video codec cannot be remuxed for HLS playback", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -254,7 +264,12 @@ func (s *Service) ServeHLSSegment(w http.ResponseWriter, r *http.Request, lesson
 		writeLookupError(w, err)
 		return
 	}
-	if rec.VideoCodec != "" && !s.CanRemuxVideoCodec(rec.VideoCodec) {
+	transcodeVideo := isTranscodeVideoRequested(r)
+	if transcodeVideo && !s.HasFFmpeg() {
+		http.Error(w, "ffmpeg is not available for video transcoding", http.StatusServiceUnavailable)
+		return
+	}
+	if !transcodeVideo && rec.VideoCodec != "" && !s.CanRemuxVideoCodec(rec.VideoCodec) {
 		http.Error(w, "video codec cannot be remuxed for HLS playback", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -298,7 +313,7 @@ func (s *Service) ServeHLSSegment(w http.ResponseWriter, r *http.Request, lesson
 		return
 	}
 
-	segPath, statusCode, err := s.ensureSegmentReady(r.Context(), sess, absPath, rec.AudioCodec, segmentIndex)
+	segPath, statusCode, err := s.ensureSegmentReady(r.Context(), sess, absPath, rec.AudioCodec, segmentIndex, transcodeVideo)
 	if err != nil {
 		if statusCode == 0 {
 			statusCode = http.StatusInternalServerError
@@ -371,7 +386,7 @@ func (s *Service) getOrCreateRemuxSession(lessonID, safeSession, rawSession stri
 	return sess, nil
 }
 
-func (s *Service) ensureSegmentReady(ctx context.Context, sess *remuxSession, absPath, audioCodec string, segmentIndex int) (string, int, error) {
+func (s *Service) ensureSegmentReady(ctx context.Context, sess *remuxSession, absPath, audioCodec string, segmentIndex int, transcodeVideo bool) (string, int, error) {
 	segPath := filepath.Join(sess.dir, fmt.Sprintf("%d.ts", segmentIndex))
 
 	var gen uint64
@@ -445,7 +460,7 @@ func (s *Service) ensureSegmentReady(ctx context.Context, sess *remuxSession, ab
 		}
 
 		var err error
-		gen, done, err = s.launchFFmpegRemuxLocked(sess, absPath, audioCodec, segmentIndex)
+		gen, done, err = s.launchFFmpegRemuxLocked(sess, absPath, audioCodec, segmentIndex, transcodeVideo)
 		if err != nil {
 			sess.mu.Unlock()
 			return "", http.StatusInternalServerError, err
@@ -496,7 +511,7 @@ func (s *Service) ensureSegmentReady(ctx context.Context, sess *remuxSession, ab
 	}
 }
 
-func (s *Service) launchFFmpegRemuxLocked(sess *remuxSession, absPath, audioCodec string, startSegment int) (uint64, chan struct{}, error) {
+func (s *Service) launchFFmpegRemuxLocked(sess *remuxSession, absPath, audioCodec string, startSegment int, transcodeVideo bool) (uint64, chan struct{}, error) {
 	startSec := startSegment * SegmentDurationSec
 
 	args := []string{
@@ -506,7 +521,18 @@ func (s *Service) launchFFmpegRemuxLocked(sess *remuxSession, absPath, audioCode
 		"-i", absPath,
 		"-map", "0:v:0",
 		"-map", "0:a:0?",
-		"-c:v", "copy",
+	}
+	if transcodeVideo {
+		args = append(args,
+			"-c:v", "libx264",
+			"-preset", "veryfast",
+			"-crf", "23",
+			"-pix_fmt", "yuv420p",
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", SegmentDurationSec),
+			"-sc_threshold", "0",
+		)
+	} else {
+		args = append(args, "-c:v", "copy")
 	}
 	if s.NeedsAudioTranscode(audioCodec) {
 		args = append(args, "-c:a", "aac", "-ac", "2", "-b:a", "192k")
@@ -656,6 +682,11 @@ func resolveEffectiveSessionID(r *http.Request, sessionID string) string {
 	return ""
 }
 
+func isTranscodeVideoRequested(r *http.Request) bool {
+	raw := strings.ToLower(strings.TrimSpace(queryParamCI(r, "TranscodeVideo")))
+	return raw == "1" || raw == "true"
+}
+
 func propagateHLSQuery(r *http.Request, sessionID string) string {
 	vals := url.Values{}
 	if sessionID != "" {
@@ -667,6 +698,9 @@ func propagateHLSQuery(r *http.Request, sessionID string) string {
 		}
 		if msID := strings.TrimSpace(queryParamCI(r, "MediaSourceId")); msID != "" {
 			vals.Set("MediaSourceId", msID)
+		}
+		if isTranscodeVideoRequested(r) {
+			vals.Set("TranscodeVideo", "1")
 		}
 	}
 	return vals.Encode()

@@ -681,16 +681,19 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 	}
 
 	type playbackResp struct {
-		Mode       string `json:"mode"`
-		StreamURL  string `json:"stream_url"`
-		VideoCodec string `json:"video_codec"`
-		AudioCodec string `json:"audio_codec"`
-		Container  string `json:"container"`
-		Subtitles  []struct {
+		Mode        string `json:"mode"`
+		StreamURL   string `json:"stream_url"`
+		Transcoding bool   `json:"transcoding"`
+		VideoCodec  string `json:"video_codec"`
+		AudioCodec  string `json:"audio_codec"`
+		Container   string `json:"container"`
+		Subtitles   []struct {
 			Language string `json:"language"`
 			URL      string `json:"url"`
 		} `json:"subtitles"`
 	}
+
+	hasFFmpeg := env.mediaSvc.HasFFmpeg()
 
 	// 1. MP4 (h264/aac) -> direct
 	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[0].ID+"/playback", nil, token)
@@ -701,14 +704,29 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 	if err := json.Unmarshal(raw, &p1); err != nil {
 		t.Fatalf("unmarshal p1: %v", err)
 	}
-	if p1.Mode != "direct" || !strings.Contains(p1.StreamURL, "/Videos/"+lessons[0].ID+"/stream.mp4") || !strings.Contains(p1.StreamURL, "Static=true") {
+	if p1.Mode != "direct" || p1.Transcoding || !strings.Contains(p1.StreamURL, "/Videos/"+lessons[0].ID+"/stream.mp4") || !strings.Contains(p1.StreamURL, "Static=true") {
 		t.Fatalf("expected direct mode and stream.mp4 URL, got %+v", p1)
 	}
 	if len(p1.Subtitles) != 1 || !strings.Contains(p1.Subtitles[0].URL, "Stream.vtt") {
 		t.Fatalf("expected 1 VTT subtitle URL, got %+v", p1.Subtitles)
 	}
 
-	// 2. MKV (h264/ac3) -> hls
+	// 1b. MP4 (h264/aac) with force_transcode=1 -> hls + transcoding when FFmpeg available
+	if hasFFmpeg {
+		resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[0].ID+"/playback?force_transcode=1", nil, token)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET playback force_transcode = %d: %s", resp.StatusCode, raw)
+		}
+		var pForce playbackResp
+		if err := json.Unmarshal(raw, &pForce); err != nil {
+			t.Fatalf("unmarshal pForce: %v", err)
+		}
+		if pForce.Mode != "hls" || !pForce.Transcoding || !strings.Contains(pForce.StreamURL, "TranscodeVideo=1") {
+			t.Fatalf("expected force_transcode hls+TranscodeVideo=1, got %+v", pForce)
+		}
+	}
+
+	// 2. MKV (h264/ac3) -> hls (remux, transcoding=false) when FFmpeg available
 	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[1].ID+"/playback", nil, token)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET playback hls = %d: %s", resp.StatusCode, raw)
@@ -717,45 +735,64 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 	if err := json.Unmarshal(raw, &p2); err != nil {
 		t.Fatalf("unmarshal p2: %v", err)
 	}
-	if p2.Mode != "hls" || !strings.Contains(p2.StreamURL, "/Videos/"+lessons[1].ID+"/master.m3u8") || !strings.Contains(p2.StreamURL, "PlaySessionId=") {
-		t.Fatalf("expected hls mode and master.m3u8 URL, got %+v", p2)
+	if hasFFmpeg {
+		if p2.Mode != "hls" || p2.Transcoding || !strings.Contains(p2.StreamURL, "/Videos/"+lessons[1].ID+"/master.m3u8") || strings.Contains(p2.StreamURL, "TranscodeVideo=1") {
+			t.Fatalf("expected hls remux mode without TranscodeVideo=1, got %+v", p2)
+		}
 	}
 
-	// 3. WMV (wmv3/wmav2) -> unsupported
+	// 3. WMV (wmv3/wmav2) -> hls transcoding when FFmpeg available, else unsupported
 	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[2].ID+"/playback", nil, token)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET playback unsupported = %d: %s", resp.StatusCode, raw)
+		t.Fatalf("GET playback wmv = %d: %s", resp.StatusCode, raw)
 	}
 	var p3 playbackResp
 	if err := json.Unmarshal(raw, &p3); err != nil {
 		t.Fatalf("unmarshal p3: %v", err)
 	}
-	if p3.Mode != "unsupported" || p3.StreamURL != "" {
-		t.Fatalf("expected unsupported mode with empty stream_url, got %+v", p3)
+	if hasFFmpeg {
+		if p3.Mode != "hls" || !p3.Transcoding || !strings.Contains(p3.StreamURL, "TranscodeVideo=1") {
+			t.Fatalf("expected wmv3 to fall back to hls transcoding when ffmpeg available, got %+v", p3)
+		}
+	} else if p3.Mode != "unsupported" || p3.StreamURL != "" {
+		t.Fatalf("expected unsupported mode without ffmpeg, got %+v", p3)
 	}
 
-	// 4. WebM (vp9/opus) -> direct, MKV (vp9/opus) -> unsupported, MKV (hevc/aac) -> unsupported, MKV (h264/opus) -> hls
+	// 4. Three-tier codec + browser capability + pix_fmt matrix
+	wantTranscodeMode := "unsupported"
+	wantTranscodeFlag := false
+	if hasFFmpeg {
+		wantTranscodeMode = "hls"
+		wantTranscodeFlag = true
+	}
+
 	extraCases := []struct {
-		name      string
-		relPath   string
-		container string
-		vcodec    string
-		acodec    string
-		wantMode  string
+		name          string
+		relPath       string
+		container     string
+		vcodec        string
+		acodec        string
+		streamsJSON   string
+		query         string
+		wantMode      string
+		wantTranscode bool
 	}{
-		{name: "webm_vp9_opus", relPath: "CodecTest/04_vp9.webm", container: "webm", vcodec: "vp9", acodec: "opus", wantMode: "direct"},
-		{name: "mkv_vp9_opus", relPath: "CodecTest/05_vp9.mkv", container: "mkv", vcodec: "vp9", acodec: "opus", wantMode: "unsupported"},
-		{name: "mkv_hevc_aac", relPath: "CodecTest/06_hevc.mkv", container: "mkv", vcodec: "hevc", acodec: "aac", wantMode: "unsupported"},
-		{name: "mkv_av1_aac", relPath: "CodecTest/08_av1.mkv", container: "mkv", vcodec: "av1", acodec: "aac", wantMode: "unsupported"},
-		{name: "mkv_h264_opus", relPath: "CodecTest/07_h264_opus.mkv", container: "mkv", vcodec: "h264", acodec: "opus", wantMode: "hls"},
+		{name: "webm_vp9_opus", relPath: "CodecTest/04_vp9.webm", container: "webm", vcodec: "vp9", acodec: "opus", streamsJSON: "[]", wantMode: "direct", wantTranscode: false},
+		{name: "mkv_vp9_opus", relPath: "CodecTest/05_vp9.mkv", container: "mkv", vcodec: "vp9", acodec: "opus", streamsJSON: "[]", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
+		{name: "mkv_hevc_aac", relPath: "CodecTest/06_hevc.mkv", container: "mkv", vcodec: "hevc", acodec: "aac", streamsJSON: "[]", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
+		{name: "mkv_av1_aac", relPath: "CodecTest/08_av1.mkv", container: "mkv", vcodec: "av1", acodec: "aac", streamsJSON: "[]", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
+		{name: "mkv_h264_opus", relPath: "CodecTest/07_h264_opus.mkv", container: "mkv", vcodec: "h264", acodec: "opus", streamsJSON: "[]", wantMode: wantTranscodeMode, wantTranscode: false},
+		{name: "mp4_hevc_direct_when_supported", relPath: "CodecTest/09_hevc.mp4", container: "mp4", vcodec: "hevc", acodec: "aac", streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p"}]`, query: "?codecs=h264,hevc,vp9,av1", wantMode: "direct", wantTranscode: false},
+		{name: "mp4_hevc_transcode_when_not_supported", relPath: "CodecTest/10_hevc.mp4", container: "mp4", vcodec: "hevc", acodec: "aac", streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p"}]`, query: "?codecs=h264,vp9,av1", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
+		{name: "mp4_hevc_yuv444p_forces_transcode", relPath: "CodecTest/11_hevc444.mp4", container: "mp4", vcodec: "hevc", acodec: "aac", streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv444p"}]`, query: "?codecs=h264,hevc", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
 	}
 	for _, tc := range extraCases {
 		mfID := id.New()
 		now := time.Now().UTC().Format(time.RFC3339)
 		if _, err := env.db.Exec(`
-			INSERT INTO media_files (id, source_id, relative_path, file_name, file_size, mod_time, status, duration_ms, container, video_codec, audio_codec, created_at, updated_at)
-			VALUES (?, ?, ?, ?, 100, ?, 'active', 10000, ?, ?, ?, ?, ?)`,
-			mfID, src.ID, tc.relPath, filepath.Base(tc.relPath), now, tc.container, tc.vcodec, tc.acodec, now, now,
+			INSERT INTO media_files (id, source_id, relative_path, file_name, file_size, mod_time, status, duration_ms, container, video_codec, audio_codec, streams_json, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 100, ?, 'active', 10000, ?, ?, ?, ?, ?, ?)`,
+			mfID, src.ID, tc.relPath, filepath.Base(tc.relPath), now, tc.container, tc.vcodec, tc.acodec, tc.streamsJSON, now, now,
 		); err != nil {
 			t.Fatalf("insert media_file %s: %v", tc.name, err)
 		}
@@ -763,7 +800,7 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AddLesson %s: %v", tc.name, err)
 		}
-		cResp, cRaw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lsn.ID+"/playback", nil, token)
+		cResp, cRaw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lsn.ID+"/playback"+tc.query, nil, token)
 		if cResp.StatusCode != http.StatusOK {
 			t.Fatalf("GET playback %s = %d: %s", tc.name, cResp.StatusCode, cRaw)
 		}
@@ -771,9 +808,39 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 		if err := json.Unmarshal(cRaw, &cp); err != nil {
 			t.Fatalf("unmarshal %s: %v", tc.name, err)
 		}
-		if cp.Mode != tc.wantMode {
-			t.Fatalf("%s: got mode=%q, want %q", tc.name, cp.Mode, tc.wantMode)
+		if cp.Mode != tc.wantMode || cp.Transcoding != tc.wantTranscode {
+			t.Fatalf("%s: got mode=%q transcoding=%v, want mode=%q transcoding=%v", tc.name, cp.Mode, cp.Transcoding, tc.wantMode, tc.wantTranscode)
 		}
+		if cp.Transcoding && !strings.Contains(cp.StreamURL, "TranscodeVideo=1") {
+			t.Fatalf("%s: expected TranscodeVideo=1 in stream_url %q", tc.name, cp.StreamURL)
+		}
+	}
+
+	// 5. Without FFmpeg binary, non-direct video degrades cleanly to unsupported
+	noFFmpegMedia := media.NewService(env.db, env.dataDir, env.registry, "/nonexistent/coursefin-ffmpeg")
+	defer noFFmpegMedia.Close()
+	noFFmpegHandler := api.NewHandler(api.Deps{
+		DB:       env.db,
+		DataDir:  env.dataDir,
+		Registry: env.registry,
+		Auth:     env.authSvc,
+		Scanner:  env.scanSvc,
+		Catalog:  env.catSvc,
+		Media:    noFFmpegMedia,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/lessons/"+lessons[2].ID+"/playback", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	noFFmpegHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("no-ffmpeg playback status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var pNoFF playbackResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &pNoFF); err != nil {
+		t.Fatalf("unmarshal pNoFF: %v", err)
+	}
+	if pNoFF.Mode != "unsupported" || pNoFF.StreamURL != "" || pNoFF.Transcoding {
+		t.Fatalf("expected unsupported without ffmpeg, got %+v", pNoFF)
 	}
 }
 

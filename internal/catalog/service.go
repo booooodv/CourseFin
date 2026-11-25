@@ -242,6 +242,7 @@ type MediaFile struct {
 	Width         int    `json:"width"`
 	Height        int    `json:"height"`
 	Bitrate       int64  `json:"bitrate"`
+	StreamsJSON   string `json:"-"`
 	ThumbnailPath string `json:"thumbnail_path"`
 	ProbedAt      string `json:"probed_at,omitempty"`
 	CreatedAt     string `json:"created_at"`
@@ -1681,12 +1682,12 @@ func (s *Service) GetMediaFile(ctx context.Context, mediaFileID string) (*MediaF
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, source_id, relative_path, file_name, file_size, mod_time, status,
 		       duration_ms, container, video_codec, audio_codec, width, height, bitrate,
-		       thumbnail_path, COALESCE(probed_at, ''), created_at, updated_at
+		       streams_json, thumbnail_path, COALESCE(probed_at, ''), created_at, updated_at
 		FROM media_files WHERE id = ?`, mediaFileID).
 		Scan(
 			&mf.ID, &mf.SourceID, &mf.RelativePath, &mf.FileName, &mf.FileSize, &mf.ModTime, &mf.Status,
 			&mf.DurationMs, &mf.Container, &mf.VideoCodec, &mf.AudioCodec, &mf.Width, &mf.Height, &mf.Bitrate,
-			&mf.ThumbnailPath, &mf.ProbedAt, &mf.CreatedAt, &mf.UpdatedAt,
+			&mf.StreamsJSON, &mf.ThumbnailPath, &mf.ProbedAt, &mf.CreatedAt, &mf.UpdatedAt,
 		)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

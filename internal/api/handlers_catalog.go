@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -556,8 +557,22 @@ func (h *handler) handleLessonPlayback(w http.ResponseWriter, r *http.Request) {
 	acodec := strings.ToLower(strings.TrimSpace(mf.AudioCodec))
 	playSessionID := id.New()
 
+	clientCodecs := parseClientSupportedCodecs(r.URL.Query().Get("codecs"))
+	forceTranscodeRaw := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("force_transcode")))
+	forceTranscode := forceTranscodeRaw == "1" || forceTranscodeRaw == "true"
+	hasFFmpeg := h.media != nil && h.media.HasFFmpeg()
+
 	var mode, streamURL string
-	if isBrowserDirectContainer(container) && isBrowserDirectAudioCodec(acodec) && isBrowserDirectVideoCodec(vcodec) {
+	transcoding := false
+
+	canDirect := !forceTranscode &&
+		isBrowserDirectContainer(container) &&
+		isBrowserDirectAudioCodec(acodec) &&
+		isBrowserDirectVideoCodecForClient(vcodec, clientCodecs) &&
+		hasBrowserSafePixFmt(mf.StreamsJSON)
+
+	switch {
+	case canDirect:
 		mode = "direct"
 		q := url.Values{}
 		q.Set("Static", "true")
@@ -566,9 +581,7 @@ func (h *handler) handleLessonPlayback(w http.ResponseWriter, r *http.Request) {
 			q.Set("api_key", ac.Token)
 		}
 		streamURL = fmt.Sprintf("/Videos/%s/stream.%s?%s", lesson.ID, container, q.Encode())
-	} else if vcodec != "" && !h.media.CanWebRemuxVideoCodec(vcodec) {
-		mode = "unsupported"
-	} else {
+	case !forceTranscode && hasFFmpeg && (vcodec == "" || h.media.CanWebRemuxVideoCodec(vcodec)):
 		mode = "hls"
 		q := url.Values{}
 		q.Set("PlaySessionId", playSessionID)
@@ -577,6 +590,19 @@ func (h *handler) handleLessonPlayback(w http.ResponseWriter, r *http.Request) {
 			q.Set("api_key", ac.Token)
 		}
 		streamURL = fmt.Sprintf("/Videos/%s/master.m3u8?%s", lesson.ID, q.Encode())
+	case hasFFmpeg:
+		mode = "hls"
+		transcoding = true
+		q := url.Values{}
+		q.Set("PlaySessionId", playSessionID)
+		q.Set("MediaSourceId", mf.ID)
+		q.Set("TranscodeVideo", "1")
+		if ac != nil && ac.Token != "" {
+			q.Set("api_key", ac.Token)
+		}
+		streamURL = fmt.Sprintf("/Videos/%s/master.m3u8?%s", lesson.ID, q.Encode())
+	default:
+		mode = "unsupported"
 	}
 
 	streams, err := h.media.ResolveStreams(ctx, mf.ID)
@@ -614,6 +640,7 @@ func (h *handler) handleLessonPlayback(w http.ResponseWriter, r *http.Request) {
 		"play_session_id": playSessionID,
 		"mode":            mode,
 		"stream_url":      streamURL,
+		"transcoding":     transcoding,
 		"subtitles":       subtitles,
 		"progress": playbackProgressInfo{
 			PositionTicks: lesson.PositionTicks,
@@ -658,13 +685,81 @@ func isBrowserDirectContainer(c string) bool {
 	}
 }
 
-func isBrowserDirectVideoCodec(c string) bool {
-	switch c {
-	case "h264", "avc", "avc1", "vp9", "av1":
-		return true
+func normalizeWebVideoCodec(c string) string {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case "h264", "avc", "avc1":
+		return "h264"
+	case "hevc", "h265", "hvc1", "hev1":
+		return "hevc"
+	case "vp9", "vp09":
+		return "vp9"
+	case "av1", "av01":
+		return "av1"
+	default:
+		return strings.ToLower(strings.TrimSpace(c))
+	}
+}
+
+func parseClientSupportedCodecs(raw string) map[string]bool {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return map[string]bool{
+			"h264": true,
+			"vp9":  true,
+			"av1":  true,
+		}
+	}
+	out := make(map[string]bool)
+	for _, part := range strings.Split(trimmed, ",") {
+		if norm := normalizeWebVideoCodec(part); norm != "" {
+			out[norm] = true
+		}
+	}
+	if len(out) == 0 {
+		out["h264"] = true
+	}
+	return out
+}
+
+func isBrowserDirectVideoCodecForClient(c string, supported map[string]bool) bool {
+	norm := normalizeWebVideoCodec(c)
+	switch norm {
+	case "h264", "hevc", "vp9", "av1":
+		return supported[norm]
 	default:
 		return false
 	}
+}
+
+func hasBrowserSafePixFmt(streamsJSON string) bool {
+	trimmed := strings.TrimSpace(streamsJSON)
+	if trimmed == "" || trimmed == "[]" {
+		return true
+	}
+	var streams []struct {
+		CodecType   string `json:"codec_type"`
+		PixFmt      string `json:"pix_fmt"`
+		Disposition struct {
+			AttachedPic int `json:"attached_pic"`
+		} `json:"disposition"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &streams); err != nil {
+		return true
+	}
+	for _, st := range streams {
+		if !strings.EqualFold(st.CodecType, "video") || st.Disposition.AttachedPic != 0 {
+			continue
+		}
+		pf := strings.ToLower(strings.TrimSpace(st.PixFmt))
+		if pf == "" {
+			return true
+		}
+		if strings.Contains(pf, "444") || strings.Contains(pf, "422") || strings.Contains(pf, "gbr") || strings.Contains(pf, "10le") || strings.Contains(pf, "10be") || strings.Contains(pf, "12le") || strings.Contains(pf, "12be") {
+			return false
+		}
+		return true
+	}
+	return true
 }
 
 func isBrowserDirectAudioCodec(c string) bool {
