@@ -1,0 +1,1011 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  AlertCircle,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  Copy,
+  FileText,
+  ListOrdered,
+  Loader2,
+  Mic,
+  RefreshCw,
+  RotateCcw,
+  Settings,
+  Sparkles,
+  Square,
+} from 'lucide-react';
+import { api } from '../api/client';
+import { useToast } from './Toast';
+import Tooltip from './Tooltip';
+import { copyTextToClipboard } from '../utils/clipboard';
+import { formatLessonSummaryMarkdown, formatTimestamp } from '../utils/summaryMarkdown';
+import type {
+  CourseBatchSummaryJob,
+  CourseDetail,
+  GenerateLessonSummaryInput,
+  LessonDetail,
+  LessonSummary,
+  LessonSummaryCapabilities,
+  LessonSummaryJob,
+  SummaryJobStage,
+  TimelineSection,
+} from '../types/coursefin';
+
+const POLL_INTERVAL_MS = 1500;
+const COPY_FEEDBACK_MS = 2000;
+
+export function formatSummaryJobStageText(
+  stage: SummaryJobStage,
+  chunkIndex = 0,
+  chunkTotal = 0,
+  message?: string,
+): string {
+  if (message && message.trim()) {
+    return message.trim();
+  }
+  switch (stage) {
+    case 'queued':
+      return '排队等待中...';
+    case 'reading_subtitle':
+      return '正在读取字幕...';
+    case 'extracting_audio':
+      return '正在提取视频音频...';
+    case 'transcribing':
+      return chunkTotal > 0
+        ? `正在语音转写（分片 ${chunkIndex}/${chunkTotal}）...`
+        : '正在语音转写...';
+    case 'summarizing':
+      return chunkTotal > 0
+        ? `正在生成 AI 总结（分段 ${chunkIndex}/${chunkTotal}）...`
+        : '正在生成 AI 总结...';
+    case 'completed':
+      return 'AI 总结生成完成';
+    case 'cancelled':
+      return '任务已取消';
+    case 'failed':
+      return '生成失败';
+    default:
+      return '正在处理...';
+  }
+}
+
+function formatSourceBadge(sourceType: string, sourceLabel: string): string {
+  if (sourceLabel && sourceLabel.trim()) {
+    return sourceLabel.trim();
+  }
+  switch (sourceType) {
+    case 'external_subtitle':
+      return '外挂字幕';
+    case 'embedded_subtitle':
+      return '内嵌字幕';
+    case 'asr':
+      return 'AI 语音转写';
+    case 'manual':
+      return '手动文稿';
+    default:
+      return 'AI 总结';
+  }
+}
+
+function findActiveTimelineIndex(
+  timeline: TimelineSection[],
+  hasTimestamps: boolean,
+  currentTimeSec: number,
+): number {
+  if (!hasTimestamps || !Number.isFinite(currentTimeSec) || currentTimeSec < 0) {
+    return -1;
+  }
+
+  for (let i = 0; i < timeline.length; i += 1) {
+    const sec = timeline[i];
+    if (sec.start_sec === null || sec.start_sec === undefined) {
+      continue;
+    }
+    const isLast = i === timeline.length - 1;
+    if (sec.end_sec !== null && sec.end_sec !== undefined) {
+      if (
+        currentTimeSec >= sec.start_sec &&
+        (currentTimeSec < sec.end_sec || (isLast && currentTimeSec <= sec.end_sec))
+      ) {
+        return i;
+      }
+    } else {
+      const nextWithStart = timeline
+        .slice(i + 1)
+        .find((item) => item.start_sec !== null && item.start_sec !== undefined);
+      const nextStart = nextWithStart?.start_sec ?? null;
+      if (currentTimeSec >= sec.start_sec && (nextStart === null || currentTimeSec < nextStart)) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
+}
+
+export interface BatchSummaryBannerProps {
+  batchJob: CourseBatchSummaryJob;
+  cancelling?: boolean;
+  onCancel: () => void | Promise<void>;
+}
+
+export function BatchSummaryBanner({
+  batchJob,
+  cancelling = false,
+  onCancel,
+}: BatchSummaryBannerProps) {
+  const doneCount = batchJob.completed + batchJob.skipped + batchJob.failed;
+  const pct =
+    batchJob.total > 0 ? Math.min(100, Math.round((doneCount / batchJob.total) * 100)) : 0;
+  const stageText = formatSummaryJobStageText(
+    batchJob.current_stage,
+    batchJob.chunk_index,
+    batchJob.chunk_total,
+  );
+
+  return (
+    <div className="rounded-2xl border border-accent-ring/40 bg-accent-soft p-3 space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 space-y-0.5">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-accent-ink">
+            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+            <span>
+              批量生成中 {doneCount}/{batchJob.total}
+            </span>
+          </div>
+          <p className="text-[11px] text-ink-secondary leading-snug break-words">
+            {stageText}
+            {batchJob.current_lesson_title ? ` · 「${batchJob.current_lesson_title}」` : ''}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => void onCancel()}
+          disabled={cancelling}
+          className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-2.5 py-1 text-[11px] font-medium text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors shrink-0 cursor-pointer"
+        >
+          <Square className="h-3 w-3" />
+          <span>取消</span>
+        </button>
+      </div>
+
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-accent transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+export interface LessonSummaryPanelProps {
+  course: CourseDetail;
+  activeEntry: { lesson: LessonDetail; chapterTitle: string } | null;
+  currentTimeSec: number;
+  onSeek: (seconds: number) => void;
+  onSummaryUpdated: (lessonId: string, sourceType?: string, isNewlyCompleted?: boolean) => void;
+  batchJob: CourseBatchSummaryJob | null;
+  batchSyncKey?: string;
+  onStartBatch: (mode?: 'missing_only' | 'all') => void | Promise<void>;
+  onCancelBatch: () => void | Promise<void>;
+  startingBatch?: boolean;
+  cancellingBatch?: boolean;
+}
+
+export default function LessonSummaryPanel({
+  course,
+  activeEntry,
+  currentTimeSec,
+  onSeek,
+  onSummaryUpdated,
+  batchJob,
+  batchSyncKey,
+  onStartBatch,
+  onCancelBatch,
+  startingBatch = false,
+  cancellingBatch = false,
+}: LessonSummaryPanelProps) {
+  const { toast } = useToast();
+  const lessonId = activeEntry?.lesson.id ?? null;
+
+  const [summary, setSummary] = useState<LessonSummary | null>(null);
+  const [job, setJob] = useState<LessonSummaryJob | null>(null);
+  const [capabilities, setCapabilities] = useState<LessonSummaryCapabilities | null>(null);
+  const [loading, setLoading] = useState<boolean>(Boolean(lessonId));
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [manualTranscript, setManualTranscript] = useState('');
+
+  const activeLessonIdRef = useRef<string | null>(lessonId);
+  activeLessonIdRef.current = lessonId;
+  const requestSeqRef = useRef(0);
+  const awaitingCompletionForLessonRef = useRef<string | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+  const onSummaryUpdatedRef = useRef(onSummaryUpdated);
+  onSummaryUpdatedRef.current = onSummaryUpdated;
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const fetchLessonSummaryState = useCallback(
+    async (targetLessonId: string, seq: number, isInitial: boolean) => {
+      try {
+        const data = await api.getLessonSummary(targetLessonId);
+        if (seq !== requestSeqRef.current || activeLessonIdRef.current !== targetLessonId) {
+          return;
+        }
+
+        setSummary(data.summary);
+        setJob(data.job);
+        setCapabilities(data.capabilities);
+        setFetchError(null);
+
+        if (data.job?.running) {
+          awaitingCompletionForLessonRef.current = targetLessonId;
+        } else if (
+          data.job &&
+          data.job.stage === 'completed' &&
+          awaitingCompletionForLessonRef.current === targetLessonId
+        ) {
+          awaitingCompletionForLessonRef.current = null;
+          onSummaryUpdatedRef.current(
+            targetLessonId,
+            data.summary?.source_type ?? data.job.source_type,
+            true,
+          );
+        } else if (data.summary) {
+          onSummaryUpdatedRef.current(targetLessonId, data.summary.source_type, false);
+        }
+      } catch (err) {
+        if (seq !== requestSeqRef.current || activeLessonIdRef.current !== targetLessonId) {
+          return;
+        }
+        if (isInitial) {
+          setFetchError(err instanceof Error ? err.message : '获取 AI 总结状态失败');
+        }
+      } finally {
+        if (seq === requestSeqRef.current && activeLessonIdRef.current === targetLessonId) {
+          setLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
+  // Reset state and load summary whenever active lesson changes
+  useEffect(() => {
+    requestSeqRef.current += 1;
+    const seq = requestSeqRef.current;
+
+    awaitingCompletionForLessonRef.current = null;
+    setSummary(null);
+    setJob(null);
+    setCapabilities(null);
+    setFetchError(null);
+    setActionError(null);
+    setSubmitting(false);
+    setCancelling(false);
+    setCopied(false);
+    setShowManualInput(false);
+    setManualTranscript('');
+
+    if (!lessonId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    void fetchLessonSummaryState(lessonId, seq, true);
+  }, [lessonId, fetchLessonSummaryState]);
+
+  // Refresh active lesson summary only when a course batch job actually progresses or finishes
+  const prevBatchSyncKeyRef = useRef(batchSyncKey);
+  useEffect(() => {
+    if (prevBatchSyncKeyRef.current === batchSyncKey) {
+      return;
+    }
+    prevBatchSyncKeyRef.current = batchSyncKey;
+    if (!lessonId || !batchSyncKey) return;
+    if (job?.running || submitting) return;
+    const seq = requestSeqRef.current;
+    void fetchLessonSummaryState(lessonId, seq, false);
+  }, [batchSyncKey, lessonId, job?.running, submitting, fetchLessonSummaryState]);
+
+  // Visibility-aware 1.5s polling while a single-lesson summary job is running
+  const isJobRunning = Boolean(job?.running);
+  useEffect(() => {
+    if (!lessonId || !isJobRunning) {
+      return;
+    }
+
+    const seq = requestSeqRef.current;
+    const poll = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      if (seq !== requestSeqRef.current || activeLessonIdRef.current !== lessonId) {
+        return;
+      }
+      void fetchLessonSummaryState(lessonId, seq, false);
+    };
+
+    const intervalId = window.setInterval(poll, POLL_INTERVAL_MS);
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'hidden') {
+        poll();
+      }
+    };
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      window.clearInterval(intervalId);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
+  }, [lessonId, isJobRunning, fetchLessonSummaryState]);
+
+  const handleGenerate = useCallback(
+    async (input: GenerateLessonSummaryInput = {}) => {
+      if (!lessonId || submitting) return;
+      const targetLessonId = lessonId;
+      const seq = requestSeqRef.current;
+
+      setSubmitting(true);
+      setActionError(null);
+      awaitingCompletionForLessonRef.current = targetLessonId;
+
+      try {
+        const startedJob = await api.generateLessonSummary(targetLessonId, input);
+        if (seq !== requestSeqRef.current || activeLessonIdRef.current !== targetLessonId) {
+          return;
+        }
+        setJob(startedJob);
+
+        if (!startedJob.running) {
+          await fetchLessonSummaryState(targetLessonId, seq, false);
+        }
+      } catch (err) {
+        if (seq !== requestSeqRef.current || activeLessonIdRef.current !== targetLessonId) {
+          return;
+        }
+        awaitingCompletionForLessonRef.current = null;
+        const msg = err instanceof Error ? err.message : '启动 AI 总结失败';
+        setActionError(msg);
+        toast.error(msg);
+      } finally {
+        if (seq === requestSeqRef.current && activeLessonIdRef.current === targetLessonId) {
+          setSubmitting(false);
+        }
+      }
+    },
+    [lessonId, submitting, fetchLessonSummaryState, toast],
+  );
+
+  const handleCancelLessonJob = useCallback(async () => {
+    if (!lessonId || cancelling) return;
+    const targetLessonId = lessonId;
+    const seq = requestSeqRef.current;
+
+    setCancelling(true);
+    setActionError(null);
+
+    try {
+      const cancelledJob = await api.cancelLessonSummary(targetLessonId);
+      if (seq !== requestSeqRef.current || activeLessonIdRef.current !== targetLessonId) {
+        return;
+      }
+      awaitingCompletionForLessonRef.current = null;
+      setJob(cancelledJob);
+      await fetchLessonSummaryState(targetLessonId, seq, false);
+    } catch (err) {
+      if (seq !== requestSeqRef.current || activeLessonIdRef.current !== targetLessonId) {
+        return;
+      }
+      const msg = err instanceof Error ? err.message : '取消任务失败';
+      setActionError(msg);
+      toast.error(msg);
+    } finally {
+      if (seq === requestSeqRef.current && activeLessonIdRef.current === targetLessonId) {
+        setCancelling(false);
+      }
+    }
+  }, [lessonId, cancelling, fetchLessonSummaryState, toast]);
+
+  const handleCopyMarkdown = useCallback(async () => {
+    if (!summary || !activeEntry) return;
+    const markdown = formatLessonSummaryMarkdown({
+      courseTitle: course.title,
+      chapterTitle: activeEntry.chapterTitle,
+      lessonTitle: activeEntry.lesson.title,
+      summary,
+    });
+
+    const ok = await copyTextToClipboard(markdown);
+    if (ok) {
+      setCopied(true);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+      }, COPY_FEEDBACK_MS);
+      toast.success('已复制 Markdown 总结');
+    } else {
+      toast.error('复制失败，请检查浏览器剪贴板权限');
+    }
+  }, [summary, activeEntry, course.title, toast]);
+
+  const activeTimelineIndex = useMemo(() => {
+    if (!summary) return -1;
+    return findActiveTimelineIndex(summary.timeline, summary.has_timestamps, currentTimeSec);
+  }, [summary, currentTimeSec]);
+
+  if (!activeEntry || !lessonId) {
+    return (
+      <div className="p-5 space-y-4">
+        {batchJob?.running && (
+          <BatchSummaryBanner
+            batchJob={batchJob}
+            cancelling={cancellingBatch}
+            onCancel={onCancelBatch}
+          />
+        )}
+        <div className="rounded-2xl border border-dashed border-default bg-subtle/50 p-6 text-center text-xs text-ink-secondary">
+          请选择一个课时查看或生成 AI 总结
+        </div>
+      </div>
+    );
+  }
+
+  if (loading && !summary && !job && !capabilities) {
+    return (
+      <div className="p-5 space-y-4">
+        {batchJob?.running && (
+          <BatchSummaryBanner
+            batchJob={batchJob}
+            cancelling={cancellingBatch}
+            onCancel={onCancelBatch}
+          />
+        )}
+        <div className="flex flex-col items-center justify-center py-12 gap-2.5 text-ink-secondary">
+          <Loader2 className="h-6 w-6 animate-spin text-accent" />
+          <p className="text-xs">正在加载 AI 总结...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (fetchError && !summary && !capabilities) {
+    return (
+      <div className="p-5 space-y-4">
+        {batchJob?.running && (
+          <BatchSummaryBanner
+            batchJob={batchJob}
+            cancelling={cancellingBatch}
+            onCancel={onCancelBatch}
+          />
+        )}
+        <div className="rounded-2xl border border-status-danger/30 bg-status-danger-soft p-4 text-center space-y-3">
+          <p className="text-xs font-medium text-status-danger-ink">{fetchError}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setLoading(true);
+              setFetchError(null);
+              void fetchLessonSummaryState(lessonId, requestSeqRef.current, true);
+            }}
+            className="inline-flex items-center gap-1.5 rounded-full bg-status-danger px-3.5 py-1.5 text-xs font-semibold text-ink-inverse hover:opacity-90 transition-opacity cursor-pointer"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>重试</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const aiConfigured = capabilities?.ai_configured ?? true;
+  const asrConfigured = capabilities?.asr_configured ?? false;
+  const hasSubtitle = capabilities?.has_subtitle ?? false;
+  const hasCachedTranscript = capabilities?.has_cached_transcript ?? false;
+  const hasFfmpeg = capabilities?.has_ffmpeg ?? true;
+  const canRetranscribe =
+    summary?.source_type === 'asr' || Boolean(capabilities?.has_cached_transcript);
+
+  const showFailureBanner =
+    !job?.running && (Boolean(actionError) || job?.stage === 'failed' || job?.stage === 'cancelled');
+  const failureMessage =
+    actionError ||
+    (job?.stage === 'failed' ? job.error || job.message || '生成 AI 总结失败' : '') ||
+    (job?.stage === 'cancelled' ? '任务已取消，可随时重新生成' : '');
+
+  return (
+    <div className="max-h-[calc(100vh-8rem)] overflow-y-auto p-4 space-y-4">
+      {batchJob?.running && (
+        <BatchSummaryBanner
+          batchJob={batchJob}
+          cancelling={cancellingBatch}
+          onCancel={onCancelBatch}
+        />
+      )}
+
+      {/* Single-lesson running stage card (kept above old summary if one exists) */}
+      {job?.running && (
+        <div className="rounded-2xl border border-accent-ring/40 bg-accent-soft p-3.5 space-y-2.5">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Loader2 className="h-4 w-4 animate-spin text-accent shrink-0" />
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-accent-ink break-words">
+                  {formatSummaryJobStageText(
+                    job.stage,
+                    job.chunk_index,
+                    job.chunk_total,
+                    job.message,
+                  )}
+                </p>
+                {job.stage === 'transcribing' && (
+                  <p className="text-[11px] text-ink-secondary mt-0.5">
+                    转写完成后将自动保存为「AI 转写字幕」轨道
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void handleCancelLessonJob()}
+              disabled={cancelling}
+              className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-2.5 py-1 text-[11px] font-medium text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors shrink-0 cursor-pointer"
+            >
+              <Square className="h-3 w-3" />
+              <span>取消</span>
+            </button>
+          </div>
+
+          {job.chunk_total > 0 && (
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-accent transition-all"
+                style={{
+                  width: `${Math.min(100, Math.max(8, Math.round((job.chunk_index / job.chunk_total) * 100)))}%`,
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Non-destructive failure / cancellation banner */}
+      {showFailureBanner && failureMessage && (
+        <div
+          className={`rounded-2xl border p-3 flex items-start gap-2 text-xs ${
+            job?.stage === 'cancelled' && !actionError
+              ? 'border-status-warning/30 bg-status-warning-soft text-status-warning-ink'
+              : 'border-status-danger/30 bg-status-danger-soft text-status-danger-ink'
+          }`}
+        >
+          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+          <span className="leading-relaxed break-words">{failureMessage}</span>
+        </div>
+      )}
+
+      {/* Saved summary view */}
+      {summary && (
+        <div className="space-y-4">
+          {/* Action toolbar */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-subtle">
+            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+              <span className="inline-flex items-center gap-1 rounded-full border border-subtle bg-subtle px-2.5 py-0.5 text-[11px] font-medium text-ink-secondary">
+                <Sparkles className="h-3 w-3 text-accent" />
+                <span>{formatSourceBadge(summary.source_type, summary.source_label)}</span>
+              </span>
+              {summary.model && (
+                <span className="text-[11px] text-ink-muted truncate max-w-[140px]">
+                  {summary.model}
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => void handleCopyMarkdown()}
+                className="inline-flex items-center gap-1 rounded-full bg-accent px-3 py-1.5 text-xs font-semibold text-ink-inverse hover:bg-accent-hover shadow-accent transition-colors cursor-pointer"
+              >
+                {copied ? (
+                  <>
+                    <Check className="h-3.5 w-3.5" />
+                    <span>已复制</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" />
+                    <span>复制 Markdown</span>
+                  </>
+                )}
+              </button>
+
+              <Tooltip content={aiConfigured ? '使用最新字幕/文稿重新生成总结' : '请先在设置页配置 AI 接口'}>
+                <button
+                  type="button"
+                  onClick={() => void handleGenerate({ force: true })}
+                  disabled={Boolean(job?.running) || submitting || !aiConfigured}
+                  className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-2.5 py-1.5 text-xs font-medium text-ink-primary hover:bg-subtle disabled:opacity-50 disabled:pointer-events-none transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  <span>重新生成</span>
+                </button>
+              </Tooltip>
+
+              {canRetranscribe && (
+                <Tooltip
+                  content={
+                    asrConfigured
+                      ? '强制重新提取音频并语音转写（适合更换 ASR 模型后使用）'
+                      : '请先在设置页配置语音转文字（ASR）接口'
+                  }
+                >
+                  <button
+                    type="button"
+                    onClick={() => void handleGenerate({ force: true, force_retranscribe: true })}
+                    disabled={
+                      Boolean(job?.running) || submitting || !aiConfigured || !asrConfigured || !hasFfmpeg
+                    }
+                    className="inline-flex items-center gap-1 rounded-full border border-subtle bg-subtle px-2.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary disabled:opacity-50 disabled:pointer-events-none transition-colors cursor-pointer"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    <span>重新转写</span>
+                  </button>
+                </Tooltip>
+              )}
+            </div>
+          </div>
+
+          {/* Section 1: Outline */}
+          <section className="space-y-2.5">
+            <div className="flex items-center gap-1.5">
+              <ListOrdered className="h-4 w-4 text-accent shrink-0" />
+              <h3 className="text-sm font-bold text-ink-primary">AI 总结视频大纲</h3>
+            </div>
+
+            {summary.overview && (
+              <div className="rounded-2xl border border-subtle bg-subtle/70 p-3 text-xs sm:text-sm text-ink-secondary leading-relaxed">
+                {summary.overview}
+              </div>
+            )}
+
+            {summary.outline.length > 0 && (
+              <ol className="space-y-2">
+                {summary.outline.map((item, idx) => {
+                  const hasStart =
+                    summary.has_timestamps &&
+                    item.start_sec !== null &&
+                    item.start_sec !== undefined;
+                  return (
+                    <li
+                      key={`${idx}-${item.title}`}
+                      className="rounded-2xl border border-subtle bg-card p-3 space-y-1"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2 min-w-0">
+                          <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[10px] font-bold text-accent-ink">
+                            {idx + 1}
+                          </span>
+                          <span className="text-xs font-semibold text-ink-primary leading-snug">
+                            {item.title}
+                          </span>
+                        </div>
+
+                        {hasStart && (
+                          <button
+                            type="button"
+                            onClick={() => onSeek(item.start_sec!)}
+                            aria-label={`跳转到 ${formatTimestamp(item.start_sec!)}`}
+                            className="inline-flex items-center gap-1 rounded-full border border-accent-ring/30 bg-accent-soft px-2 py-0.5 text-[11px] font-medium tabular-nums text-accent-ink hover:opacity-85 transition-opacity shrink-0 cursor-pointer"
+                          >
+                            <Clock className="h-3 w-3" />
+                            <span>{formatTimestamp(item.start_sec!)}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {item.summary && (
+                        <p className="pl-6 text-xs text-ink-secondary leading-relaxed">
+                          {item.summary}
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </section>
+
+          {/* Section 2: Chronological Timeline */}
+          <section className="space-y-2.5">
+            <div className="flex items-center gap-1.5">
+              <FileText className="h-4 w-4 text-accent shrink-0" />
+              <h3 className="text-sm font-bold text-ink-primary">AI 总结视频内容（按时间顺序）</h3>
+            </div>
+
+            <div className="space-y-2.5">
+              {summary.timeline.map((section, idx) => {
+                const isActive = idx === activeTimelineIndex;
+                const hasStart =
+                  summary.has_timestamps &&
+                  section.start_sec !== null &&
+                  section.start_sec !== undefined;
+                const hasEnd =
+                  summary.has_timestamps &&
+                  section.end_sec !== null &&
+                  section.end_sec !== undefined;
+
+                const timeLabel =
+                  hasStart && hasEnd
+                    ? `${formatTimestamp(section.start_sec!)} - ${formatTimestamp(section.end_sec!)}`
+                    : hasStart
+                      ? formatTimestamp(section.start_sec!)
+                      : null;
+
+                return (
+                  <article
+                    key={`${idx}-${section.title}`}
+                    aria-current={isActive ? 'true' : undefined}
+                    data-active={isActive ? 'true' : undefined}
+                    className={`relative rounded-2xl border p-3.5 space-y-2 transition-colors ${
+                      isActive
+                        ? 'border-accent/40 bg-accent-soft'
+                        : 'border-subtle bg-card hover:bg-subtle/40'
+                    }`}
+                  >
+                    {isActive && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute inset-y-2.5 left-0 w-1 rounded-r-full bg-accent"
+                      />
+                    )}
+
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h4 className="text-xs sm:text-sm font-semibold text-ink-primary leading-snug">
+                        {section.title}
+                      </h4>
+
+                      {timeLabel && hasStart && (
+                        <button
+                          type="button"
+                          onClick={() => onSeek(section.start_sec!)}
+                          className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold tabular-nums transition-colors shrink-0 cursor-pointer ${
+                            isActive
+                              ? 'border-accent bg-accent text-ink-inverse'
+                              : 'border-accent-ring/30 bg-accent-soft text-accent-ink hover:opacity-85'
+                          }`}
+                        >
+                          <Clock className="h-3 w-3" />
+                          <span>{timeLabel}</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {section.summary && (
+                      <p className="text-xs text-ink-secondary leading-relaxed">
+                        {section.summary}
+                      </p>
+                    )}
+
+                    {section.key_points && section.key_points.length > 0 && (
+                      <ul className="space-y-1 pl-4 list-disc text-xs text-ink-secondary">
+                        {section.key_points.map((kp, kpIdx) => (
+                          <li key={`${kpIdx}-${kp}`} className="leading-relaxed">
+                            {kp}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      )}
+
+      {/* Empty states when no saved summary exists and no single-lesson job is running */}
+      {!summary && !job?.running && capabilities && (
+        <div className="rounded-2xl border border-subtle bg-subtle/40 p-4 space-y-3.5">
+          {!aiConfigured ? (
+            <div className="space-y-3 text-center py-2">
+              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-2xl bg-status-warning-soft text-status-warning-ink">
+                <Settings className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-ink-primary">尚未配置 AI 接口</p>
+                <p className="text-xs text-ink-secondary leading-relaxed">
+                  请先在系统设置中填写 OpenAI 兼容 Base URL、API Key 与模型名称，即可开启每课 AI 总结。
+                </p>
+              </div>
+              <Link
+                to="/settings"
+                className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse hover:bg-accent-hover shadow-accent transition-colors"
+              >
+                <Settings className="h-3.5 w-3.5" />
+                <span>前往配置 AI 接口</span>
+              </Link>
+            </div>
+          ) : hasSubtitle || hasCachedTranscript ? (
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
+                  <Sparkles className="h-4 w-4 text-accent" />
+                  <span>生成本节 AI 总结</span>
+                </div>
+                <p className="text-xs text-ink-secondary leading-relaxed">
+                  {hasSubtitle
+                    ? '已检测到本节可用字幕，将提炼视频大纲与按时间顺序的知识点总结。'
+                    : '已检测到缓存转写文稿，可直接提炼视频大纲与时间线总结。'}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleGenerate({})}
+                  disabled={submitting}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse hover:bg-accent-hover shadow-accent disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>生成 AI 总结</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void onStartBatch('missing_only')}
+                  disabled={startingBatch || Boolean(batchJob?.running)}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-default bg-card px-3.5 py-2 text-xs font-medium text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  <span>为整门课批量生成</span>
+                </button>
+              </div>
+            </div>
+          ) : asrConfigured ? (
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
+                  <Mic className="h-4 w-4 text-accent" />
+                  <span>自动语音转写并总结</span>
+                </div>
+                <p className="text-xs text-ink-secondary leading-relaxed">
+                  当前课时暂无外挂或内嵌文本字幕，将自动抽取音频并调用语音转文字生成总结，同时创建可播放的「AI 转写字幕」（约 1~3 分钟）。
+                </p>
+              </div>
+
+              {!hasFfmpeg && (
+                <p className="rounded-xl border border-status-warning/30 bg-status-warning-soft px-3 py-2 text-xs text-status-warning-ink">
+                  当前服务端未检测到 FFmpeg，无法自动抽取音频。你可以改为手动粘贴文稿生成总结。
+                </p>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleGenerate({})}
+                  disabled={submitting || !hasFfmpeg}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse hover:bg-accent-hover shadow-accent disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  <Mic className="h-3.5 w-3.5" />
+                  <span>转写并生成总结</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowManualInput((prev) => !prev)}
+                  className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-3 py-2 text-xs font-medium text-ink-secondary hover:text-ink-primary hover:bg-subtle transition-colors cursor-pointer"
+                >
+                  <span>改为手动粘贴文稿</span>
+                  {showManualInput ? (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </div>
+
+              {showManualInput && (
+                <div className="space-y-2.5 pt-2 border-t border-subtle">
+                  <textarea
+                    aria-label="手动粘贴文稿"
+                    value={manualTranscript}
+                    onChange={(e) => setManualTranscript(e.target.value)}
+                    rows={5}
+                    placeholder="在此粘贴 SRT / VTT 字幕内容或纯文本讲稿..."
+                    className="w-full rounded-2xl border border-default bg-card p-3 text-xs text-ink-primary placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-accent-ring"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleGenerate({ manual_transcript: manualTranscript })
+                    }
+                    disabled={submitting || !manualTranscript.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-1.5 text-xs font-semibold text-ink-inverse hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
+                  >
+                    <span>根据文稿生成总结</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-ink-primary">
+                  当前课时无字幕且未配置语音转文字
+                </p>
+                <p className="text-xs text-ink-secondary leading-relaxed">
+                  你可以配置语音转文字（ASR）服务自动转写生成字幕，前往编辑页绑定外挂字幕，或在下方直接粘贴讲稿/字幕生成总结。
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Link
+                  to="/settings"
+                  className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-3 py-1.5 text-xs font-medium text-accent-ink hover:bg-subtle transition-colors"
+                >
+                  <Settings className="h-3.5 w-3.5" />
+                  <span>前往配置语音转文字</span>
+                </Link>
+                <Link
+                  to={`/courses/${course.id}/edit`}
+                  className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-3 py-1.5 text-xs font-medium text-ink-primary hover:bg-subtle transition-colors"
+                >
+                  <span>去编辑页绑定字幕</span>
+                </Link>
+              </div>
+
+              <div className="space-y-2.5 pt-2 border-t border-subtle">
+                <textarea
+                  aria-label="手动粘贴文稿"
+                  value={manualTranscript}
+                  onChange={(e) => setManualTranscript(e.target.value)}
+                  rows={5}
+                  placeholder="在此粘贴 SRT / VTT 字幕内容或纯文本讲稿..."
+                  className="w-full rounded-2xl border border-default bg-card p-3 text-xs text-ink-primary placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-accent-ring"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleGenerate({ manual_transcript: manualTranscript })
+                  }
+                  disabled={submitting || !manualTranscript.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-1.5 text-xs font-semibold text-ink-inverse hover:bg-accent-hover disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>根据文稿生成总结</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
