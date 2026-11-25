@@ -1287,6 +1287,7 @@ describe('CourseDetailPage', () => {
       expect(playbackUrls).toHaveLength(2);
       expect(playbackUrls[1]).toContain('force_transcode=1');
       expect(screen.getByText('兼容转码播放')).toBeInTheDocument();
+      expect(container.querySelector('video')).toBeTruthy();
     });
 
     // If fallback HLS video also errors, must NOT trigger another playback fetch
