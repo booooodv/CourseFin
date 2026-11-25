@@ -135,6 +135,7 @@ type LessonDetail struct {
 	CourseID      string         `json:"course_id"`
 	ChapterID     string         `json:"chapter_id"`
 	MediaFileID   string         `json:"media_file_id"`
+	SourceID      string         `json:"source_id,omitempty"`
 	Title         string         `json:"title"`
 	Overview      string         `json:"overview"`
 	SortOrder     int            `json:"sort_order"`
@@ -202,6 +203,28 @@ type IndexedDir struct {
 	FileCount   int    `json:"file_count"`
 	DirectFiles int    `json:"direct_files"`
 	HasSubdirs  bool   `json:"has_subdirs"`
+}
+
+type IndexedSubtitle struct {
+	ID            string `json:"id"`
+	SourceID      string `json:"source_id"`
+	RelativePath  string `json:"relative_path"`
+	FileName      string `json:"file_name"`
+	MediaFileID   string `json:"media_file_id,omitempty"`
+	Language      string `json:"language"`
+	Title         string `json:"title"`
+	Format        string `json:"format"`
+	IsDefault     bool   `json:"is_default"`
+	ManuallyBound bool   `json:"manually_bound"`
+	Status        string `json:"status"`
+}
+
+type BindSubtitleInput struct {
+	MediaFileID *string `json:"media_file_id"`
+	Title       *string `json:"title"`
+	Language    *string `json:"language"`
+	IsDefault   *bool   `json:"is_default"`
+	ResetAuto   bool    `json:"reset_auto"`
 }
 
 type MediaFile struct {
@@ -661,7 +684,7 @@ func (s *Service) GetCourseDetail(ctx context.Context, courseID string) (*Course
 	}
 
 	lRows, err := s.db.QueryContext(ctx, `
-		SELECT l.id, l.course_id, l.chapter_id, l.media_file_id, l.title, l.overview, l.sort_order, l.cover_path,
+		SELECT l.id, l.course_id, l.chapter_id, l.media_file_id, mf.source_id, l.title, l.overview, l.sort_order, l.cover_path,
 		       mf.duration_ms, mf.container, mf.video_codec, mf.audio_codec, mf.width, mf.height, mf.bitrate, mf.thumbnail_path, mf.status,
 		       COALESCE(pp.position_ticks, 0), COALESCE(pp.played, 0), COALESCE(pp.play_count, 0), COALESCE(pp.last_played_at, ''),
 		       l.created_at, l.updated_at
@@ -681,7 +704,7 @@ func (s *Service) GetCourseDetail(ctx context.Context, courseID string) (*Course
 		var ld LessonDetail
 		var playedInt int
 		if err := lRows.Scan(
-			&ld.ID, &ld.CourseID, &ld.ChapterID, &ld.MediaFileID, &ld.Title, &ld.Overview, &ld.SortOrder, &ld.CoverPath,
+			&ld.ID, &ld.CourseID, &ld.ChapterID, &ld.MediaFileID, &ld.SourceID, &ld.Title, &ld.Overview, &ld.SortOrder, &ld.CoverPath,
 			&ld.DurationMs, &ld.Container, &ld.VideoCodec, &ld.AudioCodec, &ld.Width, &ld.Height, &ld.Bitrate, &ld.ThumbnailPath, &ld.MediaStatus,
 			&ld.PositionTicks, &playedInt, &ld.PlayCount, &ld.LastPlayedAt,
 			&ld.CreatedAt, &ld.UpdatedAt,
@@ -1290,7 +1313,7 @@ func (s *Service) GetLesson(ctx context.Context, lessonID string) (*LessonDetail
 	var ld LessonDetail
 	var playedInt int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT l.id, l.course_id, l.chapter_id, l.media_file_id, l.title, l.overview, l.sort_order, l.cover_path,
+		SELECT l.id, l.course_id, l.chapter_id, l.media_file_id, mf.source_id, l.title, l.overview, l.sort_order, l.cover_path,
 		       mf.duration_ms, mf.container, mf.video_codec, mf.audio_codec, mf.width, mf.height, mf.bitrate, mf.thumbnail_path, mf.status,
 		       COALESCE(pp.position_ticks, 0), COALESCE(pp.played, 0), COALESCE(pp.play_count, 0), COALESCE(pp.last_played_at, ''),
 		       l.created_at, l.updated_at
@@ -1299,7 +1322,7 @@ func (s *Service) GetLesson(ctx context.Context, lessonID string) (*LessonDetail
 		LEFT JOIN playback_progress pp ON pp.lesson_id = l.id
 		WHERE l.id = ?`, lessonID).
 		Scan(
-			&ld.ID, &ld.CourseID, &ld.ChapterID, &ld.MediaFileID, &ld.Title, &ld.Overview, &ld.SortOrder, &ld.CoverPath,
+			&ld.ID, &ld.CourseID, &ld.ChapterID, &ld.MediaFileID, &ld.SourceID, &ld.Title, &ld.Overview, &ld.SortOrder, &ld.CoverPath,
 			&ld.DurationMs, &ld.Container, &ld.VideoCodec, &ld.AudioCodec, &ld.Width, &ld.Height, &ld.Bitrate, &ld.ThumbnailPath, &ld.MediaStatus,
 			&ld.PositionTicks, &playedInt, &ld.PlayCount, &ld.LastPlayedAt,
 			&ld.CreatedAt, &ld.UpdatedAt,
@@ -1672,6 +1695,154 @@ func (s *Service) GetMediaFile(ctx context.Context, mediaFileID string) (*MediaF
 		return nil, err
 	}
 	return &mf, nil
+}
+
+func (s *Service) ListSourceSubtitles(ctx context.Context, sourceID, dirPrefix, search string, unmatchedOnly *bool) ([]IndexedSubtitle, error) {
+	sourceID = normalizeOrRaw(sourceID)
+	if _, err := s.GetSource(ctx, sourceID); err != nil {
+		return nil, err
+	}
+
+	where := []string{"source_id = ?", "status = 'active'"}
+	args := []any{sourceID}
+	if unmatchedOnly != nil {
+		if *unmatchedOnly {
+			where = append(where, "(media_file_id IS NULL OR media_file_id = '')")
+		} else {
+			where = append(where, "(media_file_id IS NOT NULL AND media_file_id != '')")
+		}
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, source_id, relative_path, COALESCE(media_file_id, ''), language, title, format, is_default, manually_bound, status
+		FROM subtitle_files
+		WHERE `+strings.Join(where, " AND "), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list source subtitles: %w", err)
+	}
+	defer rows.Close()
+
+	cleanPrefix := cleanRelPrefix(dirPrefix)
+	searchLower := strings.ToLower(strings.TrimSpace(search))
+
+	var subs []IndexedSubtitle
+	for rows.Next() {
+		var sub IndexedSubtitle
+		var isDefInt, manualInt int
+		if err := rows.Scan(
+			&sub.ID, &sub.SourceID, &sub.RelativePath, &sub.MediaFileID,
+			&sub.Language, &sub.Title, &sub.Format, &isDefInt, &manualInt, &sub.Status,
+		); err != nil {
+			return nil, fmt.Errorf("scan source subtitle: %w", err)
+		}
+		if cleanPrefix != "" && !strings.HasPrefix(sub.RelativePath, cleanPrefix+"/") {
+			continue
+		}
+		if searchLower != "" && !strings.Contains(strings.ToLower(sub.RelativePath), searchLower) && !strings.Contains(strings.ToLower(sub.Title), searchLower) {
+			continue
+		}
+		sub.FileName = path.Base(sub.RelativePath)
+		sub.IsDefault = isDefInt != 0
+		sub.ManuallyBound = manualInt != 0
+		subs = append(subs, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(subs, func(i, j int) bool {
+		return NaturalCompare(subs[i].RelativePath, subs[j].RelativePath) < 0
+	})
+	return subs, nil
+}
+
+func (s *Service) BindSubtitle(ctx context.Context, subtitleID string, input BindSubtitleInput) (*IndexedSubtitle, error) {
+	subtitleID = normalizeOrRaw(subtitleID)
+
+	var sub IndexedSubtitle
+	var isDefInt, manualInt int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, source_id, relative_path, COALESCE(media_file_id, ''), language, title, format, is_default, manually_bound, status
+		FROM subtitle_files
+		WHERE id = ?`, subtitleID).
+		Scan(
+			&sub.ID, &sub.SourceID, &sub.RelativePath, &sub.MediaFileID,
+			&sub.Language, &sub.Title, &sub.Format, &isDefInt, &manualInt, &sub.Status,
+		)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load subtitle %s: %w", subtitleID, err)
+	}
+
+	nextMediaID := sql.NullString{}
+	if sub.MediaFileID != "" {
+		nextMediaID = sql.NullString{String: sub.MediaFileID, Valid: true}
+	}
+	nextManual := manualInt
+
+	if input.ResetAuto {
+		nextMediaID = sql.NullString{}
+		nextManual = 0
+	} else if input.MediaFileID != nil {
+		trimmed := strings.TrimSpace(*input.MediaFileID)
+		if trimmed == "" {
+			nextMediaID = sql.NullString{}
+			nextManual = 1
+		} else {
+			normMF := normalizeOrRaw(trimmed)
+			var exists int
+			err := s.db.QueryRowContext(ctx, `SELECT 1 FROM media_files WHERE id = ?`, normMF).Scan(&exists)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("%w: media_file %s", ErrNotFound, normMF)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("verify media_file %s: %w", normMF, err)
+			}
+			nextMediaID = sql.NullString{String: normMF, Valid: true}
+			nextManual = 1
+		}
+	}
+
+	nextLang := sub.Language
+	if input.Language != nil {
+		if l := strings.TrimSpace(*input.Language); l != "" {
+			nextLang = l
+		}
+	}
+	nextTitle := sub.Title
+	if input.Title != nil {
+		nextTitle = strings.TrimSpace(*input.Title)
+	}
+	nextIsDef := isDefInt
+	if input.IsDefault != nil {
+		if *input.IsDefault {
+			nextIsDef = 1
+		} else {
+			nextIsDef = 0
+		}
+	}
+
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE subtitle_files
+		SET media_file_id = ?, language = ?, title = ?, is_default = ?, manually_bound = ?
+		WHERE id = ?`,
+		nextMediaID, nextLang, nextTitle, nextIsDef, nextManual, subtitleID,
+	); err != nil {
+		return nil, fmt.Errorf("update subtitle binding %s: %w", subtitleID, err)
+	}
+
+	sub.FileName = path.Base(sub.RelativePath)
+	sub.MediaFileID = ""
+	if nextMediaID.Valid {
+		sub.MediaFileID = nextMediaID.String
+	}
+	sub.Language = nextLang
+	sub.Title = nextTitle
+	sub.IsDefault = nextIsDef != 0
+	sub.ManuallyBound = nextManual != 0
+	return &sub, nil
 }
 
 func stripExt(name string) string {

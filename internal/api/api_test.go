@@ -1646,3 +1646,105 @@ func TestSystemUpdateEndpointsUnavailableWhenNilUpdater(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceSubtitlesAndManualBindEndpoints(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "sub-bind-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	// Create source with 1 video and 1 unmatched subtitle
+	courseDir := filepath.Join(env.mediaDir, "BindCourse")
+	if err := os.MkdirAll(courseDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(courseDir, "01_demo.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatalf("write mp4: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(courseDir, "unrelated_name.srt"), []byte("1\n00:00:00,000 --> 00:00:01,000\nHi\n"), 0o644); err != nil {
+		t.Fatalf("write srt: %v", err)
+	}
+
+	src, err := env.catSvc.CreateSource(context.Background(), "BindSrc", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+
+	course, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "BindCourse",
+		Title:      "Bind Course",
+	})
+	if err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+	lesson := course.Chapters[0].Lessons[0]
+
+	// List unmatched subtitles
+	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/sources/"+src.ID+"/subtitles?unmatched=true", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /sources/{id}/subtitles = %d: %s", resp.StatusCode, raw)
+	}
+	var listRes struct {
+		Subtitles []catalog.IndexedSubtitle `json:"subtitles"`
+	}
+	if err := json.Unmarshal(raw, &listRes); err != nil {
+		t.Fatalf("unmarshal subtitles: %v", err)
+	}
+	if len(listRes.Subtitles) != 1 {
+		t.Fatalf("expected 1 unmatched subtitle, got %+v", listRes.Subtitles)
+	}
+	subID := listRes.Subtitles[0].ID
+
+	// 404 on unknown subtitle
+	resp, _ = env.doJSON(t, http.MethodPut, "/api/v1/subtitles/00000000000000000000000000000001/bind", map[string]any{
+		"media_file_id": lesson.MediaFileID,
+	}, token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("bind unknown subtitle = %d, want 404", resp.StatusCode)
+	}
+
+	// 404 on unknown media_file_id
+	resp, _ = env.doJSON(t, http.MethodPut, "/api/v1/subtitles/"+subID+"/bind", map[string]any{
+		"media_file_id": "00000000000000000000000000000002",
+	}, token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("bind unknown media_file = %d, want 404", resp.StatusCode)
+	}
+
+	// Bind to lesson's media file
+	resp, raw = env.doJSON(t, http.MethodPut, "/api/v1/subtitles/"+subID+"/bind", map[string]any{
+		"media_file_id": lesson.MediaFileID,
+		"title":         "手工关联字幕",
+		"language":      "zh",
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT bind = %d: %s", resp.StatusCode, raw)
+	}
+
+	// Verify bound subtitle appears in playback endpoint
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lesson.ID+"/playback", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET playback = %d: %s", resp.StatusCode, raw)
+	}
+	var pb struct {
+		Subtitles []struct {
+			Title string `json:"title"`
+			URL   string `json:"url"`
+		} `json:"subtitles"`
+	}
+	if err := json.Unmarshal(raw, &pb); err != nil {
+		t.Fatalf("unmarshal playback: %v", err)
+	}
+	if len(pb.Subtitles) != 1 || pb.Subtitles[0].Title != "手工关联字幕" || pb.Subtitles[0].URL == "" {
+		t.Fatalf("expected bound subtitle in playback response, got %+v", pb.Subtitles)
+	}
+}

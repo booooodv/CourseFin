@@ -697,3 +697,100 @@ func TestDeleteLibraryWithOptions(t *testing.T) {
 		t.Fatalf("expected media_file intact after force library delete, got %v", err)
 	}
 }
+
+func TestListAndBindSubtitles(t *testing.T) {
+	ctx := context.Background()
+	svc, conn, _ := setupTestCatalog(t)
+	mediaRoot := t.TempDir()
+
+	src, err := svc.CreateSource(ctx, "SubSrc", "local", mediaRoot)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	mfID := seedMediaFile(t, conn, src.ID, "Course/01_intro.mp4", 60000)
+
+	subID := id.New()
+	if _, err := conn.Exec(`
+		INSERT INTO subtitle_files (id, source_id, relative_path, media_file_id, language, title, format, is_default, status)
+		VALUES (?, ?, 'Course/custom_sub.srt', NULL, 'und', '', 'srt', 0, 'active')`,
+		subID, src.ID,
+	); err != nil {
+		t.Fatalf("insert unmatched subtitle: %v", err)
+	}
+
+	course, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{Title: "Sub Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse: %v", err)
+	}
+	lesson, err := svc.AddLesson(ctx, course.Chapters[0].ID, mfID, "Intro")
+	if err != nil {
+		t.Fatalf("AddLesson: %v", err)
+	}
+	if lesson.SourceID != src.ID {
+		t.Fatalf("GetLesson SourceID = %q, want %q", lesson.SourceID, src.ID)
+	}
+	detail, err := svc.GetCourseDetail(ctx, course.ID)
+	if err != nil {
+		t.Fatalf("GetCourseDetail: %v", err)
+	}
+	if detail.Chapters[0].Lessons[0].SourceID != src.ID {
+		t.Fatalf("GetCourseDetail lesson SourceID = %q, want %q", detail.Chapters[0].Lessons[0].SourceID, src.ID)
+	}
+
+	unmatchedTrue := true
+	subs, err := svc.ListSourceSubtitles(ctx, src.ID, "", "", &unmatchedTrue)
+	if err != nil {
+		t.Fatalf("ListSourceSubtitles: %v", err)
+	}
+	if len(subs) != 1 || subs[0].ID != subID || subs[0].FileName != "custom_sub.srt" {
+		t.Fatalf("unexpected unmatched subs: %+v", subs)
+	}
+
+	// Bind subtitle manually
+	titleZh := "中文字幕"
+	langZh := "zh"
+	isDef := true
+	bound, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{
+		MediaFileID: &mfID,
+		Title:       &titleZh,
+		Language:    &langZh,
+		IsDefault:   &isDef,
+	})
+	if err != nil {
+		t.Fatalf("BindSubtitle: %v", err)
+	}
+	if bound.MediaFileID != mfID || !bound.ManuallyBound || bound.Title != "中文字幕" || bound.Language != "zh" || !bound.IsDefault {
+		t.Fatalf("unexpected bound subtitle: %+v", bound)
+	}
+
+	lessonAfter, err := svc.GetLesson(ctx, lesson.ID)
+	if err != nil {
+		t.Fatalf("GetLesson after bind: %v", err)
+	}
+	if len(lessonAfter.Subtitles) != 1 || lessonAfter.Subtitles[0].ID != subID {
+		t.Fatalf("expected lesson to include bound subtitle, got %+v", lessonAfter.Subtitles)
+	}
+
+	// Unbind keeps manually_bound = true so scanner will not silently re-attach
+	empty := ""
+	unbound, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{
+		MediaFileID: &empty,
+	})
+	if err != nil {
+		t.Fatalf("BindSubtitle unbind: %v", err)
+	}
+	if unbound.MediaFileID != "" || !unbound.ManuallyBound {
+		t.Fatalf("expected unbound with manually_bound=true, got %+v", unbound)
+	}
+
+	// ResetAuto returns subtitle to auto-match pool (manually_bound = false)
+	reset, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{
+		ResetAuto: true,
+	})
+	if err != nil {
+		t.Fatalf("BindSubtitle reset_auto: %v", err)
+	}
+	if reset.MediaFileID != "" || reset.ManuallyBound {
+		t.Fatalf("expected reset_auto with manually_bound=false, got %+v", reset)
+	}
+}

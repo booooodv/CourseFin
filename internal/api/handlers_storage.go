@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"coursefin/internal/catalog"
@@ -157,4 +158,64 @@ func (h *handler) handleImportCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, course)
+}
+
+func (h *handler) handleListSourceSubtitles(w http.ResponseWriter, r *http.Request) {
+	sourceID := normalizeID(chi.URLParam(r, "id"))
+	q := r.URL.Query()
+	var unmatchedOnly *bool
+	if raw := strings.TrimSpace(q.Get("unmatched")); raw != "" {
+		if b, err := strconv.ParseBool(raw); err == nil {
+			unmatchedOnly = &b
+		}
+	}
+	subs, err := h.cat.ListSourceSubtitles(r.Context(), sourceID, q.Get("prefix"), q.Get("search"), unmatchedOnly)
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	if subs == nil {
+		subs = []catalog.IndexedSubtitle{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subtitles": subs})
+}
+
+func (h *handler) handleBindSubtitle(w http.ResponseWriter, r *http.Request) {
+	subtitleID := normalizeID(chi.URLParam(r, "id"))
+	var rawMap map[string]any
+	var req catalog.BindSubtitleInput
+	if err := decodeJSON(r, &rawMap, false); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if v, exists := rawMap["media_file_id"]; exists {
+		if v == nil {
+			empty := ""
+			req.MediaFileID = &empty
+		} else if s, ok := v.(string); ok {
+			req.MediaFileID = &s
+		} else {
+			writeError(w, http.StatusBadRequest, "media_file_id must be a string or null")
+			return
+		}
+	}
+	if v, ok := rawMap["title"].(string); ok {
+		req.Title = &v
+	}
+	if v, ok := rawMap["language"].(string); ok {
+		req.Language = &v
+	}
+	if v, ok := rawMap["is_default"].(bool); ok {
+		req.IsDefault = &v
+	}
+	if v, ok := rawMap["reset_auto"].(bool); ok {
+		req.ResetAuto = v
+	}
+
+	updated, err := h.cat.BindSubtitle(r.Context(), subtitleID, req)
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
