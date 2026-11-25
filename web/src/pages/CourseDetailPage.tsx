@@ -27,8 +27,38 @@ import type {
   CourseDetail,
   LessonDetail,
   LessonPlaybackInfo,
+  PlaybackSubtitleItem,
   ProgressResponse,
 } from '../types/coursefin';
+
+function arePlaybackSubtitlesEqual(
+  a: PlaybackSubtitleItem[],
+  b: PlaybackSubtitleItem[],
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const prev = a[i];
+    const next = b[i];
+    if (
+      prev.index !== next.index ||
+      prev.url !== next.url ||
+      prev.title !== next.title ||
+      prev.language !== next.language ||
+      prev.is_default !== next.is_default ||
+      prev.is_external !== next.is_external ||
+      prev.is_text !== next.is_text ||
+      prev.format !== next.format
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasAISubtitleTrack(subtitles: PlaybackSubtitleItem[]): boolean {
+  return subtitles.some((sub) => sub.title === 'AI 转写字幕' || sub.title.includes('AI 转写'));
+}
 
 function formatLessonDuration(durationMs: number): string {
   if (!durationMs || durationMs <= 0) return '--:--';
@@ -151,6 +181,7 @@ export default function CourseDetailPage() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightTab, setRightTab] = useState<'syllabus' | 'summary'>('syllabus');
+  const [summaryTabOpened, setSummaryTabOpened] = useState(false);
   const [collapsedChapters, setCollapsedChapters] = useState<Record<string, boolean>>({});
 
   const videoPlayerRef = useRef<VideoPlayerHandle>(null);
@@ -160,6 +191,8 @@ export default function CourseDetailPage() {
   activeCourseIdRef.current = courseId;
   const forceTranscodeLessonIdRef = useRef<string | null>(null);
   forceTranscodeLessonIdRef.current = forceTranscodeLessonId;
+  const playbackRef = useRef<LessonPlaybackInfo | null>(null);
+  playbackRef.current = playback;
 
   const [activeCurrentTimeSec, setActiveCurrentTimeSec] = useState(0);
   const [summaryLessonIds, setSummaryLessonIds] = useState<string[]>([]);
@@ -167,19 +200,116 @@ export default function CourseDetailPage() {
   const [startingBatch, setStartingBatch] = useState(false);
   const [cancellingBatch, setCancellingBatch] = useState(false);
 
+  const batchJobRef = useRef<CourseBatchSummaryJob | null>(null);
+  batchJobRef.current = batchJob;
+  const summaryStatusInitializedRef = useRef(false);
+  const knownSummaryLessonIdsRef = useRef<Set<string>>(new Set());
+  const subtitlesRefreshInFlightRef = useRef<string | null>(null);
+  const latestKnownSubtitlesRef = useRef<{
+    lessonId: string;
+    subtitles: PlaybackSubtitleItem[];
+  } | null>(null);
+  const lastSubToastRef = useRef<{ lessonId: string; at: number } | null>(null);
+
   const summaryLessonSet = useMemo(() => new Set(summaryLessonIds), [summaryLessonIds]);
 
-  const fetchCourseSummariesStatus = useCallback(async (targetCourseId: string) => {
-    try {
-      const status = await api.getCourseSummariesStatus(targetCourseId);
-      if (activeCourseIdRef.current !== targetCourseId) return null;
-      setSummaryLessonIds(status.summary_lesson_ids ?? []);
-      setBatchJob(status.batch_job ?? null);
-      return status;
-    } catch {
-      return null;
-    }
-  }, []);
+  const refreshActiveLessonSubtitles = useCallback(
+    async (lessonId: string, options?: { fromBatch?: boolean }) => {
+      if (subtitlesRefreshInFlightRef.current === lessonId) {
+        return;
+      }
+      subtitlesRefreshInFlightRef.current = lessonId;
+
+      const forceTranscode = forceTranscodeLessonIdRef.current === lessonId;
+      const prevSubs =
+        latestKnownSubtitlesRef.current?.lessonId === lessonId
+          ? latestKnownSubtitlesRef.current.subtitles
+          : playbackRef.current?.lesson_id === lessonId
+            ? playbackRef.current.subtitles
+            : [];
+
+      try {
+        const latest = await api.getLessonPlayback(lessonId, {
+          codecs: browserCodecs,
+          forceTranscode,
+        });
+        if (activeLessonIdRef.current !== lessonId) return;
+
+        const hadAiSub = hasAISubtitleTrack(prevSubs);
+        const hasAiSub = hasAISubtitleTrack(latest.subtitles);
+        const listChanged = !arePlaybackSubtitlesEqual(prevSubs, latest.subtitles);
+
+        latestKnownSubtitlesRef.current = { lessonId, subtitles: latest.subtitles };
+
+        if (listChanged) {
+          setPlayback((prev) =>
+            prev && prev.lesson_id === lessonId
+              ? { ...prev, subtitles: latest.subtitles }
+              : prev,
+          );
+        }
+
+        const recentlyToasted =
+          lastSubToastRef.current?.lessonId === lessonId &&
+          Date.now() - lastSubToastRef.current.at < 5000;
+
+        const shouldToast = options?.fromBatch
+          ? hasAiSub && (!hadAiSub || listChanged) && !recentlyToasted
+          : hasAiSub && !recentlyToasted;
+
+        if (shouldToast) {
+          lastSubToastRef.current = { lessonId, at: Date.now() };
+          toast.success('已生成 AI 转写字幕，可在播放器字幕菜单开启');
+        }
+      } catch {
+        // Degrade silently so existing summary remains usable
+      } finally {
+        if (subtitlesRefreshInFlightRef.current === lessonId) {
+          subtitlesRefreshInFlightRef.current = null;
+        }
+      }
+    },
+    [browserCodecs, toast],
+  );
+
+  const fetchCourseSummariesStatus = useCallback(
+    async (targetCourseId: string, options?: { checkBatchAdditions?: boolean }) => {
+      try {
+        const wasBatchRunning = Boolean(batchJobRef.current?.running);
+        const status = await api.getCourseSummariesStatus(targetCourseId);
+        if (activeCourseIdRef.current !== targetCourseId) return null;
+
+        const isInitialized = summaryStatusInitializedRef.current;
+        summaryStatusInitializedRef.current = true;
+
+        const nextIds = status.summary_lesson_ids ?? [];
+        const nextBatch = status.batch_job ?? null;
+        const nowBatchRunning = Boolean(nextBatch?.running);
+        const activeId = activeLessonIdRef.current;
+
+        const shouldCheckAdditions =
+          isInitialized &&
+          (Boolean(options?.checkBatchAdditions) || wasBatchRunning || nowBatchRunning);
+        const newlyAddedActive =
+          shouldCheckAdditions &&
+          Boolean(activeId) &&
+          nextIds.includes(activeId!) &&
+          !knownSummaryLessonIdsRef.current.has(activeId!);
+
+        knownSummaryLessonIdsRef.current = new Set(nextIds);
+        setSummaryLessonIds(nextIds);
+        setBatchJob(nextBatch);
+
+        if (newlyAddedActive && activeId) {
+          void refreshActiveLessonSubtitles(activeId, { fromBatch: true });
+        }
+        return status;
+      } catch {
+        return null;
+      }
+    },
+    [refreshActiveLessonSubtitles],
+  );
 
   const loadCourse = useCallback(async () => {
     if (!courseId) return;
@@ -194,6 +324,11 @@ export default function CourseDetailPage() {
     setActiveCurrentTimeSec(0);
     setSummaryLessonIds([]);
     setBatchJob(null);
+    setRightTab('syllabus');
+    setSummaryTabOpened(false);
+    summaryStatusInitializedRef.current = false;
+    knownSummaryLessonIdsRef.current = new Set();
+    latestKnownSubtitlesRef.current = null;
     try {
       const data = await api.getCourse(courseId);
       setCourse(data);
@@ -214,6 +349,7 @@ export default function CourseDetailPage() {
   // Reset live playback timestamp whenever switching lessons
   useEffect(() => {
     setActiveCurrentTimeSec(0);
+    latestKnownSubtitlesRef.current = null;
   }, [activeLessonId]);
 
   // Visibility-aware 1.5s polling while a course batch summary job is running
@@ -363,33 +499,12 @@ export default function CourseDetailPage() {
     [],
   );
 
-  const refreshActiveLessonSubtitles = useCallback(
-    async (lessonId: string) => {
-      const forceTranscode = forceTranscodeLessonIdRef.current === lessonId;
-      try {
-        const latest = await api.getLessonPlayback(lessonId, {
-          codecs: browserCodecs,
-          forceTranscode,
-        });
-        if (activeLessonIdRef.current !== lessonId) return;
-        setPlayback((prev) =>
-          prev && prev.lesson_id === lessonId
-            ? { ...prev, subtitles: latest.subtitles }
-            : prev,
-        );
-        toast.success('已生成 AI 转写字幕，可在播放器字幕菜单开启');
-      } catch {
-        // Degrade silently so existing summary remains usable
-      }
-    },
-    [browserCodecs, toast],
-  );
-
   const handleSummaryUpdated = useCallback(
     (lessonId: string, sourceType?: string, isNewlyCompleted = false) => {
+      knownSummaryLessonIdsRef.current.add(lessonId);
       setSummaryLessonIds((prev) => (prev.includes(lessonId) ? prev : [...prev, lessonId]));
       if (isNewlyCompleted && sourceType === 'asr' && lessonId === activeLessonIdRef.current) {
-        void refreshActiveLessonSubtitles(lessonId);
+        void refreshActiveLessonSubtitles(lessonId, { fromBatch: false });
       }
     },
     [refreshActiveLessonSubtitles],
@@ -404,7 +519,7 @@ export default function CourseDetailPage() {
         if (activeCourseIdRef.current !== courseId) return;
         setBatchJob(job);
         if (!job.running) {
-          void fetchCourseSummariesStatus(courseId);
+          void fetchCourseSummariesStatus(courseId, { checkBatchAdditions: job.completed > 0 });
           if (job.total === 0 || job.skipped === job.total) {
             toast.info('当前课程全部课时均已生成 AI 总结');
           }
@@ -813,7 +928,10 @@ export default function CourseDetailPage() {
                 type="button"
                 role="tab"
                 aria-selected={rightTab === 'summary'}
-                onClick={() => setRightTab('summary')}
+                onClick={() => {
+                  setRightTab('summary');
+                  setSummaryTabOpened(true);
+                }}
                 className={`inline-flex items-center justify-center gap-1.5 rounded-2xl px-3 py-2 text-xs font-semibold transition-colors cursor-pointer ${
                   rightTab === 'summary'
                     ? 'bg-card text-ink-primary shadow-card'
@@ -825,171 +943,173 @@ export default function CourseDetailPage() {
               </button>
             </div>
 
-            {rightTab === 'syllabus' ? (
-              <>
-                <div className="flex items-center justify-between gap-2 border-b border-subtle px-4 py-2.5">
-                  <span className="text-xs tabular-nums text-ink-muted">
-                    {course.played_count}/{course.lesson_count} 节
-                    {summaryLessonIds.length > 0 && ` · 已总结 ${summaryLessonIds.length}`}
-                  </span>
+            <div className={rightTab === 'syllabus' ? undefined : 'hidden'} hidden={rightTab !== 'syllabus'}>
+              <div className="flex items-center justify-between gap-2 border-b border-subtle px-4 py-2.5">
+                <span className="text-xs tabular-nums text-ink-muted">
+                  {course.played_count}/{course.lesson_count} 节
+                  {summaryLessonIds.length > 0 && ` · 已总结 ${summaryLessonIds.length}`}
+                </span>
 
-                  <Tooltip
-                    content={
-                      batchJob?.running
-                        ? '正在批量生成整门课 AI 总结'
-                        : allLessonsSummarized
-                          ? '全部课时已有总结，点击可重新批量生成'
-                          : '为尚未生成总结的课时批量生成 AI 总结'
+                <Tooltip
+                  content={
+                    batchJob?.running
+                      ? '正在批量生成整门课 AI 总结'
+                      : allLessonsSummarized
+                        ? '全部课时已有总结，点击可重新批量生成'
+                        : '为尚未生成总结的课时批量生成 AI 总结'
+                  }
+                >
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleStartBatch(allLessonsSummarized ? 'all' : 'missing_only')
                     }
+                    disabled={
+                      flatLessons.length === 0 || startingBatch || Boolean(batchJob?.running)
+                    }
+                    className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-2.5 py-1 text-[11px] font-medium text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors cursor-pointer"
                   >
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void handleStartBatch(allLessonsSummarized ? 'all' : 'missing_only')
-                      }
-                      disabled={
-                        flatLessons.length === 0 || startingBatch || Boolean(batchJob?.running)
-                      }
-                      className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-2.5 py-1 text-[11px] font-medium text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors cursor-pointer"
-                    >
-                      <Sparkles className="h-3 w-3 text-accent" />
-                      <span>
-                        {batchJob?.running
-                          ? '批量生成中'
-                          : allLessonsSummarized
-                            ? '全部已总结'
-                            : '批量总结'}
-                      </span>
-                    </button>
-                  </Tooltip>
+                    <Sparkles className="h-3 w-3 text-accent" />
+                    <span>
+                      {batchJob?.running
+                        ? '批量生成中'
+                        : allLessonsSummarized
+                          ? '全部已总结'
+                          : '批量总结'}
+                    </span>
+                  </button>
+                </Tooltip>
+              </div>
+
+              {batchJob?.running && (
+                <div className="border-b border-subtle p-3">
+                  <BatchSummaryBanner
+                    batchJob={batchJob}
+                    cancelling={cancellingBatch}
+                    onCancel={handleCancelBatch}
+                  />
                 </div>
+              )}
 
-                {batchJob?.running && (
-                  <div className="border-b border-subtle p-3">
-                    <BatchSummaryBanner
-                      batchJob={batchJob}
-                      cancelling={cancellingBatch}
-                      onCancel={handleCancelBatch}
-                    />
-                  </div>
-                )}
-
-                <div className="max-h-[calc(100vh-11rem)] overflow-y-auto divide-y divide-subtle">
-                  {(course.chapters ?? []).map((chapter) => {
-                    const isCollapsed = Boolean(collapsedChapters[chapter.id]);
-                    const lessons = chapter.lessons ?? [];
-                    return (
-                      <div key={chapter.id}>
-                        <button
-                          type="button"
-                          onClick={() => toggleChapterCollapse(chapter.id)}
-                          aria-expanded={!isCollapsed}
-                          className="w-full flex items-center justify-between gap-2 px-4 py-3 text-left bg-subtle/70 hover:bg-subtle transition-colors cursor-pointer"
-                        >
-                          <div className="flex items-center gap-2 min-w-0">
-                            {isCollapsed ? (
-                              <ChevronRight className="h-4 w-4 text-ink-muted shrink-0" />
-                            ) : (
-                              <ChevronDown className="h-4 w-4 text-ink-muted shrink-0" />
-                            )}
-                            <span className="text-xs font-semibold text-ink-primary truncate">
-                              {chapter.title}
-                            </span>
-                          </div>
-                          <span className="text-[11px] tabular-nums text-ink-muted shrink-0">
-                            {chapter.played_count}/{lessons.length}
+              <div className="max-h-[calc(100vh-11rem)] overflow-y-auto divide-y divide-subtle">
+                {(course.chapters ?? []).map((chapter) => {
+                  const isCollapsed = Boolean(collapsedChapters[chapter.id]);
+                  const lessons = chapter.lessons ?? [];
+                  return (
+                    <div key={chapter.id}>
+                      <button
+                        type="button"
+                        onClick={() => toggleChapterCollapse(chapter.id)}
+                        aria-expanded={!isCollapsed}
+                        className="w-full flex items-center justify-between gap-2 px-4 py-3 text-left bg-subtle/70 hover:bg-subtle transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {isCollapsed ? (
+                            <ChevronRight className="h-4 w-4 text-ink-muted shrink-0" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4 text-ink-muted shrink-0" />
+                          )}
+                          <span className="text-xs font-semibold text-ink-primary truncate">
+                            {chapter.title}
                           </span>
-                        </button>
+                        </div>
+                        <span className="text-[11px] tabular-nums text-ink-muted shrink-0">
+                          {chapter.played_count}/{lessons.length}
+                        </span>
+                      </button>
 
-                        {!isCollapsed && (
-                          <ul className="divide-y divide-subtle bg-card">
-                            {lessons.map((lesson) => {
-                              const isActive = lesson.id === activeLessonId;
-                              const isSummarized = summaryLessonSet.has(lesson.id);
-                              const baseRatio =
-                                lesson.duration_ms > 0
-                                  ? lesson.position_ticks / (lesson.duration_ms * 10_000)
-                                  : 0;
-                              const progressRatio =
-                                isActive &&
-                                !lesson.played &&
-                                activeLiveProgress?.lessonId === lesson.id
-                                  ? activeLiveProgress.ratio
-                                  : baseRatio;
-                              return (
-                                <li key={lesson.id}>
-                                  <button
-                                    type="button"
-                                    onClick={() => selectLesson(lesson.id)}
-                                    aria-current={isActive ? 'true' : undefined}
-                                    className={`relative w-full flex items-start gap-2.5 px-4 py-2.5 text-left transition-colors cursor-pointer ${
-                                      isActive
-                                        ? 'bg-accent-soft text-ink-primary'
-                                        : 'hover:bg-subtle/70 text-ink-secondary'
-                                    }`}
-                                  >
-                                    {isActive && (
-                                      <span
-                                        aria-hidden="true"
-                                        className="absolute inset-y-1.5 left-0 w-1 rounded-r-full bg-accent"
-                                      />
-                                    )}
-                                    <span className="mt-0.5 shrink-0">
-                                      <LessonProgressIcon
-                                        played={lesson.played}
-                                        progressRatio={progressRatio}
-                                        isActive={isActive}
-                                      />
+                      {!isCollapsed && (
+                        <ul className="divide-y divide-subtle bg-card">
+                          {lessons.map((lesson) => {
+                            const isActive = lesson.id === activeLessonId;
+                            const isSummarized = summaryLessonSet.has(lesson.id);
+                            const baseRatio =
+                              lesson.duration_ms > 0
+                                ? lesson.position_ticks / (lesson.duration_ms * 10_000)
+                                : 0;
+                            const progressRatio =
+                              isActive &&
+                              !lesson.played &&
+                              activeLiveProgress?.lessonId === lesson.id
+                                ? activeLiveProgress.ratio
+                                : baseRatio;
+                            return (
+                              <li key={lesson.id}>
+                                <button
+                                  type="button"
+                                  onClick={() => selectLesson(lesson.id)}
+                                  aria-current={isActive ? 'true' : undefined}
+                                  className={`relative w-full flex items-start gap-2.5 px-4 py-2.5 text-left transition-colors cursor-pointer ${
+                                    isActive
+                                      ? 'bg-accent-soft text-ink-primary'
+                                      : 'hover:bg-subtle/70 text-ink-secondary'
+                                  }`}
+                                >
+                                  {isActive && (
+                                    <span
+                                      aria-hidden="true"
+                                      className="absolute inset-y-1.5 left-0 w-1 rounded-r-full bg-accent"
+                                    />
+                                  )}
+                                  <span className="mt-0.5 shrink-0">
+                                    <LessonProgressIcon
+                                      played={lesson.played}
+                                      progressRatio={progressRatio}
+                                      isActive={isActive}
+                                    />
+                                  </span>
+                                  <span className="flex-1 min-w-0">
+                                    <span
+                                      className={`block text-xs leading-snug line-clamp-2 ${
+                                        isActive
+                                          ? 'font-bold text-ink-primary'
+                                          : 'font-medium text-ink-secondary'
+                                      }`}
+                                    >
+                                      {lesson.title}
                                     </span>
-                                    <span className="flex-1 min-w-0">
+                                  </span>
+                                  {isSummarized && (
+                                    <Tooltip content="已生成 AI 总结">
                                       <span
-                                        className={`block text-xs leading-snug line-clamp-2 ${
-                                          isActive
-                                            ? 'font-bold text-ink-primary'
-                                            : 'font-medium text-ink-secondary'
-                                        }`}
+                                        aria-label="已生成 AI 总结"
+                                        className="mt-0.5 inline-flex items-center text-accent-ink shrink-0"
                                       >
-                                        {lesson.title}
+                                        <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                                       </span>
-                                    </span>
-                                    {isSummarized && (
-                                      <Tooltip content="已生成 AI 总结">
-                                        <span
-                                          aria-label="已生成 AI 总结"
-                                          className="mt-0.5 inline-flex items-center text-accent-ink shrink-0"
-                                        >
-                                          <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-                                        </span>
-                                      </Tooltip>
-                                    )}
-                                    <span className="shrink-0 text-[11px] tabular-nums text-ink-muted mt-0.5">
-                                      {formatLessonDuration(lesson.duration_ms)}
-                                    </span>
-                                  </button>
-                                </li>
-                              );
-                            })}
-                          </ul>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            ) : (
-              <LessonSummaryPanel
-                course={course}
-                activeEntry={activeEntry}
-                currentTimeSec={activeCurrentTimeSec}
-                onSeek={handleSeekFromSummary}
-                onSummaryUpdated={handleSummaryUpdated}
-                batchJob={batchJob}
-                batchSyncKey={batchSyncKey}
-                onStartBatch={handleStartBatch}
-                onCancelBatch={handleCancelBatch}
-                startingBatch={startingBatch}
-                cancellingBatch={cancellingBatch}
-              />
+                                    </Tooltip>
+                                  )}
+                                  <span className="shrink-0 text-[11px] tabular-nums text-ink-muted mt-0.5">
+                                    {formatLessonDuration(lesson.duration_ms)}
+                                  </span>
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {summaryTabOpened && (
+              <div className={rightTab === 'summary' ? undefined : 'hidden'} hidden={rightTab !== 'summary'}>
+                <LessonSummaryPanel
+                  course={course}
+                  activeEntry={activeEntry}
+                  currentTimeSec={activeCurrentTimeSec}
+                  onSeek={handleSeekFromSummary}
+                  onSummaryUpdated={handleSummaryUpdated}
+                  batchJob={batchJob}
+                  batchSyncKey={batchSyncKey}
+                  onStartBatch={handleStartBatch}
+                  onCancelBatch={handleCancelBatch}
+                  startingBatch={startingBatch}
+                  cancellingBatch={cancellingBatch}
+                />
+              </div>
             )}
           </aside>
         )}
