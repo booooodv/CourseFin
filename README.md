@@ -6,9 +6,9 @@
 ![Docker](https://img.shields.io/badge/Docker-Single%20Container-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> A lightweight, Docker-deployable self-hosted course management platform that decouples physical video storage from custom course organization, exposes a **Jellyfin-compatible API**, ships with an embedded Web manager & player, and supports OpenAI-compatible AI metadata organization.
+> A lightweight, Docker-deployable self-hosted course management platform that decouples physical video storage from custom course organization, exposes a **Jellyfin-compatible API**, ships with an embedded dual-theme Web manager & Artplayer player, and provides OpenAI-compatible AI course organization, per-lesson AI summaries, and subtitle-free ASR transcription.
 
-自托管、单容器 Docker 部署的个人课程管理平台——把物理文件索引与逻辑课程彻底解耦，同时对外提供高兼容度的 **Jellyfin 协议接口**，让 Infuse、VidHub、SenPlayer、Swiftfin、Findroid 等客户端以及内置 Web 播放器都能直接流畅看课并同步学习进度。
+自托管、单容器 Docker 部署的个人课程管理平台——把物理文件索引与逻辑课程彻底解耦，提供高兼容度的 **Jellyfin 协议接口**，内置明/暗双主题 Web 管理与播放端，并集成 **AI 课程整理**、**每课结构化 AI 总结（大纲 + 时间线）** 与 **无字幕语音转文字（ASR）托管字幕**，让 Infuse、VidHub、SenPlayer、Swiftfin、Findroid 与浏览器端都能流畅看课、同步进度并高效做笔记。
 
 ---
 
@@ -16,8 +16,8 @@
 
 Jellyfin / Emby 的索引与刮削体系围绕电影和电视剧设计，管理散乱目录结构、中英文混排命名的课程非常痛苦。CourseFin 将**物理存储索引**和**逻辑课程专辑**完全分离：
 
-- **绝不改动硬盘原文件**：支持只读挂载（`:ro`），整理课程、重排章节、改名、删课不会触碰原始文件。
-- **原生映射到 Jellyfin**：`媒体库 → 课程专辑(Series) → 章节(Season) → 课时(Episode)`，课程标签自动同步为 Jellyfin 的 `Tags` 与 `Genres`。
+- **绝不改动硬盘原文件**：支持只读挂载（`:ro`），整理课程、重排章节、改名、删课、生成 AI 转写字幕均只在 `/data` 与 SQLite 元数据层完成，不会触碰原始文件。
+- **原生映射到 Jellyfin**：`媒体库 → 课程专辑(Series) → 章节(Season) → 课时(Episode)`，课程标签自动同步为 Jellyfin 的 `Tags` 与 `Genres`，AI 转写字幕同样自动暴露给原生客户端。
 - **轻量单容器交付**：Go 单二进制 + 内嵌 React Web 端 + SQLite（WAL 模式，零外部数据库依赖）+ FFmpeg。
 
 ---
@@ -25,43 +25,55 @@ Jellyfin / Emby 的索引与刮削体系围绕电影和电视剧设计，管理�
 ## 架构概览
 
 ```text
-┌──────────────────────────────┐     ┌──────────────────────────────────┐
-│ Jellyfin 客户端               │     │ 浏览器（CourseFin Web SPA）       │
-│ Infuse / VidHub / SenPlayer  │     │ 课程管理 / 拖拽编排 / 内置播放器  │
-│ Swiftfin / Findroid / 官方端  │     │ AI 智能整理预览 / 存储导入        │
-└──────────────┬───────────────┘     └────────────────┬─────────────────┘
-               │  Jellyfin REST / WS (/ & /emby)      │  /api/v1 & /web
-               ▼                                      ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                     CourseFin 单 Docker 容器 (:8096)                   │
-│                                                                       │
-│  Auth & Multi-Device Sessions  │  Catalog / Natural-Sort Importer     │
-│  DirectPlay (Range) + Seekable VOD HLS Remux (FFmpeg -c:v copy)       │
-│  Image Resize Cache (SHA-256)  │  Subtitle Extractor (SRT → WebVTT)   │
-│                                                                       │
-│  ┌────────────────┐   ┌────────────────────┐   ┌───────────────────┐  │
-│  │ SQLite (/data) │   │ StorageProvider    │   │ AIProvider        │  │
-│  │ (WAL Mode)     │   │ └─ LocalFS (v1)    │   │ └─ OpenAI-Compat  │  │
-│  └────────────────┘   └─────────┬──────────┘   └───────────────────┘  │
-└─────────────────────────────────┼─────────────────────────────────────┘
+┌──────────────────────────────┐     ┌───────────────────────────────────────┐
+│ Jellyfin 客户端               │     │ 浏览器（CourseFin 双主题 Web SPA）     │
+│ Infuse / VidHub / SenPlayer  │     │ 课程管理 / 拖拽编排 / Artplayer 播放器 │
+│ Swiftfin / Findroid / 官方端  │     │ AI 整理 / 每课总结 / Markdown 笔记复制 │
+└──────────────┬───────────────┘     └──────────────────┬────────────────────┘
+               │  Jellyfin REST / WS (/ & /emby)        │  /api/v1 & /web
+               ▼                                        ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                        CourseFin 单 Docker 容器 (:8096)                     │
+│                                                                            │
+│  Auth & Multi-Device Sessions    │  Catalog / Natural-Sort Importer        │
+│  DirectPlay + VOD HLS Remux/Transcode (FFmpeg)                             │
+│  Subtitle Hub (外挂/内嵌/多编码转码/AI 转写字幕 → WebVTT)                    │
+│  Lesson AI Summary & Serial Batch Queue (Map-Reduce + FFmpeg Audio Chunks) │
+│                                                                            │
+│  ┌────────────────┐   ┌────────────────────┐   ┌────────────────────────┐  │
+│  │ SQLite (/data) │   │ StorageProvider    │   │ AI / ASR Client        │  │
+│  │ (WAL Mode)     │   │ └─ LocalFS         │   │ └─ OpenAI-Compat API   │  │
+│  └────────────────┘   └─────────┬──────────┘   └────────────────────────┘  │
+└─────────────────────────────────┼──────────────────────────────────────────┘
                                   ▼
                     只读挂载课程目录 (/media:ro)
 ```
 
 ---
 
-## v1.0.0 核心功能
+## 核心功能
 
-- **可插拔存储与增量扫描**：首版支持本地目录 / NAS 挂载（内置路径穿越与软链逃逸保护），底层抽象 `StorageProvider`（含 302 `DirectURL` 钩子，便于后续扩展 WebDAV / Alist / OpenList / S3）；支持增量 `ffprobe`、自动截取课时缩略图、外挂字幕匹配，以及临时断挂载自动标记 `missing` 并无损恢复。
-- **自定义课程编排与一键导入**：支持按目录一键导入预览（自动识别封面、多级目录映射章节、中英文与小数自然排序）、幂等增量「检查新文件」、跨目录自由拼装课程、拖拽排序章节与课时、上传或截取课时帧作为封面、标签分类管理。
-- **DirectPlay + 按需秒级跳转 VOD HLS 转封装**：
-  - 原生支持 HTTP Range（`206 Partial Content` / `HEAD` / `ETag`）直连播放。
-  - 浏览器播放 `.mkv` / `.flv` / `.ts` 等容器时按需通过 FFmpeg `-c:v copy` 生成可任意时间点秒级跳转的 VOD HLS 切片（几乎不占 CPU；不兼容编码如 WMV/RV40 在 Web 端明确提示改用原生播放器）。
-  - 支持外挂与内嵌文本字幕（`.srt` 自动实时转 WebVTT）。
-- **高兼容度 Jellyfin 协议**：支持根路径 `/` 及 `/emby` 大小写无关兼容、全部主流 Jellyfin 鉴权方式、`DeviceProfile` 播放协商、`/socket` WebSocket KeepAlive、`Views` / `Items` / `Seasons` / `Episodes` / `Genres` / `Tags` / `Resume` / `NextUp` / `Latest` / `Search` 及多端进度双向同步（≥90% 自动完播）。
-- **内置中文 Web 管理与播放端**：开箱即用初始化向导、课程库首页与继续学习栏、HTML5 / `hls.js` 播放器（0.75x–2.0x 倍速、字幕切换、键盘快捷键、断点续播与切课自动落盘）、拖拽式课程编辑器、存储导入页与设置页。
-- **自定义 AI 课程元数据整理**：支持任意 OpenAI 兼容接口（OpenAI / DeepSeek / 通义千问 / OpenRouter / Ollama / NewAPI 等），基于目录、文件名与可选字幕片段生成课程标题、简介、标签与章节划分建议，严格校验所有 `lesson_id` 一一对应并**先预览勾选确认再事务性应用**。
-- **内置自动检测与一键自更新**：定期（默认每 6 小时）及手动检测 GitHub Releases 新版本，在顶栏提示版本徽标并在「设置 → 系统更新」展示更新日志；支持在 **Docker 容器**（无需挂载 `docker.sock`，更新二进制持久化于 `/data/updates/bin` 并在拉取新版镜像时自动让位于镜像内置版本）和 **Linux / macOS 本地二进制**环境下执行 `SHA-256` 校验、`--version` 预检、原子替换备份与平滑热重启（失败自动回滚），支持配置 GitHub 加速代理前缀；Windows 端提供新版本检测与手动下载引导。
+- **每课 AI 总结与无字幕语音转写（v1.4.0 新增）**：
+  - **两段式结构化总结**：每节课可生成 **AI 总结视频大纲**（核心一句话概览 + 结构化要点与跳转时间）与 **AI 总结视频内容（按时间顺序）**（起止时间区间、段落概括与核心知识点）；超长课程（> 24,000 字）自动按时间分块 Map-Reduce 汇总，避免截断丢失后半段内容；
+  - **一键导入笔记与时间线联动**：播放页右侧栏提供 **「课程目录 / AI 总结」** 双 Tab，点击时间戳精准跳转播放、随播放进度高亮当前段落，点击 **「复制 Markdown」** 一键粘贴至 Obsidian / Notion 等笔记工具；
+  - **无字幕视频全链路闭环**：按「外挂字幕 → 内嵌文本字幕 → 已缓存转写稿 → FFmpeg 自动抽取压缩音频分片并调用 OpenAI 兼容 `/audio/transcriptions` 接口（支持云端 Whisper/Groq/硅基流动及自托管本地 Faster-Whisper / Speaches 服务，跨域名密钥严格隔离）→ 手动粘贴文稿」自动流转；
+  - **AI 转写字幕持久化复用**：ASR 生成的 WebVTT 存入 SQLite `media_transcripts`（不写入只读 `/media` 目录，不受定时扫描影响），自动作为 **「AI 转写字幕」** 轨道供 Web 播放器与 Jellyfin 客户端开启，重新总结时直接复用免重复转写；
+  - **单课优先 + 整门课批量队列**：后台串行队列支持整门课一键批量生成（查看阶段进度、单课失败容错隔离明细、随时取消），批量运行中手动触发当前课时自动插队优先处理。
+- **Artplayer 嵌入式 Web 播放器与三层按需转码播放**：
+  - 嵌入 `Artplayer` + `hls.js`，提供中文界面、倍速记忆（0.75x–2.0x）、字幕轨道偏好记忆、字幕字号与时间偏移调节、网页全屏/浏览器全屏、画中画、截图、迷你进度条与快捷键；
+  - 后端支持浏览器直放（HTTP Range 206 + 保守 HEVC 探测）→ H.264 零视频转码 VOD HLS 封装 → 按需 FFmpeg `libx264` 兼容转码（覆盖 HEVC MKV、10-bit/4:4:4 录屏、奇数分辨率及 WMV/FLV/AVI 等老编码，并在直放解码失败时自动降级）。
+- **智能字幕匹配、多编码解码与手动绑定**：
+  - 支持 Unicode NFC 规范化（兼容 macOS NFD 路径）、字幕子目录（`Subs/`、`Subtitles/`、`字幕/` 等）与同级/兄弟目录匹配、宽松分隔符及清晰度标签剥离；
+  - 自动解码 UTF-8 BOM / UTF-16 LE/BE / GB18030(GBK) 字幕为 UTF-8 WebVTT，支持在课程编辑页手动绑定或解绑外挂字幕（二次扫描不会覆盖手动决策）。
+- **明/暗双主题 Web 管理端与自定义课程编排**：
+  - 浅色 / 深色 / 跟随系统三态无闪烁主题，可折叠单层左侧栏、首页 Citonema 风格继续学习焦点卡、播放页剧场优先布局与右侧目录 SVG 环形观看进度条；
+  - 支持服务端目录可视化浏览、存储源与目录已入课/未入课状态筛选、目录一键预览导入（自然排序、自动识封面、**导入弹窗内置 AI 智能整理**）、幂等增量「检查新文件」、跨目录自由拼装、拖拽排序章节课时与多媒体库管理。
+- **自定义 AI 课程元数据整理**：
+  - 支持任意 OpenAI 兼容 `/chat/completions` 接口（OpenAI / DeepSeek / 通义千问 / OpenRouter / Ollama / NewAPI 等），在导入前或课程编辑页生成标题、简介、标签与章节课时重组建议，严格校验所有 `lesson_id` 一一对应并**先预览勾选确认再事务性应用**。
+- **高兼容度 Jellyfin 协议**：
+  - 支持根路径 `/` 及 `/emby` 大小写无关兼容、全部主流 Jellyfin 鉴权方式、`DeviceProfile` 播放协商、`/socket` WebSocket KeepAlive、`Views` / `Items` / `Seasons` / `Episodes` / `Genres` / `Tags` / `Resume` / `NextUp` / `Latest` / `Search` 及多端进度双向同步（≥90% 自动完播）。
+- **内置自动检测与一键自更新**：
+  - 定期（默认每 6 小时）及手动检测 GitHub Releases 新版本，在顶栏提示版本徽标并在「设置 → 系统更新」展示更新日志；支持 **Docker 容器**（无需挂载 `docker.sock`，更新二进制持久化于 `/data/updates/bin` 并在拉取新版镜像时自动让位于镜像内置版本）和 **Linux / macOS 本地二进制**执行 `SHA-256` 校验、`--version` 预检、原子替换备份与平滑热重启（失败自动回滚），支持配置 GitHub 加速代理前缀。
 
 ---
 
@@ -94,6 +106,16 @@ COURSEFIN_PORT=8096 COURSEFIN_DATA_DIR=./data ./coursefin
   - 服务器地址：`http://<你的服务器IP>:8096`（或独立子域名 `https://course.example.com`，不支持子路径反代）
   - 账号密码：使用初始化时创建的管理员账号登录即可。
 
+### 配置 AI 总结与无字幕语音转文字（可选）
+
+前往 Web 端 **「系统设置 → 服务器与 AI 接口配置」**：
+
+1. **AI 文本模型（用于课程整理与每课 AI 总结）**：填写 `AI Base URL`、`AI 模型名称` 与 `AI API Key`，点击「测试连接」验证。
+2. **语音转文字（ASR，用于无字幕视频自动转写并生成 AI 字幕）**：
+   - 填写 `ASR 模型名称`（如 `whisper-1`、`whisper-large-v3-turbo`、`FunAudioLLM/SenseVoiceSmall`）即启用；
+   - `ASR Base URL` 留空时默认复用上方 AI 地址与密钥；也可填写独立的云端或自建本地 Whisper 服务地址（如 `faster-whisper-server` / `speaches`，独立域名下留空 Key 不会透传主 AI 密钥，兼容免密本地容器）；
+   - 点击「测试语音转文字」验证后保存，即可在播放页右侧「AI 总结」Tab 单课生成或整门课批量生成。
+
 ---
 
 ## 环境变量
@@ -119,7 +141,7 @@ COURSEFIN_PORT=8096 COURSEFIN_DATA_DIR=./data ./coursefin
 如果计划将 CourseFin 暴露到公网，请先阅读 [SECURITY.md](SECURITY.md) 中的完整自托管安全检查清单，重点注意：
 
 - 通过反向代理（Nginx / Caddy / Cloudflare Tunnel）启用 **HTTPS** 并对登录接口配置速率限制。
-- 妥善保护宿主机 `./data` 目录权限（`coursefin.db` 保存本地调用 AI 所需的 `ai_api_key`），切勿提交至 Git 或公开暴露。
+- 妥善保护宿主机 `./data` 目录权限（`coursefin.db` 保存本地调用 AI / ASR 所需的 `ai_api_key` 与 `ai_asr_api_key`），切勿提交至 Git 或公开暴露。
 - 始终对课程目录使用只读挂载（`:ro`），不要向不可信人员分享管理员账号。
 
 ---
@@ -142,16 +164,19 @@ make docker-build
 设计文档、实现计划与变更日志：
 - [CHANGELOG.md](CHANGELOG.md)
 - [docs/superpowers/specs/2026-11-23-coursefin-design.md](docs/superpowers/specs/2026-11-23-coursefin-design.md)
-- [docs/superpowers/plans/2026-11-23-coursefin.md](docs/superpowers/plans/2026-11-23-coursefin.md)
 - [docs/superpowers/specs/2026-11-24-self-update-design.md](docs/superpowers/specs/2026-11-24-self-update-design.md)
+- [docs/superpowers/specs/2026-11-24-ui-redesign-design.md](docs/superpowers/specs/2026-11-24-ui-redesign-design.md)
+- [docs/superpowers/specs/2026-11-24-player-subtitle-import-ux-design.md](docs/superpowers/specs/2026-11-24-player-subtitle-import-ux-design.md)
+- [docs/superpowers/specs/2026-11-25-lesson-ai-summary-design.md](docs/superpowers/specs/2026-11-25-lesson-ai-summary-design.md)
 
 ---
 
 ## 后续路线图
 
 - 扩展更多 `StorageProvider` 驱动：WebDAV、Alist / OpenList（含 302 直链重定向）、S3 兼容存储
-- 扩展更多基于 `AIProvider` 的学习辅助能力（字幕转写、课程摘要与知识检索）
+- 基于已生成课程总结与字幕的跨课程知识检索与问答
 - 多用户与独立学习进度支持
+- 可选硬件转码加速（NVENC / VAAPI / QSV / VideoToolbox）
 
 ---
 
