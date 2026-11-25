@@ -3,13 +3,16 @@ package media
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os/exec"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,28 +24,42 @@ const maxSubtitleBytes = 32 << 20 // 32 MiB safety cap
 var (
 	srtCueNumRe    = regexp.MustCompile(`^\d+$`)
 	srtTimestampRe = regexp.MustCompile(`(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})`)
+
+	errBitmapSubtitle         = errors.New("bitmap subtitle cannot be extracted as text")
+	errUnsupportedSubtitleFmt = errors.New("unsupported subtitle target format")
+	errLocalAccessRequired    = errors.New("local filesystem access required")
+	errMediaLookup            = errors.New("media lookup failed")
 )
 
 // StreamDescriptor describes an embedded or external media stream with its
 // deterministic Jellyfin stream index.
 type StreamDescriptor struct {
-	Index        int
-	Type         string // "video", "audio", "subtitle"
-	Codec        string
-	Language     string
-	Title        string
-	IsDefault    bool
-	IsForced     bool
-	IsExternal   bool
-	SubtitleID   string
-	SourceID     string
-	RelativePath string
-	Format       string
-	Width        int
-	Height       int
-	Bitrate      int64
-	Channels     int
-	SampleRate   int
+	Index         int
+	Type          string // "video", "audio", "subtitle"
+	Codec         string
+	Language      string
+	Title         string
+	IsDefault     bool
+	IsForced      bool
+	IsExternal    bool
+	IsAIGenerated bool
+	SubtitleID    string
+	SourceID      string
+	RelativePath  string
+	Format        string
+	Width         int
+	Height        int
+	Bitrate       int64
+	Channels      int
+	SampleRate    int
+}
+
+// LocalMediaInfo describes local filesystem metadata and audio stream presence for a media file.
+type LocalMediaInfo struct {
+	MediaFileID string
+	AbsPath     string
+	DurationMs  int64
+	HasAudio    bool
 }
 
 type ffprobeStreamEntry struct {
@@ -72,16 +89,27 @@ func (s *Service) ResolveStreams(ctx context.Context, mediaFileID string) ([]Str
 	return s.BuildStreamDescriptors(ctx, rec.MediaFileID, rec.StreamsJSON)
 }
 
+func parseEmbeddedStreams(mediaFileID, streamsJSON string) ([]ffprobeStreamEntry, error) {
+	trimmed := strings.TrimSpace(streamsJSON)
+	if trimmed == "" || trimmed == "[]" {
+		return nil, nil
+	}
+	var embedded []ffprobeStreamEntry
+	if err := json.Unmarshal([]byte(trimmed), &embedded); err != nil {
+		return nil, fmt.Errorf("parse streams_json for %s: %w", mediaFileID, err)
+	}
+	return embedded, nil
+}
+
 // BuildStreamDescriptors builds deterministic stream descriptors for a media file
-// from its probed streams_json and active external subtitle_files rows.
+// from its probed streams_json, active external subtitle_files rows, and any
+// cached ASR transcript in media_transcripts.
 func (s *Service) BuildStreamDescriptors(ctx context.Context, mediaFileID, streamsJSON string) ([]StreamDescriptor, error) {
 	mediaFileID = normalizeOrRaw(mediaFileID)
 
-	var embedded []ffprobeStreamEntry
-	if strings.TrimSpace(streamsJSON) != "" && strings.TrimSpace(streamsJSON) != "[]" {
-		if err := json.Unmarshal([]byte(streamsJSON), &embedded); err != nil {
-			return nil, fmt.Errorf("parse streams_json for %s: %w", mediaFileID, err)
-		}
+	embedded, err := parseEmbeddedStreams(mediaFileID, streamsJSON)
+	if err != nil {
+		return nil, err
 	}
 
 	descriptors := make([]StreamDescriptor, 0, len(embedded))
@@ -148,11 +176,40 @@ func (s *Service) BuildStreamDescriptors(ctx context.Context, mediaFileID, strea
 		return nil, err
 	}
 
+	// Append cached ASR transcript strictly after embedded streams and physical sidecars
+	// so existing Web/Jellyfin subtitle stream indices never shift.
+	var aiLang string
+	err = s.db.QueryRowContext(ctx, `
+		SELECT language
+		FROM media_transcripts
+		WHERE media_file_id = ? AND source = 'asr' AND content_vtt != ''`, mediaFileID,
+	).Scan(&aiLang)
+	if err == nil {
+		aiLang = strings.TrimSpace(aiLang)
+		if aiLang == "" {
+			aiLang = "und"
+		}
+		descriptors = append(descriptors, StreamDescriptor{
+			Index:         nextIndex,
+			Type:          "subtitle",
+			Codec:         "vtt",
+			Language:      aiLang,
+			Title:         "AI 转写字幕",
+			IsDefault:     false,
+			IsExternal:    true,
+			IsAIGenerated: true,
+			Format:        "vtt",
+		})
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("query media_transcripts for %s: %w", mediaFileID, err)
+	}
+
 	return descriptors, nil
 }
 
-// ServeSubtitle serves either an external sidecar subtitle (converting SRT -> VTT
-// on the fly when requested) or extracts an embedded text subtitle via FFmpeg.
+// ServeSubtitle serves an AI-generated transcript, an external sidecar subtitle
+// (converting SRT -> VTT on the fly when requested), or extracts an embedded
+// text subtitle via FFmpeg.
 func (s *Service) ServeSubtitle(w http.ResponseWriter, r *http.Request, mediaFileID string, streamIndex int, targetFormat string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -185,74 +242,109 @@ func (s *Service) ServeSubtitle(w http.ResponseWriter, r *http.Request, mediaFil
 	}
 
 	fmtNorm := normalizeSubtitleFormat(targetFormat)
-	if target.IsExternal {
+	switch {
+	case target.IsAIGenerated:
+		s.serveAIGeneratedSubtitle(w, r, rec.MediaFileID, fmtNorm)
+	case target.IsExternal:
 		s.serveExternalSubtitle(w, r, target, fmtNorm)
-		return
+	default:
+		s.serveEmbeddedSubtitle(w, r, rec, target, fmtNorm)
 	}
-	s.serveEmbeddedSubtitle(w, r, rec, target, fmtNorm)
 }
 
-func (s *Service) serveExternalSubtitle(w http.ResponseWriter, r *http.Request, sub *StreamDescriptor, targetFormat string) {
+func (s *Service) serveAIGeneratedSubtitle(w http.ResponseWriter, r *http.Request, mediaFileID, targetFormat string) {
+	var contentVTT string
+	err := s.db.QueryRowContext(r.Context(), `
+		SELECT content_vtt
+		FROM media_transcripts
+		WHERE media_file_id = ? AND source = 'asr' AND content_vtt != ''`, mediaFileID,
+	).Scan(&contentVTT)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "subtitle stream not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.serveDecodedSubtitleText(w, r, ensureWebVTTHeader(contentVTT), "vtt", targetFormat)
+}
+
+func (s *Service) readExternalSubtitleUTF8(ctx context.Context, sub *StreamDescriptor) (string, string, error) {
 	var driver, rootPath, configJSON string
-	err := s.db.QueryRowContext(r.Context(),
+	err := s.db.QueryRowContext(ctx,
 		`SELECT driver, root_path, config_json FROM storage_sources WHERE id = ?`, sub.SourceID,
 	).Scan(&driver, &rootPath, &configJSON)
 	if err != nil {
-		writeLookupError(w, err)
-		return
+		return "", "", err
 	}
 
 	provider, err := s.registry.ProviderFor(driver, rootPath, configJSON)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("storage provider error: %v", err), http.StatusInternalServerError)
-		return
+		return "", "", fmt.Errorf("storage provider error: %w", err)
 	}
 
-	rc, err := provider.Open(r.Context(), sub.RelativePath)
+	rc, err := provider.Open(ctx, sub.RelativePath)
 	if err != nil {
-		writeLookupError(w, err)
-		return
+		return "", "", err
 	}
 	defer rc.Close()
 
 	rawBytes, err := io.ReadAll(io.LimitReader(rc, maxSubtitleBytes))
 	if err != nil {
-		http.Error(w, fmt.Sprintf("read subtitle: %v", err), http.StatusInternalServerError)
-		return
+		return "", "", fmt.Errorf("read subtitle: %w", err)
 	}
 
-	srcFmt := normalizeSubtitleFormat(sub.Format)
+	return DecodeSubtitleToUTF8(rawBytes), normalizeSubtitleFormat(sub.Format), nil
+}
+
+func (s *Service) convertUTF8SubtitleToVTT(ctx context.Context, decodedText, srcFmt string) (string, error) {
+	switch srcFmt {
+	case "vtt":
+		return ensureWebVTTHeader(decodedText), nil
+	case "srt":
+		return ConvertSRTToVTT(decodedText), nil
+	default:
+		converted, err := s.convertSubtitleBytesWithFFmpeg(ctx, []byte(decodedText), srcFmt, "webvtt")
+		if err != nil {
+			return "", err
+		}
+		return ensureWebVTTHeader(string(converted)), nil
+	}
+}
+
+func (s *Service) readExternalSubtitleAsVTT(ctx context.Context, sub *StreamDescriptor) (string, error) {
+	decodedText, srcFmt, err := s.readExternalSubtitleUTF8(ctx, sub)
+	if err != nil {
+		return "", err
+	}
+	return s.convertUTF8SubtitleToVTT(ctx, decodedText, srcFmt)
+}
+
+func (s *Service) serveDecodedSubtitleText(w http.ResponseWriter, r *http.Request, decodedText, srcFmt, targetFormat string) {
 	if targetFormat == "" {
 		targetFormat = srcFmt
 	}
 
-	decodedText := DecodeSubtitleToUTF8(rawBytes)
-	utf8Bytes := []byte(decodedText)
-
 	var out []byte
 	switch {
-	case targetFormat == srcFmt:
-		if targetFormat == "vtt" {
-			out = []byte(ensureWebVTTHeader(decodedText))
-		} else {
-			out = utf8Bytes
-		}
-	case targetFormat == "vtt" && srcFmt == "srt":
-		out = []byte(ConvertSRTToVTT(decodedText))
-	case targetFormat == "vtt" && (srcFmt == "ass" || srcFmt == "ssa"):
-		converted, convErr := s.convertSubtitleBytesWithFFmpeg(r.Context(), utf8Bytes, srcFmt, "webvtt")
-		if convErr != nil {
-			http.Error(w, convErr.Error(), http.StatusInternalServerError)
+	case targetFormat == "vtt":
+		vtt, err := s.convertUTF8SubtitleToVTT(r.Context(), decodedText, srcFmt)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		out = converted
+		out = []byte(vtt)
+	case targetFormat == srcFmt:
+		out = []byte(decodedText)
 	default:
 		ffmpegFmt, ok := ffmpegSubtitleFormat(targetFormat)
 		if !ok {
 			http.Error(w, fmt.Sprintf("unsupported subtitle target format %q", targetFormat), http.StatusUnsupportedMediaType)
 			return
 		}
-		converted, convErr := s.convertSubtitleBytesWithFFmpeg(r.Context(), utf8Bytes, srcFmt, ffmpegFmt)
+		converted, convErr := s.convertSubtitleBytesWithFFmpeg(r.Context(), []byte(decodedText), srcFmt, ffmpegFmt)
 		if convErr != nil {
 			http.Error(w, convErr.Error(), http.StatusInternalServerError)
 			return
@@ -261,6 +353,15 @@ func (s *Service) serveExternalSubtitle(w http.ResponseWriter, r *http.Request, 
 	}
 
 	writeSubtitleResponse(w, r, targetFormat, out)
+}
+
+func (s *Service) serveExternalSubtitle(w http.ResponseWriter, r *http.Request, sub *StreamDescriptor, targetFormat string) {
+	decodedText, srcFmt, err := s.readExternalSubtitleUTF8(r.Context(), sub)
+	if err != nil {
+		writeLookupError(w, err)
+		return
+	}
+	s.serveDecodedSubtitleText(w, r, decodedText, srcFmt, targetFormat)
 }
 
 func ensureWebVTTHeader(text string) string {
@@ -274,38 +375,33 @@ func ensureWebVTTHeader(text string) string {
 	return "WEBVTT\n\n" + trimmed
 }
 
-func (s *Service) serveEmbeddedSubtitle(w http.ResponseWriter, r *http.Request, rec *mediaRecord, sub *StreamDescriptor, targetFormat string) {
+func (s *Service) extractEmbeddedSubtitle(ctx context.Context, rec *mediaRecord, sub *StreamDescriptor, targetFormat string) ([]byte, error) {
 	if isBitmapSubtitleCodec(sub.Codec) {
-		http.Error(w, fmt.Sprintf("bitmap subtitle codec %q cannot be extracted as text", sub.Codec), http.StatusUnsupportedMediaType)
-		return
+		return nil, fmt.Errorf("%w: %s", errBitmapSubtitle, sub.Codec)
 	}
 	if targetFormat == "" {
 		targetFormat = "vtt"
 	}
 	ffmpegFmt, ok := ffmpegSubtitleFormat(targetFormat)
 	if !ok {
-		http.Error(w, fmt.Sprintf("unsupported subtitle target format %q", targetFormat), http.StatusUnsupportedMediaType)
-		return
+		return nil, fmt.Errorf("%w: %q", errUnsupportedSubtitleFmt, targetFormat)
 	}
 
 	provider, err := s.registry.ProviderFor(rec.Driver, rec.RootPath, rec.ConfigJSON)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("storage provider error: %v", err), http.StatusInternalServerError)
-		return
+		return nil, fmt.Errorf("storage provider error: %w", err)
 	}
 	localResolver, ok := provider.(storage.LocalPathResolver)
 	if !ok {
-		http.Error(w, "embedded subtitle extraction requires local filesystem access", http.StatusNotImplemented)
-		return
+		return nil, errLocalAccessRequired
 	}
 	absPath, err := localResolver.AbsPath(rec.RelativePath)
 	if err != nil {
-		writeLookupError(w, err)
-		return
+		return nil, fmt.Errorf("%w: %w", errMediaLookup, err)
 	}
 
 	cmd := exec.CommandContext(
-		r.Context(),
+		ctx,
 		s.ffmpegBin,
 		"-hide_banner",
 		"-loglevel", "error",
@@ -318,11 +414,204 @@ func (s *Service) serveEmbeddedSubtitle(w http.ResponseWriter, r *http.Request, 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		http.Error(w, fmt.Sprintf("extract subtitle stream %d: %v (%s)", sub.Index, err, strings.TrimSpace(stderr.String())), http.StatusInternalServerError)
+		return nil, fmt.Errorf("extract subtitle stream %d: %v (%s)", sub.Index, err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+func (s *Service) extractEmbeddedSubtitleAsVTT(ctx context.Context, rec *mediaRecord, sub *StreamDescriptor) (string, error) {
+	raw, err := s.extractEmbeddedSubtitle(ctx, rec, sub, "vtt")
+	if err != nil {
+		return "", err
+	}
+	return ensureWebVTTHeader(string(raw)), nil
+}
+
+func (s *Service) serveEmbeddedSubtitle(w http.ResponseWriter, r *http.Request, rec *mediaRecord, sub *StreamDescriptor, targetFormat string) {
+	if targetFormat == "" {
+		targetFormat = "vtt"
+	}
+	out, err := s.extractEmbeddedSubtitle(r.Context(), rec, sub, targetFormat)
+	if err != nil {
+		switch {
+		case errors.Is(err, errBitmapSubtitle):
+			http.Error(w, fmt.Sprintf("bitmap subtitle codec %q cannot be extracted as text", sub.Codec), http.StatusUnsupportedMediaType)
+		case errors.Is(err, errUnsupportedSubtitleFmt):
+			http.Error(w, fmt.Sprintf("unsupported subtitle target format %q", targetFormat), http.StatusUnsupportedMediaType)
+		case errors.Is(err, errLocalAccessRequired):
+			http.Error(w, "embedded subtitle extraction requires local filesystem access", http.StatusNotImplemented)
+		case errors.Is(err, errMediaLookup):
+			writeLookupError(w, err)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
-	writeSubtitleResponse(w, r, targetFormat, stdout.Bytes())
+	writeSubtitleResponse(w, r, targetFormat, out)
+}
+
+// ExtractBestSubtitleVTT selects and extracts the best physical text subtitle
+// (active external sidecar first, then non-bitmap embedded stream; within each
+// tier: default -> Chinese -> first) as UTF-8 WebVTT.
+// AI-generated tracks from media_transcripts are intentionally skipped so callers
+// can manage cached transcript priority explicitly.
+func (s *Service) ExtractBestSubtitleVTT(ctx context.Context, mediaFileID string) (vttText, sourceType, sourceLabel string, found bool, err error) {
+	rec, err := s.resolveMediaRecord(ctx, mediaFileID, false)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	streams, err := s.BuildStreamDescriptors(ctx, rec.MediaFileID, rec.StreamsJSON)
+	if err != nil {
+		return "", "", "", false, err
+	}
+
+	var externalSubs []StreamDescriptor
+	var embeddedSubs []StreamDescriptor
+	for _, st := range streams {
+		if !strings.EqualFold(st.Type, "subtitle") || st.IsAIGenerated {
+			continue
+		}
+		if st.IsExternal {
+			externalSubs = append(externalSubs, st)
+			continue
+		}
+		if !isBitmapSubtitleCodec(st.Codec) {
+			embeddedSubs = append(embeddedSubs, st)
+		}
+	}
+
+	sortSubtitlesByPriority(externalSubs)
+	sortSubtitlesByPriority(embeddedSubs)
+
+	var firstErr error
+	for i := range externalSubs {
+		sub := &externalSubs[i]
+		vtt, readErr := s.readExternalSubtitleAsVTT(ctx, sub)
+		if readErr != nil {
+			if firstErr == nil {
+				firstErr = readErr
+			}
+			continue
+		}
+		if !hasWebVTTContent(vtt) {
+			continue
+		}
+		return vtt, "external_subtitle", formatSubtitleSourceLabel("外挂字幕", sub.Language), true, nil
+	}
+
+	for i := range embeddedSubs {
+		sub := &embeddedSubs[i]
+		vtt, extErr := s.extractEmbeddedSubtitleAsVTT(ctx, rec, sub)
+		if extErr != nil {
+			if firstErr == nil {
+				firstErr = extErr
+			}
+			continue
+		}
+		if !hasWebVTTContent(vtt) {
+			continue
+		}
+		return vtt, "embedded_subtitle", formatSubtitleSourceLabel("内嵌字幕", sub.Language), true, nil
+	}
+
+	if firstErr != nil {
+		return "", "", "", false, firstErr
+	}
+	return "", "", "", false, nil
+}
+
+// ResolveLocalMediaInfo resolves the local filesystem path, duration, and audio
+// stream presence for a media file (or lesson ID fallback).
+func (s *Service) ResolveLocalMediaInfo(ctx context.Context, mediaFileID string) (*LocalMediaInfo, error) {
+	rec, err := s.resolveMediaRecord(ctx, mediaFileID, false)
+	if err != nil {
+		return nil, err
+	}
+
+	provider, err := s.registry.ProviderFor(rec.Driver, rec.RootPath, rec.ConfigJSON)
+	if err != nil {
+		return nil, fmt.Errorf("storage provider error: %w", err)
+	}
+	localResolver, ok := provider.(storage.LocalPathResolver)
+	if !ok {
+		return nil, errLocalAccessRequired
+	}
+	absPath, err := localResolver.AbsPath(rec.RelativePath)
+	if err != nil {
+		return nil, err
+	}
+
+	embedded, err := parseEmbeddedStreams(rec.MediaFileID, rec.StreamsJSON)
+	if err != nil {
+		return nil, err
+	}
+	hasAudio := len(embedded) == 0
+	for _, st := range embedded {
+		if strings.EqualFold(strings.TrimSpace(st.CodecType), "audio") {
+			hasAudio = true
+			break
+		}
+	}
+
+	return &LocalMediaInfo{
+		MediaFileID: rec.MediaFileID,
+		AbsPath:     absPath,
+		DurationMs:  rec.DurationMs,
+		HasAudio:    hasAudio,
+	}, nil
+}
+
+func sortSubtitlesByPriority(subs []StreamDescriptor) {
+	sort.SliceStable(subs, func(i, j int) bool {
+		if subs[i].IsDefault != subs[j].IsDefault {
+			return subs[i].IsDefault
+		}
+		zhI := isChineseSubtitle(subs[i])
+		zhJ := isChineseSubtitle(subs[j])
+		if zhI != zhJ {
+			return zhI
+		}
+		return false
+	})
+}
+
+func isChineseSubtitle(st StreamDescriptor) bool {
+	lang := strings.ToLower(strings.TrimSpace(st.Language))
+	lang = strings.ReplaceAll(lang, "_", "-")
+	switch lang {
+	case "zh", "chi", "zho", "chs", "cht", "yue", "cmn", "cn", "chinese":
+		return true
+	}
+	if strings.HasPrefix(lang, "zh-") || strings.HasPrefix(lang, "chi-") || strings.HasPrefix(lang, "zho-") {
+		return true
+	}
+	title := strings.ToLower(strings.TrimSpace(st.Title))
+	for _, kw := range []string{"中文", "简体", "繁体", "繁體", "双语", "chinese"} {
+		if strings.Contains(title, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func formatSubtitleSourceLabel(prefix, language string) string {
+	lang := strings.TrimSpace(language)
+	if lang == "" {
+		return prefix
+	}
+	return fmt.Sprintf("%s (%s)", prefix, lang)
+}
+
+func hasWebVTTContent(vtt string) bool {
+	trimmed := strings.TrimSpace(vtt)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(strings.ToUpper(trimmed), "WEBVTT") {
+		return strings.TrimSpace(trimmed[len("WEBVTT"):]) != ""
+	}
+	return true
 }
 
 func (s *Service) convertSubtitleBytesWithFFmpeg(ctx context.Context, raw []byte, srcFmt, dstFFmpegFmt string) ([]byte, error) {

@@ -23,11 +23,13 @@ import (
 // Service provides DirectPlay HTTP Range streaming, seekable on-demand VOD HLS
 // remuxing, subtitle delivery/conversion, and resized image caching.
 type Service struct {
-	db        *sql.DB
-	dataDir   string
-	registry  *storage.Registry
-	ffmpegBin string
-	hasFFmpeg bool
+	db         *sql.DB
+	dataDir    string
+	registry   *storage.Registry
+	ffmpegBin  string
+	hasFFmpeg  bool
+	ffprobeBin string
+	hasFFprobe bool
 
 	mu            sync.Mutex
 	remuxSessions map[string]*remuxSession
@@ -43,12 +45,21 @@ func NewService(db *sql.DB, dataDir string, registry *storage.Registry, ffmpegBi
 		registry = storage.NewRegistry()
 	}
 	resolved := resolveBinaryPath(ffmpegBin, "ffmpeg")
+	ffprobeResolved := resolveBinaryPath("", "ffprobe")
+	if !isExecutableBinary(ffprobeResolved) && strings.ContainsRune(resolved, filepath.Separator) {
+		cand := filepath.Join(filepath.Dir(resolved), "ffprobe")
+		if isExecutableBinary(cand) {
+			ffprobeResolved = cand
+		}
+	}
 	s := &Service{
 		db:            db,
 		dataDir:       dataDir,
 		registry:      registry,
 		ffmpegBin:     resolved,
 		hasFFmpeg:     isExecutableBinary(resolved),
+		ffprobeBin:    ffprobeResolved,
+		hasFFprobe:    isExecutableBinary(ffprobeResolved),
 		remuxSessions: make(map[string]*remuxSession),
 		stopCh:        make(chan struct{}),
 	}
@@ -60,6 +71,27 @@ func NewService(db *sql.DB, dataDir string, registry *storage.Registry, ffmpegBi
 // HasFFmpeg reports whether a usable FFmpeg binary is available for remuxing/transcoding.
 func (s *Service) HasFFmpeg() bool {
 	return s != nil && s.hasFFmpeg
+}
+
+// FFmpegBin returns the resolved FFmpeg binary path.
+func (s *Service) FFmpegBin() string {
+	if s == nil {
+		return ""
+	}
+	return s.ffmpegBin
+}
+
+// FFprobeBin returns the resolved FFprobe binary path.
+func (s *Service) FFprobeBin() string {
+	if s == nil {
+		return ""
+	}
+	return s.ffprobeBin
+}
+
+// HasFFprobe reports whether a usable FFprobe binary is available.
+func (s *Service) HasFFprobe() bool {
+	return s != nil && s.hasFFprobe
 }
 
 func isExecutableBinary(bin string) bool {
