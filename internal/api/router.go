@@ -112,6 +112,8 @@ func NewHandler(deps Deps) http.Handler {
 			pr.Get("/sources/{id}/scan/status", h.handleScanStatus)
 			pr.Get("/sources/{id}/dirs", h.handleListDirs)
 			pr.Get("/sources/{id}/files", h.handleListFiles)
+			pr.Get("/sources/{id}/subtitles", h.handleListSourceSubtitles)
+			pr.Put("/subtitles/{id}/bind", h.handleBindSubtitle)
 			pr.Post("/import/preview", h.handleImportPreview)
 			pr.Post("/import/commit", h.handleImportCommit)
 
@@ -155,6 +157,7 @@ func NewHandler(deps Deps) http.Handler {
 			pr.Post("/settings/ai/test", h.handleTestAI)
 			pr.Post("/courses/{id}/ai/organize", h.handleAIOrganize)
 			pr.Post("/courses/{id}/ai/apply", h.handleAIApply)
+			pr.Post("/import/ai/organize", h.handleImportAIOrganize)
 
 			// System updates
 			pr.Get("/system/update", h.handleGetUpdateStatus)

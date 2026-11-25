@@ -77,6 +77,9 @@ export default function StoragePage() {
   const [dirs, setDirs] = useState<IndexedDir[]>([]);
   const [files, setFiles] = useState<MediaFile[]>([]);
   const [fileStatusFilter, setFileStatusFilter] = useState<'all' | 'active' | 'missing'>('all');
+  const [fileAssignedFilter, setFileAssignedFilter] = useState<'all' | 'unassigned' | 'assigned'>(
+    'all',
+  );
   const [fileSearch, setFileSearch] = useState('');
   const [loadingBrowse, setLoadingBrowse] = useState(false);
 
@@ -89,12 +92,14 @@ export default function StoragePage() {
     selectedSourceId: '',
     currentPrefix: '',
     fileStatusFilter: 'all' as 'all' | 'active' | 'missing',
+    fileAssignedFilter: 'all' as 'all' | 'unassigned' | 'assigned',
     fileSearch: '',
   });
   browseStateRef.current = {
     selectedSourceId,
     currentPrefix,
     fileStatusFilter,
+    fileAssignedFilter,
     fileSearch,
   };
 
@@ -119,7 +124,13 @@ export default function StoragePage() {
   }, []);
 
   const loadBrowseData = useCallback(
-    async (sourceId: string, prefix: string, status: string, search: string) => {
+    async (
+      sourceId: string,
+      prefix: string,
+      status: string,
+      assigned: 'all' | 'unassigned' | 'assigned',
+      search: string,
+    ) => {
       if (!sourceId) {
         setDirs([]);
         setFiles([]);
@@ -132,6 +143,8 @@ export default function StoragePage() {
           api.listFiles(sourceId, {
             prefix,
             status: status === 'all' ? undefined : status,
+            assigned:
+              assigned === 'assigned' ? 'true' : assigned === 'unassigned' ? 'false' : undefined,
             search: search.trim() || undefined,
           }),
         ]);
@@ -178,6 +191,7 @@ export default function StoragePage() {
                 sourceId,
                 cur.currentPrefix,
                 cur.fileStatusFilter,
+                cur.fileAssignedFilter,
                 cur.fileSearch,
               );
             }
@@ -217,7 +231,7 @@ export default function StoragePage() {
       if (srcList.length > 0) {
         const initialId = srcList[0].id;
         setSelectedSourceId(initialId);
-        await loadBrowseData(initialId, '', 'all', '');
+        await loadBrowseData(initialId, '', 'all', 'all', '');
         const statuses = await Promise.all(
           srcList.map((src) => api.getScanStatus(src.id).catch(() => null)),
         );
@@ -284,7 +298,7 @@ export default function StoragePage() {
       setSelectedSourceId(created.id);
       setCurrentPrefix('');
       toast.success(`已添加存储源「${created.name}」`);
-      await loadBrowseData(created.id, '', fileStatusFilter, fileSearch);
+      await loadBrowseData(created.id, '', fileStatusFilter, fileAssignedFilter, fileSearch);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '添加存储源失败';
       setError(msg);
@@ -307,7 +321,7 @@ export default function StoragePage() {
         const nextId = remaining[0]?.id ?? '';
         setSelectedSourceId(nextId);
         setCurrentPrefix('');
-        await loadBrowseData(nextId, '', fileStatusFilter, fileSearch);
+        await loadBrowseData(nextId, '', fileStatusFilter, fileAssignedFilter, fileSearch);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : '删除存储源失败';
@@ -330,22 +344,51 @@ export default function StoragePage() {
   async function handleSelectSource(sourceId: string) {
     setSelectedSourceId(sourceId);
     setCurrentPrefix('');
-    await loadBrowseData(sourceId, '', fileStatusFilter, fileSearch);
+    await loadBrowseData(sourceId, '', fileStatusFilter, fileAssignedFilter, fileSearch);
   }
 
   async function handleNavigatePrefix(nextPrefix: string) {
     setCurrentPrefix(nextPrefix);
-    await loadBrowseData(selectedSourceId, nextPrefix, fileStatusFilter, fileSearch);
+    await loadBrowseData(
+      selectedSourceId,
+      nextPrefix,
+      fileStatusFilter,
+      fileAssignedFilter,
+      fileSearch,
+    );
   }
 
   async function handleFilterChange(nextStatus: 'all' | 'active' | 'missing') {
     setFileStatusFilter(nextStatus);
-    await loadBrowseData(selectedSourceId, currentPrefix, nextStatus, fileSearch);
+    await loadBrowseData(
+      selectedSourceId,
+      currentPrefix,
+      nextStatus,
+      fileAssignedFilter,
+      fileSearch,
+    );
+  }
+
+  async function handleAssignedFilterChange(nextAssigned: 'all' | 'unassigned' | 'assigned') {
+    setFileAssignedFilter(nextAssigned);
+    await loadBrowseData(
+      selectedSourceId,
+      currentPrefix,
+      fileStatusFilter,
+      nextAssigned,
+      fileSearch,
+    );
   }
 
   async function handleFileSearchSubmit(e: FormEvent) {
     e.preventDefault();
-    await loadBrowseData(selectedSourceId, currentPrefix, fileStatusFilter, fileSearch);
+    await loadBrowseData(
+      selectedSourceId,
+      currentPrefix,
+      fileStatusFilter,
+      fileAssignedFilter,
+      fileSearch,
+    );
   }
 
   const missingCount = files.filter((f) => f.status === 'missing').length;
@@ -507,6 +550,8 @@ export default function StoragePage() {
               const st = scanStates[src.id];
               const isRunning = Boolean(st?.running);
               const isSelected = src.id === selectedSourceId;
+              const hasUnassignedInfo = typeof src.unassigned_count === 'number';
+              const unassignedCount = hasUnassignedInfo ? src.unassigned_count! : src.media_count;
 
               return (
                 <div
@@ -533,10 +578,26 @@ export default function StoragePage() {
                         <HardDrive className="h-4 w-4" />
                       </span>
                       <div className="min-w-0">
-                        <p className="text-sm font-semibold text-ink-primary truncate">{src.name}</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold text-ink-primary truncate">
+                            {src.name}
+                          </p>
+                          {src.media_count > 0 && hasUnassignedInfo && (
+                            unassignedCount === 0 ? (
+                              <span className="inline-flex items-center rounded-full border border-status-success/30 bg-status-success-soft px-2 py-0.5 text-[10px] font-semibold text-status-success-ink shrink-0">
+                                全部已入课
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center rounded-full border border-accent-ring/40 bg-accent-soft px-2 py-0.5 text-[10px] font-semibold text-accent-ink shrink-0">
+                                未入课 {unassignedCount} 个
+                              </span>
+                            )
+                          )}
+                        </div>
                         <p className="text-xs text-ink-secondary truncate">{src.root_path}</p>
                         <p className="text-[11px] text-ink-muted mt-1">
                           已索引 {src.media_count} 个视频
+                          {hasUnassignedInfo ? ` · 未入课 ${unassignedCount} 个` : ''}
                           {src.last_scanned_at ? ` · 上次扫描 ${src.last_scanned_at}` : ''}
                         </p>
                       </div>
@@ -574,7 +635,18 @@ export default function StoragePage() {
                       <span className="font-medium text-status-success-ink">
                         新增：{st.last_report.added_videos}
                       </span>
-                      <span>字幕：{st.last_report.total_subtitles}</span>
+                      <span
+                        className={
+                          typeof st.last_report.matched_subtitles === 'number' &&
+                          st.last_report.matched_subtitles < st.last_report.total_subtitles
+                            ? 'font-medium text-status-warning-ink'
+                            : ''
+                        }
+                      >
+                        {typeof st.last_report.matched_subtitles === 'number'
+                          ? `字幕：${st.last_report.total_subtitles}（已匹配 ${st.last_report.matched_subtitles}）`
+                          : `字幕：${st.last_report.total_subtitles}`}
+                      </span>
                       {st.last_report.missing_videos > 0 && (
                         <span className="font-medium text-status-warning-ink">
                           缺失：{st.last_report.missing_videos}
@@ -663,43 +735,107 @@ export default function StoragePage() {
                   <p className="text-xs text-ink-muted py-2">当前路径下无子目录。</p>
                 ) : (
                   <div className="divide-y divide-subtle rounded-2xl border border-subtle bg-subtle/40 overflow-hidden">
-                    {dirs.map((dir) => (
-                      <div
-                        key={dir.rel_path}
-                        className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-subtle/80 transition-colors"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => void handleNavigatePrefix(dir.rel_path)}
-                          className="flex items-center gap-3 text-left min-w-0 flex-1 group cursor-pointer"
-                        >
-                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-status-warning-soft text-status-warning-ink">
-                            <Folder className="h-4 w-4" />
-                          </span>
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium text-ink-primary group-hover:text-accent-ink truncate">
-                              {dir.name}
-                            </p>
-                            <p className="text-[11px] text-ink-muted">
-                              共 {dir.file_count} 个视频 · 直属 {dir.direct_files} 个
-                            </p>
-                          </div>
-                        </button>
+                    {dirs.map((dir) => {
+                      const hasDirAssignInfo =
+                        typeof dir.unassigned_count === 'number' ||
+                        typeof dir.assigned_count === 'number';
+                      const dirUnassigned = dir.unassigned_count ?? dir.file_count;
+                      const dirAssigned = dir.assigned_count ?? 0;
+                      const dirCourses = dir.courses ?? [];
+                      const isFullyAssigned =
+                        hasDirAssignInfo && dir.file_count > 0 && dirUnassigned === 0;
+                      const isPartiallyAssigned =
+                        hasDirAssignInfo && dirAssigned > 0 && dirUnassigned > 0;
 
-                        <Tooltip content="预览该目录结构并导入为课程">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setImportTarget({ sourceId: selectedSource.id, dirRelPath: dir.rel_path })
+                      return (
+                        <div
+                          key={dir.rel_path}
+                          className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-subtle/80 transition-colors"
+                        >
+                          <div className="flex items-start gap-3 min-w-0 flex-1">
+                            <button
+                              type="button"
+                              onClick={() => void handleNavigatePrefix(dir.rel_path)}
+                              aria-label={`打开目录 ${dir.name}`}
+                              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-status-warning-soft text-status-warning-ink hover:opacity-85 transition-opacity cursor-pointer"
+                            >
+                              <Folder className="h-4 w-4" />
+                            </button>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleNavigatePrefix(dir.rel_path)}
+                                  className="text-left text-sm font-medium text-ink-primary hover:text-accent-ink truncate cursor-pointer"
+                                >
+                                  {dir.name}
+                                </button>
+                                {hasDirAssignInfo &&
+                                  (isFullyAssigned ? (
+                                    <span className="inline-flex items-center rounded-full border border-status-success/30 bg-status-success-soft px-2 py-0.5 text-[10px] font-semibold text-status-success-ink shrink-0">
+                                      已全部入课
+                                    </span>
+                                  ) : isPartiallyAssigned ? (
+                                    <span className="inline-flex items-center rounded-full border border-status-warning/30 bg-status-warning-soft px-2 py-0.5 text-[10px] font-semibold text-status-warning-ink shrink-0">
+                                      部分已入课
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center rounded-full border border-subtle bg-subtle px-2 py-0.5 text-[10px] font-medium text-ink-muted shrink-0">
+                                      未入课
+                                    </span>
+                                  ))}
+                                {dirCourses.slice(0, 2).map((courseRef) => (
+                                  <Link
+                                    key={courseRef.id}
+                                    to={`/courses/${courseRef.id}`}
+                                    className="inline-flex items-center rounded-full border border-accent-ring/40 bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent-ink hover:bg-accent hover:text-ink-inverse transition-colors max-w-[160px] truncate"
+                                  >
+                                    {courseRef.title}
+                                  </Link>
+                                ))}
+                                {dirCourses.length > 2 && (
+                                  <Tooltip content={dirCourses.map((c) => c.title).join('、')}>
+                                    <span className="inline-flex items-center rounded-full border border-subtle bg-card px-1.5 py-0.5 text-[10px] font-medium text-ink-secondary">
+                                      +{dirCourses.length - 2}
+                                    </span>
+                                  </Tooltip>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-ink-muted mt-0.5">
+                                共 {dir.file_count} 个视频 · 直属 {dir.direct_files} 个
+                                {hasDirAssignInfo ? ` · 未入课 ${dirUnassigned} 个` : ''}
+                              </p>
+                            </div>
+                          </div>
+
+                          <Tooltip
+                            content={
+                              isFullyAssigned
+                                ? '该目录下视频均已入课，仍可再次导入为新课程'
+                                : '预览该目录结构并导入为课程'
                             }
-                            className="inline-flex items-center gap-1.5 rounded-full bg-accent px-3.5 py-1.5 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover transition-colors cursor-pointer"
                           >
-                            <FolderInput className="h-3.5 w-3.5" />
-                            <span>一键导入为课程</span>
-                          </button>
-                        </Tooltip>
-                      </div>
-                    ))}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setImportTarget({
+                                  sourceId: selectedSource.id,
+                                  dirRelPath: dir.rel_path,
+                                })
+                              }
+                              className={
+                                isFullyAssigned
+                                  ? 'inline-flex items-center gap-1.5 rounded-full border border-default bg-card px-3.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-subtle hover:text-ink-primary transition-colors cursor-pointer'
+                                  : 'inline-flex items-center gap-1.5 rounded-full bg-accent px-3.5 py-1.5 text-xs font-semibold text-ink-inverse shadow-accent hover:bg-accent-hover transition-colors cursor-pointer'
+                              }
+                            >
+                              <FolderInput className="h-3.5 w-3.5" />
+                              <span>一键导入为课程</span>
+                            </button>
+                          </Tooltip>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -744,6 +880,34 @@ export default function StoragePage() {
                       ))}
                     </div>
 
+                    <div
+                      role="group"
+                      aria-label="按入课状态筛选"
+                      className="inline-flex rounded-xl border border-subtle bg-muted p-0.5 text-xs"
+                    >
+                      {(
+                        [
+                          { id: 'all', label: '全部', tip: '显示全部视频文件' },
+                          { id: 'unassigned', label: '未入课', tip: '仅显示尚未加入任何课程的视频' },
+                          { id: 'assigned', label: '已入课', tip: '仅显示已加入至少一门课程的视频' },
+                        ] as const
+                      ).map((opt) => (
+                        <Tooltip key={opt.id} content={opt.tip}>
+                          <button
+                            type="button"
+                            onClick={() => void handleAssignedFilterChange(opt.id)}
+                            className={`rounded-lg px-2.5 py-1 transition-all cursor-pointer ${
+                              fileAssignedFilter === opt.id
+                                ? 'bg-card text-ink-primary font-semibold shadow-card'
+                                : 'text-ink-secondary hover:text-ink-primary'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        </Tooltip>
+                      ))}
+                    </div>
+
                     <form onSubmit={handleFileSearchSubmit} className="relative">
                       <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-ink-muted" />
                       <input
@@ -778,15 +942,48 @@ export default function StoragePage() {
                           </div>
                         </div>
 
-                        {file.status === 'missing' ? (
-                          <span className="shrink-0 rounded-full border border-status-danger/30 bg-status-danger-soft px-2.5 py-0.5 text-[11px] font-medium text-status-danger-ink">
-                            缺失
-                          </span>
-                        ) : (
-                          <span className="shrink-0 rounded-full border border-status-success/30 bg-status-success-soft px-2.5 py-0.5 text-[11px] font-medium text-status-success-ink">
-                            正常
-                          </span>
-                        )}
+                        <div className="flex flex-wrap items-center justify-end gap-1.5 shrink-0">
+                          {typeof file.assigned === 'boolean' &&
+                            (file.assigned ? (
+                              file.courses && file.courses.length > 0 ? (
+                                <>
+                                  <Link
+                                    to={`/courses/${file.courses[0].id}`}
+                                    className="inline-flex items-center rounded-full border border-accent-ring/40 bg-accent-soft px-2.5 py-0.5 text-[11px] font-medium text-accent-ink hover:bg-accent hover:text-ink-inverse transition-colors max-w-[180px] truncate"
+                                  >
+                                    已入课 · {file.courses[0].title}
+                                  </Link>
+                                  {file.courses.length > 1 && (
+                                    <Tooltip
+                                      content={file.courses.map((c) => c.title).join('、')}
+                                    >
+                                      <span className="inline-flex items-center rounded-full border border-subtle bg-card px-1.5 py-0.5 text-[10px] font-semibold text-ink-secondary">
+                                        +{file.courses.length - 1}
+                                      </span>
+                                    </Tooltip>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="rounded-full border border-accent-ring/40 bg-accent-soft px-2.5 py-0.5 text-[11px] font-medium text-accent-ink">
+                                  已入课
+                                </span>
+                              )
+                            ) : (
+                              <span className="rounded-full border border-subtle bg-subtle px-2.5 py-0.5 text-[11px] font-medium text-ink-muted">
+                                未入课
+                              </span>
+                            ))}
+
+                          {file.status === 'missing' ? (
+                            <span className="shrink-0 rounded-full border border-status-danger/30 bg-status-danger-soft px-2.5 py-0.5 text-[11px] font-medium text-status-danger-ink">
+                              缺失
+                            </span>
+                          ) : (
+                            <span className="shrink-0 rounded-full border border-status-success/30 bg-status-success-soft px-2.5 py-0.5 text-[11px] font-medium text-status-success-ink">
+                              正常
+                            </span>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -823,6 +1020,25 @@ export default function StoragePage() {
             setImportedCourse(course);
             libCtx.bumpCatalogVersion();
             toast.success(`已成功导入课程「${course.title}」`);
+            void (async () => {
+              try {
+                const srcRes = await api.listSources();
+                if (!mountedRef.current) return;
+                setSources(srcRes.sources ?? []);
+                const cur = browseStateRef.current;
+                if (cur.selectedSourceId) {
+                  await loadBrowseData(
+                    cur.selectedSourceId,
+                    cur.currentPrefix,
+                    cur.fileStatusFilter,
+                    cur.fileAssignedFilter,
+                    cur.fileSearch,
+                  );
+                }
+              } catch {
+                // best-effort refresh after import
+              }
+            })();
           }}
         />
       )}

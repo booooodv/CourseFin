@@ -44,6 +44,7 @@ import {
   itemPrimaryImageUrl,
 } from '../api/client';
 import AIOrganizeModal from '../components/AIOrganizeModal';
+import SubtitleBindModal from '../components/SubtitleBindModal';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import { useLibrary } from '../contexts/LibraryContext';
@@ -202,24 +203,28 @@ interface SortableLessonRowProps {
   lesson: LessonDetail;
   chapterId: string;
   chapters: ChapterDetail[];
+  courseSourceId?: string;
   lessonIdx: number;
   totalLessonsInChapter: number;
   onRename: (lesson: LessonDetail, nextTitle: string) => Promise<void>;
   onDelete: (lessonId: string) => Promise<void>;
   onMoveStep: (chapterId: string, lessonIdx: number, delta: -1 | 1) => Promise<void>;
   onMoveToChapter: (lessonId: string, targetChapterId: string) => Promise<void>;
+  onManageSubtitles: (lesson: LessonDetail) => void;
 }
 
 function SortableLessonRow({
   lesson,
   chapterId,
   chapters,
+  courseSourceId,
   lessonIdx,
   totalLessonsInChapter,
   onRename,
   onDelete,
   onMoveStep,
   onMoveToChapter,
+  onManageSubtitles,
 }: SortableLessonRowProps) {
   const {
     attributes,
@@ -377,6 +382,18 @@ function SortableLessonRow({
             </select>
           )}
 
+          {(lesson.source_id || courseSourceId) && (
+            <Tooltip content="查看或手动关联外挂字幕">
+              <button
+                type="button"
+                aria-label={`管理课时字幕 ${lesson.title}`}
+                onClick={() => onManageSubtitles(lesson)}
+                className={ICON_ACTION_BTN_CLASS}
+              >
+                <Subtitles className="h-3.5 w-3.5" />
+              </button>
+            </Tooltip>
+          )}
           <Tooltip content="上移该课时">
             <button
               type="button"
@@ -428,6 +445,7 @@ function SortableLessonRow({
 interface SortableChapterCardProps {
   chapter: ChapterDetail;
   chapters: ChapterDetail[];
+  courseSourceId?: string;
   chapterIdx: number;
   totalChapters: number;
   onRenameChapter: (chapter: ChapterDetail, nextTitle: string) => Promise<void>;
@@ -438,11 +456,13 @@ interface SortableChapterCardProps {
   onDeleteLesson: (lessonId: string) => Promise<void>;
   onMoveLessonStep: (chapterId: string, lessonIdx: number, delta: -1 | 1) => Promise<void>;
   onMoveLessonToChapter: (lessonId: string, targetChapterId: string) => Promise<void>;
+  onManageSubtitles: (lesson: LessonDetail) => void;
 }
 
 function SortableChapterCard({
   chapter,
   chapters,
+  courseSourceId,
   chapterIdx,
   totalChapters,
   onRenameChapter,
@@ -453,6 +473,7 @@ function SortableChapterCard({
   onDeleteLesson,
   onMoveLessonStep,
   onMoveLessonToChapter,
+  onManageSubtitles,
 }: SortableChapterCardProps) {
   const {
     attributes,
@@ -641,12 +662,14 @@ function SortableChapterCard({
                   lesson={lesson}
                   chapterId={chapter.id}
                   chapters={chapters}
+                  courseSourceId={courseSourceId}
                   lessonIdx={lIdx}
                   totalLessonsInChapter={lessons.length}
                   onRename={onRenameLesson}
                   onDelete={onDeleteLesson}
                   onMoveStep={onMoveLessonStep}
                   onMoveToChapter={onMoveLessonToChapter}
+                  onManageSubtitles={onManageSubtitles}
                 />
               ))}
             </div>
@@ -693,6 +716,9 @@ export default function CourseEditorPage() {
 
   // AI Organize Modal
   const [showAIModal, setShowAIModal] = useState(false);
+
+  // Manual Subtitle Bind Modal
+  const [subtitleLessonId, setSubtitleLessonId] = useState<string | null>(null);
 
   // New files check
   const [checkingNewFiles, setCheckingNewFiles] = useState(false);
@@ -768,6 +794,21 @@ export default function CourseEditorPage() {
     if (!course) return [];
     return (course.chapters ?? []).flatMap((ch) => ch.lessons ?? []);
   }, [course]);
+
+  const subtitleLesson = useMemo(
+    () => (subtitleLessonId ? allLessons.find((l) => l.id === subtitleLessonId) ?? null : null),
+    [allLessons, subtitleLessonId],
+  );
+
+  const refreshCourseSilently = useCallback(async () => {
+    if (!courseId) return;
+    try {
+      const updated = await api.getCourse(courseId);
+      setCourse(updated);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : '刷新课程信息失败');
+    }
+  }, [courseId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function showNotice(msg: string) {
     setStatusMessage(msg);
@@ -1692,6 +1733,7 @@ export default function CourseEditorPage() {
                     key={chapter.id}
                     chapter={chapter}
                     chapters={chapters}
+                    courseSourceId={course.source_id}
                     chapterIdx={idx}
                     totalChapters={chapters.length}
                     onRenameChapter={handleRenameChapter}
@@ -1702,6 +1744,7 @@ export default function CourseEditorPage() {
                     onDeleteLesson={handleDeleteLesson}
                     onMoveLessonStep={handleMoveLessonStep}
                     onMoveLessonToChapter={handleMoveLessonToChapter}
+                    onManageSubtitles={(targetLesson) => setSubtitleLessonId(targetLesson.id)}
                   />
                 ))}
               </div>
@@ -1817,6 +1860,15 @@ export default function CourseEditorPage() {
           syncFormFromCourse(updated);
           showNotice('已应用 AI 整理结果');
         }}
+      />
+
+      {/* Manual Subtitle Binding Modal */}
+      <SubtitleBindModal
+        isOpen={Boolean(subtitleLesson)}
+        lesson={subtitleLesson}
+        fallbackSourceId={course.source_id}
+        onClose={() => setSubtitleLessonId(null)}
+        onChanged={refreshCourseSilently}
       />
     </div>
   );

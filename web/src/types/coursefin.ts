@@ -127,6 +127,7 @@ export interface LessonDetail {
   course_id: string;
   chapter_id: string;
   media_file_id: string;
+  source_id?: string;
   title: string;
   overview: string;
   sort_order: number;
@@ -246,6 +247,7 @@ export interface LessonPlaybackInfo {
   play_session_id: string;
   mode: 'direct' | 'hls' | 'unsupported';
   stream_url: string;
+  transcoding?: boolean;
   subtitles: PlaybackSubtitleItem[];
   progress: PlaybackProgressInfo;
   video_codec: string;
@@ -263,6 +265,11 @@ export interface ProgressResponse {
   updated_at: string;
 }
 
+export interface CourseRef {
+  id: string;
+  title: string;
+}
+
 export interface StorageSource {
   id: string;
   name: string;
@@ -272,6 +279,8 @@ export interface StorageSource {
   enabled: boolean;
   last_scanned_at?: string;
   media_count: number;
+  assigned_count?: number;
+  unassigned_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -288,6 +297,7 @@ export interface ScanReport {
   restored_videos: number;
   probed_videos: number;
   total_subtitles: number;
+  matched_subtitles?: number;
   errors?: string[];
 }
 
@@ -304,7 +314,32 @@ export interface IndexedDir {
   name: string;
   file_count: number;
   direct_files: number;
+  assigned_count?: number;
+  unassigned_count?: number;
+  courses?: CourseRef[];
   has_subdirs: boolean;
+}
+
+export interface IndexedSubtitle {
+  id: string;
+  source_id: string;
+  relative_path: string;
+  file_name: string;
+  media_file_id?: string;
+  language: string;
+  title: string;
+  format: string;
+  is_default: boolean;
+  manually_bound: boolean;
+  status: string;
+}
+
+export interface BindSubtitleInput {
+  media_file_id?: string | null;
+  title?: string;
+  language?: string;
+  is_default?: boolean;
+  reset_auto?: boolean;
 }
 
 export interface MediaFile {
@@ -324,6 +359,8 @@ export interface MediaFile {
   bitrate: number;
   thumbnail_path: string;
   probed_at?: string;
+  assigned?: boolean;
+  courses?: CourseRef[];
   created_at: string;
   updated_at: string;
 }
@@ -411,6 +448,31 @@ export interface CourseOrganizeProposal {
   overview: string;
   tags: string[];
   chapters: ProposalChapter[];
+}
+
+export interface ImportAIOrganizeInput {
+  source_id: string;
+  dir_rel_path: string;
+  title: string;
+  overview?: string;
+  chapters: CommitImportChapter[];
+}
+
+export interface ImportProposalLesson {
+  media_file_id: string;
+  title: string;
+}
+
+export interface ImportProposalChapter {
+  title: string;
+  lessons: ImportProposalLesson[];
+}
+
+export interface ImportOrganizeProposal {
+  title: string;
+  overview: string;
+  tags: string[];
+  chapters: ImportProposalChapter[];
 }
 
 export interface ApplyAIProposalInput {

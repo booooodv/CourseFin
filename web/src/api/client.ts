@@ -1,6 +1,7 @@
 import type {
   ApplyAIProposalInput,
   AuthMeResponse,
+  BindSubtitleInput,
   ChapterDetail,
   CommitImportInput,
   CourseDetail,
@@ -12,8 +13,11 @@ import type {
   FsBrowseResponse,
   HealthStatus,
   HomeResponse,
+  ImportAIOrganizeInput,
+  ImportOrganizeProposal,
   ImportPreview,
   IndexedDir,
+  IndexedSubtitle,
   LessonDetail,
   LessonPlacement,
   LessonPlaybackInfo,
@@ -368,8 +372,15 @@ export const api = {
   },
 
   // Playback & Progress
-  getLessonPlayback(lessonId: string): Promise<LessonPlaybackInfo> {
-    return request<LessonPlaybackInfo>(`/api/v1/lessons/${encodeURIComponent(lessonId)}/playback`);
+  getLessonPlayback(
+    lessonId: string,
+    options?: { codecs?: string[]; forceTranscode?: boolean },
+  ): Promise<LessonPlaybackInfo> {
+    const qs = toQueryString({
+      codecs: options?.codecs && options.codecs.length > 0 ? options.codecs.join(',') : undefined,
+      force_transcode: options?.forceTranscode ? '1' : undefined,
+    });
+    return request<LessonPlaybackInfo>(`/api/v1/lessons/${encodeURIComponent(lessonId)}/playback${qs}`);
   },
   reportProgress(
     lessonId: string,
@@ -437,15 +448,40 @@ export const api = {
   },
   listFiles(
     sourceId: string,
-    params: { prefix?: string; search?: string; status?: string } = {},
+    params: { prefix?: string; search?: string; status?: string; assigned?: 'true' | 'false' } = {},
   ): Promise<{ files: MediaFile[] }> {
     const qs = toQueryString(params);
     return request<{ files: MediaFile[] }>(`/api/v1/sources/${encodeURIComponent(sourceId)}/files${qs}`);
+  },
+  listSourceSubtitles(
+    sourceId: string,
+    params: { unmatched?: boolean; prefix?: string; search?: string } = {},
+  ): Promise<{ subtitles: IndexedSubtitle[] }> {
+    const qs = toQueryString({
+      unmatched: params.unmatched !== undefined ? String(params.unmatched) : undefined,
+      prefix: params.prefix,
+      search: params.search,
+    });
+    return request<{ subtitles: IndexedSubtitle[] }>(
+      `/api/v1/sources/${encodeURIComponent(sourceId)}/subtitles${qs}`,
+    );
+  },
+  bindSubtitle(subtitleId: string, input: BindSubtitleInput): Promise<IndexedSubtitle> {
+    return request<IndexedSubtitle>(`/api/v1/subtitles/${encodeURIComponent(subtitleId)}/bind`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
   },
   previewImport(sourceId: string, dirRelPath: string): Promise<ImportPreview> {
     return request<ImportPreview>('/api/v1/import/preview', {
       method: 'POST',
       body: JSON.stringify({ source_id: sourceId, dir_rel_path: dirRelPath }),
+    });
+  },
+  aiOrganizeImport(input: ImportAIOrganizeInput): Promise<ImportOrganizeProposal> {
+    return request<ImportOrganizeProposal>('/api/v1/import/ai/organize', {
+      method: 'POST',
+      body: JSON.stringify(input),
     });
   },
   commitImport(input: CommitImportInput): Promise<CourseDetail> {

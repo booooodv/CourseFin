@@ -27,6 +27,7 @@ type Service struct {
 	dataDir   string
 	registry  *storage.Registry
 	ffmpegBin string
+	hasFFmpeg bool
 
 	mu            sync.Mutex
 	remuxSessions map[string]*remuxSession
@@ -41,17 +42,37 @@ func NewService(db *sql.DB, dataDir string, registry *storage.Registry, ffmpegBi
 	if registry == nil {
 		registry = storage.NewRegistry()
 	}
+	resolved := resolveBinaryPath(ffmpegBin, "ffmpeg")
 	s := &Service{
 		db:            db,
 		dataDir:       dataDir,
 		registry:      registry,
-		ffmpegBin:     resolveBinaryPath(ffmpegBin, "ffmpeg"),
+		ffmpegBin:     resolved,
+		hasFFmpeg:     isExecutableBinary(resolved),
 		remuxSessions: make(map[string]*remuxSession),
 		stopCh:        make(chan struct{}),
 	}
 	s.reaperWG.Add(1)
 	go s.reapIdleSessionsLoop()
 	return s
+}
+
+// HasFFmpeg reports whether a usable FFmpeg binary is available for remuxing/transcoding.
+func (s *Service) HasFFmpeg() bool {
+	return s != nil && s.hasFFmpeg
+}
+
+func isExecutableBinary(bin string) bool {
+	bin = strings.TrimSpace(bin)
+	if bin == "" {
+		return false
+	}
+	if strings.ContainsRune(bin, filepath.Separator) {
+		info, err := os.Stat(bin)
+		return err == nil && !info.IsDir()
+	}
+	_, err := exec.LookPath(bin)
+	return err == nil
 }
 
 // Close stops the remux reaper, terminates all active FFmpeg processes, and cleans

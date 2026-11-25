@@ -26,6 +26,9 @@ import (
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/unicode"
 )
 
 func openTestDB(t *testing.T) (*sql.DB, string) {
@@ -968,5 +971,245 @@ exec %q "$@"
 	<-doneCh
 	if rec1.Code != http.StatusConflict {
 		t.Fatalf("superseded segment 1 status = %d, want 409 Conflict (body: %s)", rec1.Code, rec1.Body.String())
+	}
+}
+
+func TestDecodeSubtitleToUTF8AndServeNonUTF8SRT(t *testing.T) {
+	sample := "1\n00:00:00,500 --> 00:00:02,000\n你好，课程字幕测试！\n"
+
+	// UTF-8 with BOM
+	utf8BOM := append([]byte{0xEF, 0xBB, 0xBF}, []byte(sample)...)
+	if got := media.DecodeSubtitleToUTF8(utf8BOM); got != sample {
+		t.Fatalf("UTF-8 BOM decode mismatch: got %q", got)
+	}
+
+	// UTF-16 LE with BOM
+	leBytes, err := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewEncoder().Bytes([]byte(sample))
+	if err != nil {
+		t.Fatalf("encode UTF-16LE: %v", err)
+	}
+	if got := media.DecodeSubtitleToUTF8(leBytes); got != sample {
+		t.Fatalf("UTF-16LE decode mismatch: got %q", got)
+	}
+
+	// UTF-16 BE with BOM
+	beBytes, err := unicode.UTF16(unicode.BigEndian, unicode.UseBOM).NewEncoder().Bytes([]byte(sample))
+	if err != nil {
+		t.Fatalf("encode UTF-16BE: %v", err)
+	}
+	if got := media.DecodeSubtitleToUTF8(beBytes); got != sample {
+		t.Fatalf("UTF-16BE decode mismatch: got %q", got)
+	}
+
+	// GB18030 / GBK encoded Chinese SRT
+	gbkBytes, err := simplifiedchinese.GB18030.NewEncoder().Bytes([]byte(sample))
+	if err != nil {
+		t.Fatalf("encode GB18030: %v", err)
+	}
+	if got := media.DecodeSubtitleToUTF8(gbkBytes); got != sample {
+		t.Fatalf("GB18030 decode mismatch: got %q", got)
+	}
+
+	// Serve GBK external SRT as VTT via Service.ServeSubtitle
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(mediaRoot, "lesson.mp4"), []byte("dummy"), 0o644); err != nil {
+		t.Fatalf("write mp4: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaRoot, "lesson.zh.srt"), gbkBytes, 0o644); err != nil {
+		t.Fatalf("write gbk srt: %v", err)
+	}
+	sourceID, mediaID := seedSourceAndMedia(t, conn, "local", mediaRoot, "lesson.mp4", "mp4", "h264", "aac", 5000, `[{"index":0,"codec_type":"video","codec_name":"h264"}]`, "")
+	if _, err := conn.Exec(
+		`INSERT INTO subtitle_files (id, source_id, relative_path, media_file_id, language, title, format, is_default, status)
+		 VALUES (?, ?, 'lesson.zh.srt', ?, 'zh', '中文', 'srt', 1, 'active')`,
+		id.New(), sourceID, mediaID,
+	); err != nil {
+		t.Fatalf("insert subtitle: %v", err)
+	}
+
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), "")
+	defer svc.Close()
+
+	rec := httptest.NewRecorder()
+	svc.ServeSubtitle(rec, httptest.NewRequest(http.MethodGet, "/sub.vtt", nil), mediaID, 1, "vtt")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ServeSubtitle status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.HasPrefix(body, "WEBVTT") || !strings.Contains(body, "你好，课程字幕测试！") {
+		t.Fatalf("expected valid UTF-8 WebVTT output, got %q", body)
+	}
+}
+
+func findTestBinary(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, dir := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"} {
+		cand := filepath.Join(dir, name)
+		if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+			return cand
+		}
+	}
+	return ""
+}
+
+func TestHasFFmpegDetection(t *testing.T) {
+	conn, dataDir := openTestDB(t)
+	missingSvc := media.NewService(conn, dataDir, nil, "/nonexistent/coursefin-ffmpeg-bin")
+	defer missingSvc.Close()
+	if missingSvc.HasFFmpeg() {
+		t.Fatalf("expected HasFFmpeg() == false for nonexistent explicit binary path")
+	}
+
+	if ffmpegBin := findTestBinary("ffmpeg"); ffmpegBin != "" {
+		okSvc := media.NewService(conn, dataDir, nil, ffmpegBin)
+		defer okSvc.Close()
+		if !okSvc.HasFFmpeg() {
+			t.Fatalf("expected HasFFmpeg() == true for %s", ffmpegBin)
+		}
+	}
+}
+
+func TestServeMasterPlaylistPropagatesTranscodeVideoAndTranscodesMPEG4(t *testing.T) {
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+
+	ffmpegBin := findTestBinary("ffmpeg")
+	ffprobeBin := findTestBinary("ffprobe")
+
+	// Seed a wmv3 record first to test playlist propagation & 415 vs 200 contract
+	wmvPath := filepath.Join(mediaRoot, "legacy.wmv")
+	if err := os.WriteFile(wmvPath, []byte("dummy"), 0o644); err != nil {
+		t.Fatalf("write wmv: %v", err)
+	}
+	_, wmvMF := seedSourceAndMedia(t, conn, "local", mediaRoot, "legacy.wmv", "wmv", "wmv3", "wmav2", 12000, "", "")
+	_, _, _, wmvLesson := seedCourseHierarchy(t, conn, wmvMF, "", "")
+
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), ffmpegBin)
+	defer svc.Close()
+
+	// Without TranscodeVideo=1, wmv3 must still return 415 (preserving Jellyfin contract)
+	rec415 := httptest.NewRecorder()
+	svc.ServeMasterPlaylist(rec415, httptest.NewRequest(http.MethodGet, "/Videos/"+wmvLesson+"/master.m3u8?PlaySessionId=s1", nil), wmvLesson, "s1")
+	if rec415.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("wmv3 master.m3u8 without TranscodeVideo = %d, want 415", rec415.Code)
+	}
+
+	if ffmpegBin == "" {
+		return
+	}
+
+	// With TranscodeVideo=1, master.m3u8 and main.m3u8 succeed and propagate TranscodeVideo=1
+	recMaster := httptest.NewRecorder()
+	svc.ServeMasterPlaylist(recMaster, httptest.NewRequest(http.MethodGet, "/Videos/"+wmvLesson+"/master.m3u8?PlaySessionId=s1&TranscodeVideo=1&api_key=tok", nil), wmvLesson, "s1")
+	if recMaster.Code != http.StatusOK || !strings.Contains(recMaster.Body.String(), "TranscodeVideo=1") {
+		t.Fatalf("master.m3u8 with TranscodeVideo=1: status=%d body=%s", recMaster.Code, recMaster.Body.String())
+	}
+
+	recMedia := httptest.NewRecorder()
+	svc.ServeMediaPlaylist(recMedia, httptest.NewRequest(http.MethodGet, "/Videos/"+wmvLesson+"/main.m3u8?PlaySessionId=s1&TranscodeVideo=1&api_key=tok", nil), wmvLesson, "s1")
+	if recMedia.Code != http.StatusOK || !strings.Contains(recMedia.Body.String(), "TranscodeVideo=1") {
+		t.Fatalf("main.m3u8 with TranscodeVideo=1: status=%d body=%s", recMedia.Code, recMedia.Body.String())
+	}
+
+	// Generate a real MPEG-4 (.avi) video and transcode segment 0.ts -> verify h264 + yuv420p
+	aviPath := filepath.Join(mediaRoot, "sample_mpeg4.avi")
+	genCmd := exec.Command(
+		ffmpegBin, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "color=c=blue:size=160x120:rate=15:duration=8",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=8",
+		"-c:v", "mpeg4", "-c:a", "mp3",
+		aviPath,
+	)
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate mpeg4 avi: %v\n%s", err, string(out))
+	}
+
+	prober := scanner.NewFFmpegProber(ffprobeBin, ffmpegBin)
+	probeRes, err := prober.Probe(context.Background(), aviPath)
+	if err != nil {
+		t.Fatalf("probe mpeg4 avi: %v", err)
+	}
+	_, aviMF := seedSourceAndMedia(t, conn, "local", mediaRoot, "sample_mpeg4.avi", "avi", probeRes.VideoCodec, probeRes.AudioCodec, probeRes.DurationMs, probeRes.StreamsJSON, "")
+	_, _, _, aviLesson := seedCourseHierarchy(t, conn, aviMF, "", "")
+
+	segRec := httptest.NewRecorder()
+	svc.ServeHLSSegment(segRec, httptest.NewRequest(http.MethodGet, "/Videos/"+aviLesson+"/hls1/main/0.ts?PlaySessionId=tc1&TranscodeVideo=1", nil), aviLesson, "tc1", 0)
+	if segRec.Code != http.StatusOK || segRec.Body.Len() < 188 || segRec.Body.Bytes()[0] != 0x47 {
+		t.Fatalf("transcode segment 0.ts failed: status=%d len=%d body=%s", segRec.Code, segRec.Body.Len(), segRec.Body.String())
+	}
+
+	if ffprobeBin != "" {
+		outTS := filepath.Join(t.TempDir(), "out0.ts")
+		if err := os.WriteFile(outTS, segRec.Body.Bytes(), 0o644); err != nil {
+			t.Fatalf("write out0.ts: %v", err)
+		}
+		pCmd := exec.Command(ffprobeBin, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt", "-of", "csv=p=0", outTS)
+		pOut, err := pCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("ffprobe out0.ts: %v (%s)", err, string(pOut))
+		}
+		firstLine := strings.TrimSpace(strings.Split(strings.TrimSpace(string(pOut)), "\n")[0])
+		if firstLine != "h264,yuv420p" {
+			t.Fatalf("transcoded segment codec/pix_fmt = %q (raw %q), want h264,yuv420p", firstLine, string(pOut))
+		}
+	}
+}
+
+func TestTranscodeOddDimensionVideoSucceeds(t *testing.T) {
+	ffmpegBin := findTestBinary("ffmpeg")
+	ffprobeBin := findTestBinary("ffprobe")
+	if ffmpegBin == "" {
+		t.Skip("ffmpeg not available")
+	}
+
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+
+	// Odd resolution 319x179 (common in window screen recordings)
+	oddPath := filepath.Join(mediaRoot, "odd_screen.avi")
+	genCmd := exec.Command(
+		ffmpegBin, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "color=c=green:size=319x179:rate=15:duration=6",
+		"-c:v", "mpeg4",
+		oddPath,
+	)
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate odd dimension video: %v\n%s", err, string(out))
+	}
+
+	prober := scanner.NewFFmpegProber(ffprobeBin, ffmpegBin)
+	probeRes, err := prober.Probe(context.Background(), oddPath)
+	if err != nil {
+		t.Fatalf("probe odd video: %v", err)
+	}
+	_, mfID := seedSourceAndMedia(t, conn, "local", mediaRoot, "odd_screen.avi", "avi", probeRes.VideoCodec, probeRes.AudioCodec, probeRes.DurationMs, probeRes.StreamsJSON, "")
+	_, _, _, lessonID := seedCourseHierarchy(t, conn, mfID, "", "")
+
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), ffmpegBin)
+	defer svc.Close()
+
+	segRec := httptest.NewRecorder()
+	svc.ServeHLSSegment(segRec, httptest.NewRequest(http.MethodGet, "/Videos/"+lessonID+"/hls1/main/0.ts?PlaySessionId=odd1&TranscodeVideo=1", nil), lessonID, "odd1", 0)
+	if segRec.Code != http.StatusOK || segRec.Body.Len() < 188 || segRec.Body.Bytes()[0] != 0x47 {
+		t.Fatalf("odd-dimension transcode failed: status=%d len=%d body=%s", segRec.Code, segRec.Body.Len(), segRec.Body.String())
+	}
+
+	if ffprobeBin != "" {
+		outTS := filepath.Join(t.TempDir(), "odd0.ts")
+		if err := os.WriteFile(outTS, segRec.Body.Bytes(), 0o644); err != nil {
+			t.Fatalf("write odd0.ts: %v", err)
+		}
+		pCmd := exec.Command(ffprobeBin, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt,width,height", "-of", "csv=p=0", outTS)
+		pOut, err := pCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("ffprobe odd0.ts: %v (%s)", err, string(pOut))
+		}
+		firstLine := strings.TrimSpace(strings.Split(strings.TrimSpace(string(pOut)), "\n")[0])
+		if firstLine != "h264,320,180,yuv420p" && firstLine != "h264,yuv420p,320,180" {
+			t.Fatalf("odd transcoded stream = %q, want h264 + yuv420p + 320x180", firstLine)
+		}
 	}
 }

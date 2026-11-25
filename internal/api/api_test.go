@@ -37,6 +37,8 @@ import (
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
 	"coursefin/internal/updater"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 type fakeProber struct{}
@@ -681,16 +683,19 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 	}
 
 	type playbackResp struct {
-		Mode       string `json:"mode"`
-		StreamURL  string `json:"stream_url"`
-		VideoCodec string `json:"video_codec"`
-		AudioCodec string `json:"audio_codec"`
-		Container  string `json:"container"`
-		Subtitles  []struct {
+		Mode        string `json:"mode"`
+		StreamURL   string `json:"stream_url"`
+		Transcoding bool   `json:"transcoding"`
+		VideoCodec  string `json:"video_codec"`
+		AudioCodec  string `json:"audio_codec"`
+		Container   string `json:"container"`
+		Subtitles   []struct {
 			Language string `json:"language"`
 			URL      string `json:"url"`
 		} `json:"subtitles"`
 	}
+
+	hasFFmpeg := env.mediaSvc.HasFFmpeg()
 
 	// 1. MP4 (h264/aac) -> direct
 	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[0].ID+"/playback", nil, token)
@@ -701,14 +706,29 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 	if err := json.Unmarshal(raw, &p1); err != nil {
 		t.Fatalf("unmarshal p1: %v", err)
 	}
-	if p1.Mode != "direct" || !strings.Contains(p1.StreamURL, "/Videos/"+lessons[0].ID+"/stream.mp4") || !strings.Contains(p1.StreamURL, "Static=true") {
+	if p1.Mode != "direct" || p1.Transcoding || !strings.Contains(p1.StreamURL, "/Videos/"+lessons[0].ID+"/stream.mp4") || !strings.Contains(p1.StreamURL, "Static=true") {
 		t.Fatalf("expected direct mode and stream.mp4 URL, got %+v", p1)
 	}
 	if len(p1.Subtitles) != 1 || !strings.Contains(p1.Subtitles[0].URL, "Stream.vtt") {
 		t.Fatalf("expected 1 VTT subtitle URL, got %+v", p1.Subtitles)
 	}
 
-	// 2. MKV (h264/ac3) -> hls
+	// 1b. MP4 (h264/aac) with force_transcode=1 -> hls + transcoding when FFmpeg available
+	if hasFFmpeg {
+		resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[0].ID+"/playback?force_transcode=1", nil, token)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET playback force_transcode = %d: %s", resp.StatusCode, raw)
+		}
+		var pForce playbackResp
+		if err := json.Unmarshal(raw, &pForce); err != nil {
+			t.Fatalf("unmarshal pForce: %v", err)
+		}
+		if pForce.Mode != "hls" || !pForce.Transcoding || !strings.Contains(pForce.StreamURL, "TranscodeVideo=1") {
+			t.Fatalf("expected force_transcode hls+TranscodeVideo=1, got %+v", pForce)
+		}
+	}
+
+	// 2. MKV (h264/ac3) -> hls (remux, transcoding=false) when FFmpeg available
 	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[1].ID+"/playback", nil, token)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET playback hls = %d: %s", resp.StatusCode, raw)
@@ -717,45 +737,64 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 	if err := json.Unmarshal(raw, &p2); err != nil {
 		t.Fatalf("unmarshal p2: %v", err)
 	}
-	if p2.Mode != "hls" || !strings.Contains(p2.StreamURL, "/Videos/"+lessons[1].ID+"/master.m3u8") || !strings.Contains(p2.StreamURL, "PlaySessionId=") {
-		t.Fatalf("expected hls mode and master.m3u8 URL, got %+v", p2)
+	if hasFFmpeg {
+		if p2.Mode != "hls" || p2.Transcoding || !strings.Contains(p2.StreamURL, "/Videos/"+lessons[1].ID+"/master.m3u8") || strings.Contains(p2.StreamURL, "TranscodeVideo=1") {
+			t.Fatalf("expected hls remux mode without TranscodeVideo=1, got %+v", p2)
+		}
 	}
 
-	// 3. WMV (wmv3/wmav2) -> unsupported
+	// 3. WMV (wmv3/wmav2) -> hls transcoding when FFmpeg available, else unsupported
 	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lessons[2].ID+"/playback", nil, token)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET playback unsupported = %d: %s", resp.StatusCode, raw)
+		t.Fatalf("GET playback wmv = %d: %s", resp.StatusCode, raw)
 	}
 	var p3 playbackResp
 	if err := json.Unmarshal(raw, &p3); err != nil {
 		t.Fatalf("unmarshal p3: %v", err)
 	}
-	if p3.Mode != "unsupported" || p3.StreamURL != "" {
-		t.Fatalf("expected unsupported mode with empty stream_url, got %+v", p3)
+	if hasFFmpeg {
+		if p3.Mode != "hls" || !p3.Transcoding || !strings.Contains(p3.StreamURL, "TranscodeVideo=1") {
+			t.Fatalf("expected wmv3 to fall back to hls transcoding when ffmpeg available, got %+v", p3)
+		}
+	} else if p3.Mode != "unsupported" || p3.StreamURL != "" {
+		t.Fatalf("expected unsupported mode without ffmpeg, got %+v", p3)
 	}
 
-	// 4. WebM (vp9/opus) -> direct, MKV (vp9/opus) -> unsupported, MKV (hevc/aac) -> unsupported, MKV (h264/opus) -> hls
+	// 4. Three-tier codec + browser capability + pix_fmt matrix
+	wantTranscodeMode := "unsupported"
+	wantTranscodeFlag := false
+	if hasFFmpeg {
+		wantTranscodeMode = "hls"
+		wantTranscodeFlag = true
+	}
+
 	extraCases := []struct {
-		name      string
-		relPath   string
-		container string
-		vcodec    string
-		acodec    string
-		wantMode  string
+		name          string
+		relPath       string
+		container     string
+		vcodec        string
+		acodec        string
+		streamsJSON   string
+		query         string
+		wantMode      string
+		wantTranscode bool
 	}{
-		{name: "webm_vp9_opus", relPath: "CodecTest/04_vp9.webm", container: "webm", vcodec: "vp9", acodec: "opus", wantMode: "direct"},
-		{name: "mkv_vp9_opus", relPath: "CodecTest/05_vp9.mkv", container: "mkv", vcodec: "vp9", acodec: "opus", wantMode: "unsupported"},
-		{name: "mkv_hevc_aac", relPath: "CodecTest/06_hevc.mkv", container: "mkv", vcodec: "hevc", acodec: "aac", wantMode: "unsupported"},
-		{name: "mkv_av1_aac", relPath: "CodecTest/08_av1.mkv", container: "mkv", vcodec: "av1", acodec: "aac", wantMode: "unsupported"},
-		{name: "mkv_h264_opus", relPath: "CodecTest/07_h264_opus.mkv", container: "mkv", vcodec: "h264", acodec: "opus", wantMode: "hls"},
+		{name: "webm_vp9_opus", relPath: "CodecTest/04_vp9.webm", container: "webm", vcodec: "vp9", acodec: "opus", streamsJSON: "[]", wantMode: "direct", wantTranscode: false},
+		{name: "mkv_vp9_opus", relPath: "CodecTest/05_vp9.mkv", container: "mkv", vcodec: "vp9", acodec: "opus", streamsJSON: "[]", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
+		{name: "mkv_hevc_aac", relPath: "CodecTest/06_hevc.mkv", container: "mkv", vcodec: "hevc", acodec: "aac", streamsJSON: "[]", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
+		{name: "mkv_av1_aac", relPath: "CodecTest/08_av1.mkv", container: "mkv", vcodec: "av1", acodec: "aac", streamsJSON: "[]", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
+		{name: "mkv_h264_opus", relPath: "CodecTest/07_h264_opus.mkv", container: "mkv", vcodec: "h264", acodec: "opus", streamsJSON: "[]", wantMode: wantTranscodeMode, wantTranscode: false},
+		{name: "mp4_hevc_direct_when_supported", relPath: "CodecTest/09_hevc.mp4", container: "mp4", vcodec: "hevc", acodec: "aac", streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p"}]`, query: "?codecs=h264,hevc,vp9,av1", wantMode: "direct", wantTranscode: false},
+		{name: "mp4_hevc_transcode_when_not_supported", relPath: "CodecTest/10_hevc.mp4", container: "mp4", vcodec: "hevc", acodec: "aac", streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p"}]`, query: "?codecs=h264,vp9,av1", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
+		{name: "mp4_hevc_yuv444p_forces_transcode", relPath: "CodecTest/11_hevc444.mp4", container: "mp4", vcodec: "hevc", acodec: "aac", streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv444p"}]`, query: "?codecs=h264,hevc", wantMode: wantTranscodeMode, wantTranscode: wantTranscodeFlag},
 	}
 	for _, tc := range extraCases {
 		mfID := id.New()
 		now := time.Now().UTC().Format(time.RFC3339)
 		if _, err := env.db.Exec(`
-			INSERT INTO media_files (id, source_id, relative_path, file_name, file_size, mod_time, status, duration_ms, container, video_codec, audio_codec, created_at, updated_at)
-			VALUES (?, ?, ?, ?, 100, ?, 'active', 10000, ?, ?, ?, ?, ?)`,
-			mfID, src.ID, tc.relPath, filepath.Base(tc.relPath), now, tc.container, tc.vcodec, tc.acodec, now, now,
+			INSERT INTO media_files (id, source_id, relative_path, file_name, file_size, mod_time, status, duration_ms, container, video_codec, audio_codec, streams_json, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 100, ?, 'active', 10000, ?, ?, ?, ?, ?, ?)`,
+			mfID, src.ID, tc.relPath, filepath.Base(tc.relPath), now, tc.container, tc.vcodec, tc.acodec, tc.streamsJSON, now, now,
 		); err != nil {
 			t.Fatalf("insert media_file %s: %v", tc.name, err)
 		}
@@ -763,7 +802,7 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AddLesson %s: %v", tc.name, err)
 		}
-		cResp, cRaw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lsn.ID+"/playback", nil, token)
+		cResp, cRaw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lsn.ID+"/playback"+tc.query, nil, token)
 		if cResp.StatusCode != http.StatusOK {
 			t.Fatalf("GET playback %s = %d: %s", tc.name, cResp.StatusCode, cRaw)
 		}
@@ -771,9 +810,39 @@ func TestLessonPlaybackEndpointReportsDirectHLSAndUnsupported(t *testing.T) {
 		if err := json.Unmarshal(cRaw, &cp); err != nil {
 			t.Fatalf("unmarshal %s: %v", tc.name, err)
 		}
-		if cp.Mode != tc.wantMode {
-			t.Fatalf("%s: got mode=%q, want %q", tc.name, cp.Mode, tc.wantMode)
+		if cp.Mode != tc.wantMode || cp.Transcoding != tc.wantTranscode {
+			t.Fatalf("%s: got mode=%q transcoding=%v, want mode=%q transcoding=%v", tc.name, cp.Mode, cp.Transcoding, tc.wantMode, tc.wantTranscode)
 		}
+		if cp.Transcoding && !strings.Contains(cp.StreamURL, "TranscodeVideo=1") {
+			t.Fatalf("%s: expected TranscodeVideo=1 in stream_url %q", tc.name, cp.StreamURL)
+		}
+	}
+
+	// 5. Without FFmpeg binary, non-direct video degrades cleanly to unsupported
+	noFFmpegMedia := media.NewService(env.db, env.dataDir, env.registry, "/nonexistent/coursefin-ffmpeg")
+	defer noFFmpegMedia.Close()
+	noFFmpegHandler := api.NewHandler(api.Deps{
+		DB:       env.db,
+		DataDir:  env.dataDir,
+		Registry: env.registry,
+		Auth:     env.authSvc,
+		Scanner:  env.scanSvc,
+		Catalog:  env.catSvc,
+		Media:    noFFmpegMedia,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/lessons/"+lessons[2].ID+"/playback", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	noFFmpegHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("no-ffmpeg playback status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var pNoFF playbackResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &pNoFF); err != nil {
+		t.Fatalf("unmarshal pNoFF: %v", err)
+	}
+	if pNoFF.Mode != "unsupported" || pNoFF.StreamURL != "" || pNoFF.Transcoding {
+		t.Fatalf("expected unsupported without ffmpeg, got %+v", pNoFF)
 	}
 }
 
@@ -1644,5 +1713,514 @@ func TestSystemUpdateEndpointsUnavailableWhenNilUpdater(t *testing.T) {
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s %s with nil updater = %d, want 503: %s", tc.method, tc.path, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestSourceSubtitlesAndManualBindEndpoints(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "sub-bind-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	// Create source with 1 video and 1 unmatched subtitle
+	courseDir := filepath.Join(env.mediaDir, "BindCourse")
+	if err := os.MkdirAll(courseDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(courseDir, "01_demo.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatalf("write mp4: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(courseDir, "unrelated_name.srt"), []byte("1\n00:00:00,000 --> 00:00:01,000\nHi\n"), 0o644); err != nil {
+		t.Fatalf("write srt: %v", err)
+	}
+
+	src, err := env.catSvc.CreateSource(context.Background(), "BindSrc", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+
+	course, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "BindCourse",
+		Title:      "Bind Course",
+	})
+	if err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+	lesson := course.Chapters[0].Lessons[0]
+
+	// List unmatched subtitles
+	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/sources/"+src.ID+"/subtitles?unmatched=true", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /sources/{id}/subtitles = %d: %s", resp.StatusCode, raw)
+	}
+	var listRes struct {
+		Subtitles []catalog.IndexedSubtitle `json:"subtitles"`
+	}
+	if err := json.Unmarshal(raw, &listRes); err != nil {
+		t.Fatalf("unmarshal subtitles: %v", err)
+	}
+	if len(listRes.Subtitles) != 1 {
+		t.Fatalf("expected 1 unmatched subtitle, got %+v", listRes.Subtitles)
+	}
+	subID := listRes.Subtitles[0].ID
+
+	// 404 on unknown subtitle
+	resp, _ = env.doJSON(t, http.MethodPut, "/api/v1/subtitles/00000000000000000000000000000001/bind", map[string]any{
+		"media_file_id": lesson.MediaFileID,
+	}, token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("bind unknown subtitle = %d, want 404", resp.StatusCode)
+	}
+
+	// 404 on unknown media_file_id
+	resp, _ = env.doJSON(t, http.MethodPut, "/api/v1/subtitles/"+subID+"/bind", map[string]any{
+		"media_file_id": "00000000000000000000000000000002",
+	}, token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("bind unknown media_file = %d, want 404", resp.StatusCode)
+	}
+
+	// Bind to lesson's media file
+	resp, raw = env.doJSON(t, http.MethodPut, "/api/v1/subtitles/"+subID+"/bind", map[string]any{
+		"media_file_id": lesson.MediaFileID,
+		"title":         "手工关联字幕",
+		"language":      "zh",
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT bind = %d: %s", resp.StatusCode, raw)
+	}
+
+	// Verify bound subtitle appears in playback endpoint
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lesson.ID+"/playback", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET playback = %d: %s", resp.StatusCode, raw)
+	}
+	var pb struct {
+		Subtitles []struct {
+			Title string `json:"title"`
+			URL   string `json:"url"`
+		} `json:"subtitles"`
+	}
+	if err := json.Unmarshal(raw, &pb); err != nil {
+		t.Fatalf("unmarshal playback: %v", err)
+	}
+	if len(pb.Subtitles) != 1 || pb.Subtitles[0].Title != "手工关联字幕" || pb.Subtitles[0].URL == "" {
+		t.Fatalf("expected bound subtitle in playback response, got %+v", pb.Subtitles)
+	}
+}
+
+func TestImportAIOrganizeEndpoint(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "import-ai-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	courseDir := filepath.Join(env.mediaDir, "RawGoCourse")
+	writeDummyFile(t, filepath.Join(courseDir, "01_intro_1080p.mp4"), []byte("v1"))
+	writeDummyFile(t, filepath.Join(courseDir, "02_chan_1080p.mp4"), []byte("v2"))
+
+	// Write a GBK-encoded subtitle for 01_intro_1080p.mp4
+	gbkSRT, err := simplifiedchinese.GB18030.NewEncoder().Bytes([]byte("1\n00:00:00,000 --> 00:00:03,000\n欢迎来到 Go 并发编程课程\n"))
+	if err != nil {
+		t.Fatalf("encode GB18030: %v", err)
+	}
+	writeDummyFile(t, filepath.Join(courseDir, "01_intro_1080p.zh.srt"), gbkSRT)
+
+	src, err := env.catSvc.CreateSource(context.Background(), "ImportAISrc", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+
+	preview, err := env.catSvc.PreviewDirectoryImport(context.Background(), src.ID, "RawGoCourse")
+	if err != nil {
+		t.Fatalf("PreviewDirectoryImport: %v", err)
+	}
+	if len(preview.Chapters) != 1 || len(preview.Chapters[0].Lessons) != 2 {
+		t.Fatalf("unexpected preview chapters: %+v", preview.Chapters)
+	}
+	mf1 := preview.Chapters[0].Lessons[0].MediaFileID
+	mf2 := preview.Chapters[0].Lessons[1].MediaFileID
+
+	validBody := map[string]any{
+		"source_id":    src.ID,
+		"dir_rel_path": "RawGoCourse",
+		"title":        "RawGoCourse",
+		"overview":     "",
+		"chapters": []map[string]any{
+			{
+				"title": "正片",
+				"lessons": []map[string]any{
+					{"media_file_id": mf1, "title": "01_intro_1080p"},
+					{"media_file_id": mf2, "title": "02_chan_1080p"},
+				},
+			},
+		},
+	}
+
+	// 1. Without AI config -> 400
+	resp, raw := env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", validBody, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("import AI organize without config = %d, want 400: %s", resp.StatusCode, raw)
+	}
+
+	var seenPrompt string
+	mockAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenPrompt = string(body)
+		prop := map[string]any{
+			"title":    "Go 并发编程实战",
+			"overview": "系统讲解 Go 并发模型与通道机制",
+			"tags":     []string{"Go", "并发"},
+			"chapters": []map[string]any{
+				{
+					"title": "第一章：入门",
+					"lessons": []map[string]any{
+						{"lesson_id": mf1, "title": "课程导论"},
+					},
+				},
+				{
+					"title": "第二章：核心机制",
+					"lessons": []map[string]any{
+						{"lesson_id": mf2, "title": "Channel 深入解析"},
+					},
+				},
+			},
+		}
+		pb, _ := json.Marshal(prop)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": string(pb)}},
+			},
+		})
+	}))
+	defer mockAI.Close()
+
+	resp, raw = env.doJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url":           mockAI.URL + "/v1",
+		"ai_api_key":            "sk-import",
+		"ai_model":              "gpt-4o-mini",
+		"ai_max_subtitle_chars": 2000,
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT settings = %d: %s", resp.StatusCode, raw)
+	}
+
+	// 2. Empty lessons -> 400
+	resp, _ = env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", map[string]any{
+		"source_id":    src.ID,
+		"dir_rel_path": "RawGoCourse",
+		"title":        "RawGoCourse",
+		"chapters":     []map[string]any{},
+	}, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty chapters = %d, want 400", resp.StatusCode)
+	}
+
+	// 3. Unknown media_file_id -> 400
+	resp, _ = env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", map[string]any{
+		"source_id":    src.ID,
+		"dir_rel_path": "RawGoCourse",
+		"title":        "RawGoCourse",
+		"chapters": []map[string]any{
+			{"title": "Ch", "lessons": []map[string]any{{"media_file_id": "00000000000000000000000000000099", "title": "X"}}},
+		},
+	}, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("foreign media_file_id = %d, want 400", resp.StatusCode)
+	}
+
+	// 4. Valid request -> 200 with clean UTF-8 GBK subtitle excerpt and media_file_id mapped
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", validBody, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/v1/import/ai/organize = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(seenPrompt, "欢迎来到 Go 并发编程课程") {
+		t.Fatalf("expected UTF-8 decoded GBK subtitle excerpt in AI prompt, got: %s", seenPrompt)
+	}
+
+	var out struct {
+		Title    string   `json:"title"`
+		Overview string   `json:"overview"`
+		Tags     []string `json:"tags"`
+		Chapters []struct {
+			Title   string `json:"title"`
+			Lessons []struct {
+				MediaFileID string `json:"media_file_id"`
+				Title       string `json:"title"`
+			} `json:"lessons"`
+		} `json:"chapters"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal import AI response: %v", err)
+	}
+	if out.Title != "Go 并发编程实战" || len(out.Chapters) != 2 || out.Chapters[0].Lessons[0].MediaFileID != mf1 || out.Chapters[1].Lessons[0].MediaFileID != mf2 {
+		t.Fatalf("unexpected import AI proposal: %+v", out)
+	}
+
+	// Ensure no courses were mutated/created in DB
+	courses, err := env.catSvc.ListCourses(context.Background(), catalog.CourseFilter{})
+	if err != nil {
+		t.Fatalf("ListCourses: %v", err)
+	}
+	if len(courses) != 0 {
+		t.Fatalf("expected 0 courses in DB after preview AI organize, got %d", len(courses))
+	}
+}
+
+func TestStorageSourcesDirsAndFilesAssignmentAPI(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "assign-api-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	writeDummyFile(t, filepath.Join(env.mediaDir, "Imported", "01.mp4"), []byte("v1"))
+	writeDummyFile(t, filepath.Join(env.mediaDir, "Pending", "02.mp4"), []byte("v2"))
+
+	src, err := env.catSvc.CreateSource(context.Background(), "AssignAPISrc", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	if _, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "Imported",
+		Title:      "Imported Course",
+	}); err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+
+	// 1. /api/v1/sources reports assigned_count=1, unassigned_count=1
+	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/sources", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /sources = %d: %s", resp.StatusCode, raw)
+	}
+	var srcRes struct {
+		Sources []catalog.StorageSource `json:"sources"`
+	}
+	if err := json.Unmarshal(raw, &srcRes); err != nil {
+		t.Fatalf("unmarshal sources: %v", err)
+	}
+	if len(srcRes.Sources) != 1 || srcRes.Sources[0].AssignedCount != 1 || srcRes.Sources[0].UnassignedCount != 1 {
+		t.Fatalf("unexpected source assignment counts: %+v", srcRes.Sources)
+	}
+
+	// 2. /api/v1/sources/{id}/dirs reports per-dir counts and courses
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/sources/"+src.ID+"/dirs", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /dirs = %d: %s", resp.StatusCode, raw)
+	}
+	var dirRes struct {
+		Dirs []catalog.IndexedDir `json:"dirs"`
+	}
+	if err := json.Unmarshal(raw, &dirRes); err != nil {
+		t.Fatalf("unmarshal dirs: %v", err)
+	}
+	if len(dirRes.Dirs) != 2 || dirRes.Dirs[0].AssignedCount != 1 || len(dirRes.Dirs[0].Courses) != 1 || dirRes.Dirs[1].UnassignedCount != 1 {
+		t.Fatalf("unexpected dir assignment info: %+v", dirRes.Dirs)
+	}
+
+	// 3. /api/v1/sources/{id}/files?assigned=false filters to unassigned files only
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/sources/"+src.ID+"/files?assigned=false", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /files?assigned=false = %d: %s", resp.StatusCode, raw)
+	}
+	var fileRes struct {
+		Files []catalog.MediaFile `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &fileRes); err != nil {
+		t.Fatalf("unmarshal files: %v", err)
+	}
+	if len(fileRes.Files) != 1 || fileRes.Files[0].FileName != "02.mp4" || fileRes.Files[0].Assigned {
+		t.Fatalf("unexpected unassigned files: %+v", fileRes.Files)
+	}
+}
+
+func TestImportAIOrganizeLargeUTF8SubtitleBoundaryNoMojibake(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "utf8-boundary"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	// Craft a BOM-less UTF-8 Chinese SRT > 8192 bytes where byte 8192 slices mid-rune.
+	header := "1\n00:00:01,000 --> 00:00:05,000\n微服务架构实战课程导学\n\n2\n00:00:06,000 --> 00:00:10,000\n"
+	// Pad ASCII bytes so that the repeated 3-byte Chinese rune '中' straddles offset 8192.
+	padLen := (8192 - len(header) - 1) % 3
+	content := header + strings.Repeat("a", padLen) + strings.Repeat("中", 3000) + "\n"
+	// Confirm byte 8192 really falls mid-rune!
+	rawBytes := []byte(content)
+	if len(rawBytes) <= 8192 {
+		t.Fatalf("expected > 8192 bytes, got %d", len(rawBytes))
+	}
+
+	writeDummyFile(t, filepath.Join(env.mediaDir, "UTF8Course", "01.mp4"), []byte("v1"))
+	writeDummyFile(t, filepath.Join(env.mediaDir, "UTF8Course", "01.zh.srt"), rawBytes)
+
+	src, err := env.catSvc.CreateSource(context.Background(), "UTF8Src", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	files, err := env.catSvc.ListMediaFiles(context.Background(), src.ID, "", "", "")
+	if err != nil || len(files) != 1 {
+		t.Fatalf("ListMediaFiles: %v (len=%d)", err, len(files))
+	}
+	mfID := files[0].ID
+
+	var capturedPrompt string
+	fakeLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capturedPrompt = string(body)
+		respObj := map[string]any{
+			"choices": []map[string]any{
+				{
+					"message": map[string]any{
+						"content": fmt.Sprintf(`{"title":"微服务课程","overview":"简介","tags":["Go"],"chapters":[{"title":"第一章","lessons":[{"lesson_id":%q,"title":"导学"}]}]}`, mfID),
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(respObj)
+	}))
+	defer fakeLLM.Close()
+
+	resp, raw := env.doJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url":           fakeLLM.URL + "/v1",
+		"ai_api_key":            "test-key",
+		"ai_model":              "gpt-test",
+		"ai_max_subtitle_chars": 2000,
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT settings = %d: %s", resp.StatusCode, raw)
+	}
+
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", map[string]any{
+		"source_id":    src.ID,
+		"dir_rel_path": "UTF8Course",
+		"title":        "UTF8Course",
+		"chapters": []map[string]any{
+			{
+				"title": "默认",
+				"lessons": []map[string]any{
+					{"media_file_id": mfID, "title": "01"},
+				},
+			},
+		},
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /import/ai/organize = %d: %s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(capturedPrompt, "微服务架构实战课程导学") {
+		t.Fatalf("expected clean UTF-8 Chinese subtitle excerpt in AI prompt, got mojibake/missing: %s", capturedPrompt)
+	}
+}
+
+func TestLessonPlayback10BitAnd444H264RoutesToTranscode(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if !env.mediaSvc.HasFFmpeg() {
+		t.Skip("ffmpeg not available")
+	}
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "pixfmt-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	src, err := env.catSvc.CreateSource(context.Background(), "PixFmtSrc", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	course, err := env.catSvc.CreateCourse(context.Background(), catalog.CreateCourseInput{Title: "Screen Recordings"})
+	if err != nil {
+		t.Fatalf("CreateCourse: %v", err)
+	}
+	chapID := course.Chapters[0].ID
+
+	for _, tc := range []struct {
+		name        string
+		fileName    string
+		container   string
+		streamsJSON string
+	}{
+		{
+			name:        "h264_10bit_mkv",
+			fileName:    "screen_10bit.mkv",
+			container:   "mkv",
+			streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p10le"}]`,
+		},
+		{
+			name:        "h264_444_mp4",
+			fileName:    "obs_444.mp4",
+			container:   "mp4",
+			streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv444p"}]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeDummyFile(t, filepath.Join(env.mediaDir, tc.fileName), []byte("dummy"))
+			mfID := id.New()
+			now := time.Now().UTC().Format(time.RFC3339)
+			if _, err := env.db.Exec(
+				`INSERT INTO media_files (id, source_id, relative_path, file_name, file_size, mod_time, status, duration_ms, container, video_codec, audio_codec, width, height, bitrate, streams_json, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, 1024, ?, 'active', 60000, ?, 'h264', 'aac', 1920, 1080, 2000000, ?, ?, ?)`,
+				mfID, src.ID, tc.fileName, tc.fileName, now, tc.container, tc.streamsJSON, now, now,
+			); err != nil {
+				t.Fatalf("insert media_file: %v", err)
+			}
+			lesson, err := env.catSvc.AddLesson(context.Background(), chapID, mfID, tc.name)
+			if err != nil {
+				t.Fatalf("AddLesson: %v", err)
+			}
+
+			resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lesson.ID+"/playback?codecs=h264,hevc,vp9,av1", nil, token)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET /playback = %d: %s", resp.StatusCode, raw)
+			}
+			var pb struct {
+				Mode        string `json:"mode"`
+				Transcoding bool   `json:"transcoding"`
+				StreamURL   string `json:"stream_url"`
+			}
+			if err := json.Unmarshal(raw, &pb); err != nil {
+				t.Fatalf("unmarshal playback: %v", err)
+			}
+			if pb.Mode != "hls" || !pb.Transcoding || !strings.Contains(pb.StreamURL, "TranscodeVideo=1") {
+				t.Fatalf("%s expected Tier 3 transcode (hls, transcoding=true, TranscodeVideo=1), got %+v", tc.name, pb)
+			}
+		})
 	}
 }

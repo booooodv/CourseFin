@@ -188,7 +188,7 @@ func upsertProgressWith(ctx context.Context, execer progressExecer, lessonID str
 }
 
 const lessonWithContextSelect = `
-	SELECT l.id, l.course_id, l.chapter_id, l.media_file_id, l.title, l.overview, l.sort_order, l.cover_path,
+	SELECT l.id, l.course_id, l.chapter_id, l.media_file_id, mf.source_id, l.title, l.overview, l.sort_order, l.cover_path,
 	       mf.duration_ms, mf.container, mf.video_codec, mf.audio_codec, mf.width, mf.height, mf.bitrate, mf.thumbnail_path, mf.status,
 	       COALESCE(pp.position_ticks, 0), COALESCE(pp.played, 0), COALESCE(pp.play_count, 0), COALESCE(pp.last_played_at, ''),
 	       l.created_at, l.updated_at,
@@ -203,7 +203,7 @@ func scanLessonWithContext(rows *sql.Rows) (LessonWithContext, error) {
 	var item LessonWithContext
 	var playedInt int
 	err := rows.Scan(
-		&item.ID, &item.CourseID, &item.ChapterID, &item.MediaFileID, &item.Title, &item.Overview, &item.SortOrder, &item.CoverPath,
+		&item.ID, &item.CourseID, &item.ChapterID, &item.MediaFileID, &item.SourceID, &item.Title, &item.Overview, &item.SortOrder, &item.CoverPath,
 		&item.DurationMs, &item.Container, &item.VideoCodec, &item.AudioCodec, &item.Width, &item.Height, &item.Bitrate, &item.ThumbnailPath, &item.MediaStatus,
 		&item.PositionTicks, &playedInt, &item.PlayCount, &item.LastPlayedAt,
 		&item.CreatedAt, &item.UpdatedAt,

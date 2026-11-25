@@ -829,6 +829,132 @@ describe('CourseEditorPage', () => {
       expect(screen.getByTestId('library-counts')).toHaveTextContent('lib-1:0,lib-2:0');
     });
   });
+
+  it('opens manual subtitle binding modal for a lesson, binds an unmatched subtitle, and unbinds a bound subtitle', async () => {
+    let currentCourse: CourseDetail = structuredClone(sampleCourse);
+    currentCourse.chapters[0].lessons[0].source_id = 'src-1';
+
+    let indexedSubtitles = [
+      {
+        id: 'sub-1',
+        source_id: 'src-1',
+        media_file_id: 'mf-1',
+        relative_path: 'go/01_intro.zh.srt',
+        file_name: '01_intro.zh.srt',
+        language: 'zh',
+        title: '简体中文',
+        format: 'srt',
+        is_default: true,
+        manually_bound: false,
+        status: 'active' as const,
+      },
+      {
+        id: 'sub-2',
+        source_id: 'src-1',
+        media_file_id: '',
+        relative_path: 'go/Subs/01_intro_english.srt',
+        file_name: '01_intro_english.srt',
+        language: 'en',
+        title: 'English',
+        format: 'srt',
+        is_default: false,
+        manually_bound: false,
+        status: 'active' as const,
+      },
+    ];
+
+    const bindCalls: Array<{ subId: string; body: Record<string, unknown> }> = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/api/v1/courses/course-1') && method === 'GET') {
+          return jsonResponse(structuredClone(currentCourse));
+        }
+        if (url.endsWith('/api/v1/libraries') && method === 'GET') {
+          return jsonResponse({ libraries: sampleLibraries });
+        }
+        if (url.includes('/api/v1/sources/src-1/subtitles') && method === 'GET') {
+          const parsedUrl = new URL(url, 'http://localhost');
+          const onlyUnmatched = parsedUrl.searchParams.get('unmatched') === 'true';
+          const list = onlyUnmatched
+            ? indexedSubtitles.filter((s) => !s.media_file_id)
+            : indexedSubtitles;
+          return jsonResponse({ subtitles: list });
+        }
+        const bindMatch = url.match(/\/api\/v1\/subtitles\/([^/]+)\/bind$/);
+        if (bindMatch && method === 'PUT') {
+          const subId = bindMatch[1];
+          const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+          bindCalls.push({ subId, body });
+
+          const targetMediaId =
+            typeof body.media_file_id === 'string' ? body.media_file_id : '';
+          indexedSubtitles = indexedSubtitles.map((s) =>
+            s.id === subId
+              ? { ...s, media_file_id: targetMediaId, manually_bound: true }
+              : s,
+          );
+          currentCourse.chapters[0].lessons[0].subtitles = indexedSubtitles
+            .filter((s) => s.media_file_id === 'mf-1')
+            .map((s) => ({
+              id: s.id,
+              language: s.language,
+              title: s.title,
+              format: s.format,
+              is_default: s.is_default,
+              status: s.status,
+            }));
+          const updated = indexedSubtitles.find((s) => s.id === subId);
+          return jsonResponse(updated);
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={['/courses/course-1/edit']}>
+        <Routes>
+          <Route path="/courses/:courseId/edit" element={<CourseEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByLabelText(/课程标题/);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: '管理课时字幕 01_intro.mp4' }));
+
+    const dialog = await screen.findByRole('dialog', { name: /管理课时字幕/ });
+    expect(dialog.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
+
+    // Displays bound subtitle and unmatched subtitle
+    expect(await within(dialog).findByText('01_intro_english.srt')).toBeInTheDocument();
+    expect(within(dialog).getByText(/简体中文/)).toBeInTheDocument();
+
+    // Bind the unmatched subtitle to mf-1
+    await user.click(within(dialog).getByRole('button', { name: '绑定到本节' }));
+    await waitFor(() => {
+      expect(bindCalls).toHaveLength(1);
+      expect(bindCalls[0]).toEqual({ subId: 'sub-2', body: { media_file_id: 'mf-1' } });
+    });
+
+    // Newly bound subtitle chip should show up in CourseEditorPage
+    await waitFor(() => {
+      expect(screen.getByText(/English \(srt\)/)).toBeInTheDocument();
+    });
+
+    // Unbind sub-1
+    const unbindBtns = within(dialog).getAllByRole('button', { name: '解绑' });
+    await user.click(unbindBtns[0]);
+    await waitFor(() => {
+      expect(bindCalls).toHaveLength(2);
+      expect(bindCalls[1]).toEqual({ subId: 'sub-1', body: { media_file_id: null } });
+    });
+  });
 });
 
 describe('StoragePage & SettingsPage', () => {

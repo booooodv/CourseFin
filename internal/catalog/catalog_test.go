@@ -697,3 +697,227 @@ func TestDeleteLibraryWithOptions(t *testing.T) {
 		t.Fatalf("expected media_file intact after force library delete, got %v", err)
 	}
 }
+
+func TestListAndBindSubtitles(t *testing.T) {
+	ctx := context.Background()
+	svc, conn, _ := setupTestCatalog(t)
+	mediaRoot := t.TempDir()
+
+	src, err := svc.CreateSource(ctx, "SubSrc", "local", mediaRoot)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	mfID := seedMediaFile(t, conn, src.ID, "Course/01_intro.mp4", 60000)
+
+	subID := id.New()
+	if _, err := conn.Exec(`
+		INSERT INTO subtitle_files (id, source_id, relative_path, media_file_id, language, title, format, is_default, status)
+		VALUES (?, ?, 'Course/custom_sub.srt', NULL, 'und', '', 'srt', 0, 'active')`,
+		subID, src.ID,
+	); err != nil {
+		t.Fatalf("insert unmatched subtitle: %v", err)
+	}
+
+	course, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{Title: "Sub Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse: %v", err)
+	}
+	lesson, err := svc.AddLesson(ctx, course.Chapters[0].ID, mfID, "Intro")
+	if err != nil {
+		t.Fatalf("AddLesson: %v", err)
+	}
+	if lesson.SourceID != src.ID {
+		t.Fatalf("GetLesson SourceID = %q, want %q", lesson.SourceID, src.ID)
+	}
+	detail, err := svc.GetCourseDetail(ctx, course.ID)
+	if err != nil {
+		t.Fatalf("GetCourseDetail: %v", err)
+	}
+	if detail.Chapters[0].Lessons[0].SourceID != src.ID {
+		t.Fatalf("GetCourseDetail lesson SourceID = %q, want %q", detail.Chapters[0].Lessons[0].SourceID, src.ID)
+	}
+
+	unmatchedTrue := true
+	subs, err := svc.ListSourceSubtitles(ctx, src.ID, "", "", &unmatchedTrue)
+	if err != nil {
+		t.Fatalf("ListSourceSubtitles: %v", err)
+	}
+	if len(subs) != 1 || subs[0].ID != subID || subs[0].FileName != "custom_sub.srt" {
+		t.Fatalf("unexpected unmatched subs: %+v", subs)
+	}
+
+	// Bind subtitle manually
+	titleZh := "中文字幕"
+	langZh := "zh"
+	isDef := true
+	bound, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{
+		MediaFileID: &mfID,
+		Title:       &titleZh,
+		Language:    &langZh,
+		IsDefault:   &isDef,
+	})
+	if err != nil {
+		t.Fatalf("BindSubtitle: %v", err)
+	}
+	if bound.MediaFileID != mfID || !bound.ManuallyBound || bound.Title != "中文字幕" || bound.Language != "zh" || !bound.IsDefault {
+		t.Fatalf("unexpected bound subtitle: %+v", bound)
+	}
+
+	lessonAfter, err := svc.GetLesson(ctx, lesson.ID)
+	if err != nil {
+		t.Fatalf("GetLesson after bind: %v", err)
+	}
+	if len(lessonAfter.Subtitles) != 1 || lessonAfter.Subtitles[0].ID != subID {
+		t.Fatalf("expected lesson to include bound subtitle, got %+v", lessonAfter.Subtitles)
+	}
+
+	// Unbind keeps manually_bound = true so scanner will not silently re-attach
+	empty := ""
+	unbound, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{
+		MediaFileID: &empty,
+	})
+	if err != nil {
+		t.Fatalf("BindSubtitle unbind: %v", err)
+	}
+	if unbound.MediaFileID != "" || !unbound.ManuallyBound {
+		t.Fatalf("expected unbound with manually_bound=true, got %+v", unbound)
+	}
+
+	// ResetAuto returns subtitle to auto-match pool (manually_bound = false)
+	reset, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{
+		ResetAuto: true,
+	})
+	if err != nil {
+		t.Fatalf("BindSubtitle reset_auto: %v", err)
+	}
+	if reset.MediaFileID != "" || reset.ManuallyBound {
+		t.Fatalf("expected reset_auto with manually_bound=false, got %+v", reset)
+	}
+}
+
+func TestStorageAssignmentCountsAndMultiCourseDedup(t *testing.T) {
+	ctx := context.Background()
+	svc, conn, _ := setupTestCatalog(t)
+	mediaRoot := t.TempDir()
+
+	src, err := svc.CreateSource(ctx, "AssignSrc", "local", mediaRoot)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	mf1 := seedMediaFile(t, conn, src.ID, "DirA/01.mp4", 60000)
+	mf2 := seedMediaFile(t, conn, src.ID, "DirA/02.mp4", 60000)
+	mf3 := seedMediaFile(t, conn, src.ID, "DirB/03.mp4", 60000)
+
+	c1, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{Title: "Beta Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse c1: %v", err)
+	}
+	c2, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{Title: "Alpha Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse c2: %v", err)
+	}
+	// Assign mf1 to BOTH courses to test deduplication
+	if _, err := svc.AddLesson(ctx, c1.Chapters[0].ID, mf1, "L1"); err != nil {
+		t.Fatalf("AddLesson c1: %v", err)
+	}
+	if _, err := svc.AddLesson(ctx, c2.Chapters[0].ID, mf1, "L1 copy"); err != nil {
+		t.Fatalf("AddLesson c2: %v", err)
+	}
+
+	gotSrc, err := svc.GetSource(ctx, src.ID)
+	if err != nil {
+		t.Fatalf("GetSource: %v", err)
+	}
+	if gotSrc.MediaCount != 3 || gotSrc.AssignedCount != 1 || gotSrc.UnassignedCount != 2 {
+		t.Fatalf("GetSource counts = media:%d assigned:%d unassigned:%d, want 3/1/2", gotSrc.MediaCount, gotSrc.AssignedCount, gotSrc.UnassignedCount)
+	}
+	sources, err := svc.ListSources(ctx)
+	if err != nil {
+		t.Fatalf("ListSources: %v", err)
+	}
+	if len(sources) != 1 || sources[0].AssignedCount != 1 || sources[0].UnassignedCount != 2 {
+		t.Fatalf("ListSources counts = %+v, want 3/1/2", sources)
+	}
+
+	dirs, err := svc.ListIndexedDirs(ctx, src.ID, "")
+	if err != nil {
+		t.Fatalf("ListIndexedDirs: %v", err)
+	}
+	if len(dirs) != 2 {
+		t.Fatalf("expected 2 dirs, got %+v", dirs)
+	}
+	dirA, dirB := dirs[0], dirs[1]
+	if dirA.Name != "DirA" || dirA.FileCount != 2 || dirA.AssignedCount != 1 || dirA.UnassignedCount != 1 {
+		t.Fatalf("unexpected DirA: %+v", dirA)
+	}
+	if len(dirA.Courses) != 2 || dirA.Courses[0].Title != "Alpha Course" || dirA.Courses[1].Title != "Beta Course" {
+		t.Fatalf("unexpected DirA.Courses: %+v", dirA.Courses)
+	}
+	if dirB.Name != "DirB" || dirB.FileCount != 1 || dirB.AssignedCount != 0 || dirB.UnassignedCount != 1 || dirB.Courses == nil || len(dirB.Courses) != 0 {
+		t.Fatalf("unexpected DirB: %+v", dirB)
+	}
+
+	allFiles, err := svc.ListMediaFilesWithAssigned(ctx, src.ID, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ListMediaFilesWithAssigned all: %v", err)
+	}
+	if len(allFiles) != 3 {
+		t.Fatalf("expected 3 files, got %d", len(allFiles))
+	}
+	if !allFiles[0].Assigned || len(allFiles[0].Courses) != 2 || allFiles[1].Assigned || allFiles[2].Assigned {
+		t.Fatalf("unexpected file assignment flags: %+v", allFiles)
+	}
+
+	assignedOnly, err := svc.ListMediaFilesWithAssigned(ctx, src.ID, "", "", "", "true")
+	if err != nil {
+		t.Fatalf("ListMediaFilesWithAssigned true: %v", err)
+	}
+	if len(assignedOnly) != 1 || assignedOnly[0].ID != mf1 {
+		t.Fatalf("expected only mf1, got %+v", assignedOnly)
+	}
+
+	unassignedOnly, err := svc.ListMediaFilesWithAssigned(ctx, src.ID, "", "", "", "false")
+	if err != nil {
+		t.Fatalf("ListMediaFilesWithAssigned false: %v", err)
+	}
+	if len(unassignedOnly) != 2 || unassignedOnly[0].ID != mf2 || unassignedOnly[1].ID != mf3 {
+		t.Fatalf("expected mf2 and mf3, got %+v", unassignedOnly)
+	}
+}
+
+func TestBindSubtitleRejectsCrossSourceOrMissingMediaFile(t *testing.T) {
+	ctx := context.Background()
+	svc, conn, _ := setupTestCatalog(t)
+
+	srcA, err := svc.CreateSource(ctx, "SrcA", "local", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateSource A: %v", err)
+	}
+	srcB, err := svc.CreateSource(ctx, "SrcB", "local", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateSource B: %v", err)
+	}
+	mfA := seedMediaFile(t, conn, srcA.ID, "a.mp4", 60000)
+	mfB := seedMediaFile(t, conn, srcB.ID, "b.mp4", 60000)
+
+	// Mark mfA missing
+	if _, err := conn.Exec(`UPDATE media_files SET status = 'missing' WHERE id = ?`, mfA); err != nil {
+		t.Fatalf("mark mfA missing: %v", err)
+	}
+
+	subID := "sub00000000000000000000000000099"
+	if _, err := conn.Exec(
+		`INSERT INTO subtitle_files (id, source_id, media_file_id, relative_path, language, title, format, is_default, manually_bound, status)
+		 VALUES (?, ?, NULL, 'a.srt', 'zh', '中文', 'srt', 0, 0, 'active')`,
+		subID, srcA.ID,
+	); err != nil {
+		t.Fatalf("insert subtitle: %v", err)
+	}
+
+	if _, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{MediaFileID: &mfB}); !errors.Is(err, catalog.ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for cross-source bind, got %v", err)
+	}
+	if _, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{MediaFileID: &mfA}); !errors.Is(err, catalog.ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for missing media_file bind, got %v", err)
+	}
+}

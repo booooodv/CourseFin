@@ -1,25 +1,25 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Circle,
   Clock,
   ListVideo,
   Loader2,
   PanelRightClose,
   PanelRightOpen,
   Pencil,
-  Play,
   SkipBack,
   SkipForward,
 } from 'lucide-react';
 import { api, itemPrimaryImageUrl } from '../api/client';
+import LessonProgressIcon from '../components/LessonProgressIcon';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import VideoPlayer from '../components/VideoPlayer';
+import { detectBrowserVideoCodecs } from '../utils/mediaCapabilities';
 import type {
   CourseDetail,
   LessonDetail,
@@ -135,8 +135,16 @@ export default function CourseDetailPage() {
   const [loadingPlayback, setLoadingPlayback] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [playbackRetryNonce, setPlaybackRetryNonce] = useState(0);
+  const [forceTranscodeLessonId, setForceTranscodeLessonId] = useState<string | null>(null);
+  const fallbackRequestedForRef = useRef<string | null>(null);
+  const [activeLiveProgress, setActiveLiveProgress] = useState<{
+    lessonId: string;
+    ratio: number;
+  } | null>(null);
   const [togglingPlayed, setTogglingPlayed] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const browserCodecs = useMemo(() => detectBrowserVideoCodecs(), []);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [collapsedChapters, setCollapsedChapters] = useState<Record<string, boolean>>({});
@@ -148,6 +156,9 @@ export default function CourseDetailPage() {
     setCoverFailed(false);
     setActiveLessonId(null);
     setPlayback(null);
+    setForceTranscodeLessonId(null);
+    fallbackRequestedForRef.current = null;
+    setActiveLiveProgress(null);
     try {
       const data = await api.getCourse(courseId);
       setCourse(data);
@@ -210,8 +221,12 @@ export default function CourseDetailPage() {
     setLoadingPlayback(true);
     setPlaybackError(null);
 
+    const forceTranscode = forceTranscodeLessonId === activeLessonId;
     api
-      .getLessonPlayback(activeLessonId)
+      .getLessonPlayback(activeLessonId, {
+        codecs: browserCodecs,
+        forceTranscode,
+      })
       .then((info) => {
         if (!cancelled) {
           setPlayback(info);
@@ -232,11 +247,16 @@ export default function CourseDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeLessonId, playbackRetryNonce]);
+  }, [activeLessonId, playbackRetryNonce, forceTranscodeLessonId, browserCodecs]);
 
   const selectLesson = useCallback(
     (lessonId: string) => {
       setActiveLessonId(lessonId);
+      if (fallbackRequestedForRef.current !== lessonId) {
+        fallbackRequestedForRef.current = null;
+      }
+      setForceTranscodeLessonId((prev) => (prev === lessonId ? prev : null));
+      setActiveLiveProgress(null);
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -249,7 +269,25 @@ export default function CourseDetailPage() {
     [setSearchParams],
   );
 
+  const handleRequestTranscodeFallback = useCallback(() => {
+    if (!activeLessonId) return;
+    if (fallbackRequestedForRef.current === activeLessonId) return;
+    fallbackRequestedForRef.current = activeLessonId;
+    toast.info('浏览器无法直接解码该视频，已自动切换为兼容转码模式');
+    setForceTranscodeLessonId(activeLessonId);
+  }, [activeLessonId, toast]);
+
+  const handleTimeProgress = useCallback(
+    (lessonId: string, currentSec: number, durationSec: number) => {
+      if (durationSec <= 0) return;
+      const ratio = Math.min(1, Math.max(0, currentSec / durationSec));
+      setActiveLiveProgress({ lessonId, ratio });
+    },
+    [],
+  );
+
   const handleProgressSaved = useCallback((progress: ProgressResponse) => {
+    setActiveLiveProgress((prev) => (prev?.lessonId === progress.lesson_id ? null : prev));
     setCourse((prev) => (prev ? applyLessonProgressToCourse(prev, progress.lesson_id, progress) : prev));
     setPlayback((prev) =>
       prev && prev.lesson_id === progress.lesson_id
@@ -439,6 +477,8 @@ export default function CourseDetailPage() {
               lessonTitle={activeEntry?.lesson.title}
               onProgressSaved={handleProgressSaved}
               onEnded={handleVideoEnded}
+              onTimeProgress={handleTimeProgress}
+              onRequestTranscodeFallback={handleRequestTranscodeFallback}
             />
           ) : null}
 
@@ -631,6 +671,16 @@ export default function CourseDetailPage() {
                       <ul className="divide-y divide-subtle bg-card">
                         {lessons.map((lesson) => {
                           const isActive = lesson.id === activeLessonId;
+                          const baseRatio =
+                            lesson.duration_ms > 0
+                              ? lesson.position_ticks / (lesson.duration_ms * 10_000)
+                              : 0;
+                          const progressRatio =
+                            isActive &&
+                            !lesson.played &&
+                            activeLiveProgress?.lessonId === lesson.id
+                              ? activeLiveProgress.ratio
+                              : baseRatio;
                           return (
                             <li key={lesson.id}>
                               <button
@@ -650,13 +700,11 @@ export default function CourseDetailPage() {
                                   />
                                 )}
                                 <span className="mt-0.5 shrink-0">
-                                  {lesson.played ? (
-                                    <CheckCircle2 className="h-4 w-4 text-status-success" />
-                                  ) : isActive ? (
-                                    <Play className="h-4 w-4 text-accent fill-current" />
-                                  ) : (
-                                    <Circle className="h-4 w-4 text-ink-muted/60" />
-                                  )}
+                                  <LessonProgressIcon
+                                    played={lesson.played}
+                                    progressRatio={progressRatio}
+                                    isActive={isActive}
+                                  />
                                 </span>
                                 <span className="flex-1 min-w-0">
                                   <span
