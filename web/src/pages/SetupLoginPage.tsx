@@ -1,8 +1,9 @@
 import type { FormEvent } from 'react';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { GraduationCap, Loader2, Lock, Server, ShieldCheck, User } from 'lucide-react';
+import { Loader2, Lock, Server, ShieldCheck, User } from 'lucide-react';
 import { ApiError, api, setToken } from '../api/client';
+import CourseFinLogo from '../components/CourseFinLogo';
 import ThemeSwitcher from '../components/ThemeSwitcher';
 
 const ICON_FIELD_INPUT_CLASS =
@@ -100,9 +101,7 @@ export default function SetupLoginPage() {
 
       <div className="relative w-full max-w-md rounded-3xl border border-subtle bg-card p-8 sm:p-10 shadow-float">
         <div className="flex flex-col items-center text-center mb-7">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-blue-400 text-ink-inverse shadow-accent mb-4">
-            <GraduationCap className="h-6 w-6" />
-          </div>
+          <CourseFinLogo className="h-12 w-12 shadow-accent mb-4" />
           <h1 className="text-2xl font-bold tracking-tight text-ink-primary">
             {checking
               ? '正在连接 CourseFin'

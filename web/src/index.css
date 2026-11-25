@@ -26,6 +26,10 @@
   --accent-ring: rgba(30, 136, 229, 0.28);
   --accent-ink: #1565C0;
 
+  --logo-tile-start: #1565C0;
+  --logo-tile-mid: #1E88E5;
+  --logo-tile-end: #29B6F6;
+
   --status-success: #047857;
   --status-success-soft: rgba(16, 185, 129, 0.12);
   --status-success-ink: #047857;
@@ -73,6 +77,10 @@
   --accent-soft: rgba(59, 130, 246, 0.16);
   --accent-ring: rgba(59, 130, 246, 0.36);
   --accent-ink: #60A5FA;
+
+  --logo-tile-start: #1D4ED8;
+  --logo-tile-mid: #3B82F6;
+  --logo-tile-end: #38BDF8;
 
   --status-success: #047857;
   --status-success-soft: rgba(16, 185, 129, 0.16);

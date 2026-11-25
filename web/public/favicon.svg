@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="cf-tile" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1565C0"/>
+      <stop offset="52%" stop-color="#1E88E5"/>
+      <stop offset="100%" stop-color="#29B6F6"/>
+    </linearGradient>
+    <radialGradient id="cf-glow" cx="25%" cy="18%" r="72%">
+      <stop offset="0%" stop-color="#BAE6FD" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cf-deep" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BAE6FD"/>
+      <stop offset="100%" stop-color="#E0F2FE"/>
+    </linearGradient>
+    <linearGradient id="cf-mid" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E0F2FE"/>
+      <stop offset="100%" stop-color="#F0F9FF"/>
+    </linearGradient>
+    <linearGradient id="cf-top" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F0F9FF"/>
+    </linearGradient>
+    <clipPath id="cf-clip">
+      <path d="M 15.8 16.5 C 15.8 11.8, 20.9 8.8, 25.0 11.2 L 51.4 26.7 C 55.4 29.0, 55.4 35.0, 51.4 37.3 L 25.0 52.8 C 20.9 55.2, 15.8 52.2, 15.8 47.5 Z"/>
+    </clipPath>
+  </defs>
+  <rect x="0" y="0" width="64" height="64" rx="16" fill="url(#cf-tile)"/>
+  <rect x="0" y="0" width="64" height="64" rx="16" fill="url(#cf-glow)"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="15.25" stroke="#FFFFFF" stroke-opacity="0.2" stroke-width="1.5"/>
+  <g transform="translate(8, 8) scale(0.75)">
+    <g clip-path="url(#cf-clip)">
+      <rect x="8" y="8" width="50" height="48" fill="url(#cf-deep)" opacity="0.46"/>
+      <path d="M 18 8 L 58 8 L 58 32 L 29.5 32 Z" fill="url(#cf-top)" opacity="0.98"/>
+      <path d="M 18 56 L 29.5 32 L 58 32 L 58 56 Z" fill="url(#cf-mid)" opacity="0.74"/>
+      <path d="M 29.5 24.4 Q 30.5 31.0 37.1 32.0 Q 30.5 33.0 29.5 39.6 Q 28.5 33.0 21.9 32.0 Q 28.5 31.0 29.5 24.4 Z" fill="#FFFFFF" opacity="0.96"/>
+    </g>
+  </g>
+</svg>

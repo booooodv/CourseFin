@@ -13,7 +13,6 @@ import {
   BookOpen,
   Folder,
   FolderInput,
-  GraduationCap,
   LogOut,
   Menu,
   PanelLeftClose,
@@ -31,6 +30,7 @@ import {
   type LibraryContextValue,
 } from '../contexts/LibraryContext';
 import type { Library } from '../types/coursefin';
+import CourseFinLogo from './CourseFinLogo';
 import DeleteLibraryModal, { type DeleteLibraryMode } from './DeleteLibraryModal';
 import LibraryFormModal from './LibraryFormModal';
 import ThemeSwitcher from './ThemeSwitcher';
@@ -131,9 +131,7 @@ function SidebarContent({
               : 'group flex min-w-0 items-center gap-2.5'
           }
         >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-sky-500 text-ink-inverse shadow-accent transition-transform group-hover:scale-105">
-            <GraduationCap className="h-5 w-5" />
-          </span>
+          <CourseFinLogo className="h-9 w-9 shadow-accent transition-transform group-hover:scale-105" />
           {!collapsed && (
             <span className="truncate text-base font-bold tracking-tight text-ink-primary">
               CourseFin
@@ -672,9 +670,7 @@ export default function Layout({ children }: LayoutProps): JSX.Element {
           </button>
 
           <Link to="/" className="flex items-center gap-2 group">
-            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-sky-500 text-ink-inverse shadow-accent">
-              <GraduationCap className="h-4 w-4" />
-            </span>
+            <CourseFinLogo className="h-8 w-8 shadow-accent transition-transform group-hover:scale-105" />
             <span className="text-base font-bold tracking-tight text-ink-primary">CourseFin</span>
           </Link>
         </div>

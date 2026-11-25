@@ -242,6 +242,11 @@ func buildTopHandler(apiHandler, jfHandler http.Handler, webSubFS fs.FS, version
 			return
 		}
 
+		if (reqPath == "/favicon.ico" || reqPath == "/favicon.svg") && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			serveFaviconSVG(w, r, webSubFS)
+			return
+		}
+
 		if reqPath == "/web" {
 			http.Redirect(w, r, "/web/", http.StatusFound)
 			return
@@ -298,6 +303,17 @@ func serveIndexHTML(w http.ResponseWriter, r *http.Request, webSubFS fs.FS) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(raw))
+}
+
+func serveFaviconSVG(w http.ResponseWriter, r *http.Request, webSubFS fs.FS) {
+	raw, err := fs.ReadFile(webSubFS, "favicon.svg")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeContent(w, r, "favicon.svg", time.Time{}, bytes.NewReader(raw))
 }
 
 func isMissingStaticAsset(cleaned string) bool {

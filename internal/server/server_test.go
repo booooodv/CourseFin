@@ -76,6 +76,28 @@ func TestServerRoutingNoCollisionBetweenWebAPIAndJellyfin(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(strings.ToLower(string(webBody)), "<html") {
 		t.Fatalf("GET /web/ = %d %s, want 200 HTML", resp.StatusCode, webBody)
 	}
+	if !strings.Contains(string(webBody), "/web/favicon.svg") {
+		t.Fatalf("GET /web/ HTML missing /web/favicon.svg link: %s", webBody)
+	}
+
+	// 3b. GET /web/favicon.svg, /favicon.svg, and /favicon.ico -> 200 SVG
+	for _, favPath := range []string{"/web/favicon.svg", "/favicon.svg", "/favicon.ico"} {
+		resp, err = http.Get(ts.URL + favPath)
+		if err != nil {
+			t.Fatalf("GET %s: %v", favPath, err)
+		}
+		favBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200", favPath, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "image/svg+xml") {
+			t.Fatalf("GET %s Content-Type = %q, want image/svg+xml", favPath, ct)
+		}
+		if !strings.Contains(string(favBody), "<svg") {
+			t.Fatalf("GET %s body does not look like SVG: %s", favPath, favBody)
+		}
+	}
 
 	// 4. GET /web/courses/abc -> SPA fallback serves index.html
 	resp, err = http.Get(ts.URL + "/web/courses/abc")
@@ -363,5 +385,55 @@ func TestHealthReturnsVersionAndBootID(t *testing.T) {
 	}
 	if updStatus.CurrentVersion != "1.2.3" || updStatus.State != "idle" {
 		t.Fatalf("unexpected wired updater status: %+v", updStatus)
+	}
+}
+
+func TestServerServesFaviconAssets(t *testing.T) {
+	srv, err := server.New(config.Config{
+		Port:     "0",
+		DataDir:  t.TempDir(),
+		LogLevel: "error",
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	defer func() {
+		if err := srv.Close(); err != nil {
+			t.Fatalf("srv.Close: %v", err)
+		}
+	}()
+
+	// Verify /web/ index.html links to /web/favicon.svg
+	webRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(webRec, httptest.NewRequest(http.MethodGet, "/web/", nil))
+	if webRec.Code != http.StatusOK {
+		t.Fatalf("GET /web/ status = %d, want 200", webRec.Code)
+	}
+	if !strings.Contains(webRec.Body.String(), "/web/favicon.svg") {
+		t.Fatalf("GET /web/ HTML missing /web/favicon.svg link")
+	}
+
+	// Verify GET & HEAD for /web/favicon.svg, /favicon.svg, and /favicon.ico
+	for _, favPath := range []string{"/web/favicon.svg", "/favicon.svg", "/favicon.ico"} {
+		getRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, favPath, nil))
+		if getRec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", favPath, getRec.Code)
+		}
+		if ct := getRec.Header().Get("Content-Type"); !strings.Contains(ct, "image/svg+xml") {
+			t.Fatalf("GET %s Content-Type = %q, want image/svg+xml", favPath, ct)
+		}
+		if !strings.Contains(getRec.Body.String(), "<svg") {
+			t.Fatalf("GET %s body does not contain <svg", favPath)
+		}
+
+		headRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(headRec, httptest.NewRequest(http.MethodHead, favPath, nil))
+		if headRec.Code != http.StatusOK {
+			t.Fatalf("HEAD %s status = %d, want 200", favPath, headRec.Code)
+		}
+		if headRec.Body.Len() != 0 {
+			t.Fatalf("HEAD %s expected empty body, got %d bytes", favPath, headRec.Body.Len())
+		}
 	}
 }

@@ -1102,4 +1102,52 @@ describe('LibraryContext, Layout AppShell, & AppRoutes', () => {
     expect(courseNavLink.className).not.toContain('bg-accent-soft');
     expect(devLibGroup.className).toContain('bg-accent-soft');
   });
+
+  it('renders the CourseFin SVG logo in Layout (sidebar + mobile header) with unique SVG defs IDs and in SetupLoginPage', async () => {
+    const { unmount } = render(
+      <ToastProvider>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/']}>
+            <Layout>
+              <div>content</div>
+            </Layout>
+          </MemoryRouter>
+        </ThemeProvider>
+      </ToastProvider>,
+    );
+
+    const logos = screen.getAllByTestId('coursefin-logo');
+    expect(logos.length).toBeGreaterThanOrEqual(2);
+
+    const defIds = logos.flatMap((svg) =>
+      Array.from(svg.querySelectorAll('defs [id]')).map((el) => el.getAttribute('id')),
+    );
+    expect(defIds.length).toBeGreaterThan(0);
+    expect(new Set(defIds).size).toBe(defIds.length);
+    unmount();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/v1/setup/status') {
+          return jsonResponse({ needs_setup: false });
+        }
+        return jsonResponse({ error: 'not found' }, 404);
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/login']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/登录 CourseFin/)).toBeInTheDocument();
+    expect(screen.getByTestId('coursefin-logo')).toBeInTheDocument();
+  });
 });
