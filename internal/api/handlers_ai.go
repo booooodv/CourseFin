@@ -16,6 +16,7 @@ import (
 	"coursefin/internal/catalog"
 	"coursefin/internal/id"
 	"coursefin/internal/media"
+	"coursefin/internal/summary"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -36,6 +37,13 @@ type settingsPayload struct {
 	AIAPIKeySet         bool   `json:"ai_api_key_set"`
 	AIModel             string `json:"ai_model"`
 	AIMaxSubtitleChars  int    `json:"ai_max_subtitle_chars"`
+	AIASRBaseURL        string `json:"ai_asr_base_url"`
+	AIASRAPIKey         string `json:"ai_asr_api_key"`
+	AIASRAPIKeySet      bool   `json:"ai_asr_api_key_set"`
+	AIASRModel          string `json:"ai_asr_model"`
+	AIASRLanguage       string `json:"ai_asr_language"`
+	AIConfigured        bool   `json:"ai_configured"`
+	AIASRConfigured     bool   `json:"ai_asr_configured"`
 }
 
 func (h *handler) loadSettingsMap(ctx context.Context) (map[string]string, error) {
@@ -74,17 +82,17 @@ func (h *handler) buildSettingsResponse(ctx context.Context) (*settingsPayload, 
 		}
 	}
 
-	maxSubChars := ai.DefaultMaxSubtitleChars
-	if raw := strings.TrimSpace(m["ai_max_subtitle_chars"]); raw != "" {
-		if v, convErr := strconv.Atoi(raw); convErr == nil && v >= 0 {
-			maxSubChars = v
-		}
+	resolved := summary.ResolveEffectiveSettings(m)
+
+	maskedKey := ""
+	if resolved.AI.APIKey != "" {
+		maskedKey = maskedAPIKeyPlaceholder
 	}
 
-	rawKey := strings.TrimSpace(m["ai_api_key"])
-	maskedKey := ""
-	if rawKey != "" {
-		maskedKey = maskedAPIKeyPlaceholder
+	rawASRKey := strings.TrimSpace(m["ai_asr_api_key"])
+	maskedASRKey := ""
+	if rawASRKey != "" {
+		maskedASRKey = maskedAPIKeyPlaceholder
 	}
 
 	jfUsername := ""
@@ -97,11 +105,18 @@ func (h *handler) buildSettingsResponse(ctx context.Context) (*settingsPayload, 
 		ScanIntervalMinutes: scanInterval,
 		BaseURLHint:         h.baseURLHint,
 		JellyfinUsername:    jfUsername,
-		AIBaseURL:           strings.TrimSpace(m["ai_base_url"]),
+		AIBaseURL:           resolved.AI.BaseURL,
 		AIAPIKey:            maskedKey,
-		AIAPIKeySet:         rawKey != "",
-		AIModel:             strings.TrimSpace(m["ai_model"]),
-		AIMaxSubtitleChars:  maxSubChars,
+		AIAPIKeySet:         resolved.AI.APIKey != "",
+		AIModel:             resolved.AI.Model,
+		AIMaxSubtitleChars:  resolved.AI.MaxSubtitleChars,
+		AIASRBaseURL:        strings.TrimSpace(m["ai_asr_base_url"]),
+		AIASRAPIKey:         maskedASRKey,
+		AIASRAPIKeySet:      rawASRKey != "",
+		AIASRModel:          resolved.ASR.Model,
+		AIASRLanguage:       resolved.ASR.Language,
+		AIConfigured:        resolved.AIConfigured,
+		AIASRConfigured:     resolved.ASRConfigured,
 	}, nil
 }
 
@@ -110,18 +125,7 @@ func (h *handler) loadAIConfig(ctx context.Context) (ai.Config, error) {
 	if err != nil {
 		return ai.Config{}, err
 	}
-	maxSub := ai.DefaultMaxSubtitleChars
-	if raw := strings.TrimSpace(m["ai_max_subtitle_chars"]); raw != "" {
-		if v, convErr := strconv.Atoi(raw); convErr == nil && v >= 0 {
-			maxSub = v
-		}
-	}
-	return ai.Config{
-		BaseURL:          strings.TrimSpace(m["ai_base_url"]),
-		APIKey:           strings.TrimSpace(m["ai_api_key"]),
-		Model:            strings.TrimSpace(m["ai_model"]),
-		MaxSubtitleChars: maxSub,
-	}, nil
+	return summary.ResolveEffectiveSettings(m).AI, nil
 }
 
 func (h *handler) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +146,11 @@ func (h *handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		ClearAIAPIKey       bool    `json:"clear_ai_api_key"`
 		AIModel             *string `json:"ai_model"`
 		AIMaxSubtitleChars  *int    `json:"ai_max_subtitle_chars"`
+		AIASRBaseURL        *string `json:"ai_asr_base_url"`
+		AIASRAPIKey         *string `json:"ai_asr_api_key"`
+		ClearAIASRAPIKey    bool    `json:"clear_ai_asr_api_key"`
+		AIASRModel          *string `json:"ai_asr_model"`
+		AIASRLanguage       *string `json:"ai_asr_language"`
 	}
 	if err := decodeJSON(r, &req, false); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -167,15 +176,7 @@ func (h *handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.AIBaseURL != nil {
 		updates["ai_base_url"] = strings.TrimSpace(*req.AIBaseURL)
 	}
-	if req.ClearAIAPIKey {
-		updates["ai_api_key"] = ""
-	} else if req.AIAPIKey != nil {
-		k := strings.TrimSpace(*req.AIAPIKey)
-		// Preserve existing stored key when blank or equal to masked placeholder.
-		if k != "" && k != maskedAPIKeyPlaceholder {
-			updates["ai_api_key"] = k
-		}
-	}
+	applyOptionalAPIKeyUpdate(updates, "ai_api_key", req.AIAPIKey, req.ClearAIAPIKey)
 	if req.AIModel != nil {
 		updates["ai_model"] = strings.TrimSpace(*req.AIModel)
 	}
@@ -185,6 +186,16 @@ func (h *handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updates["ai_max_subtitle_chars"] = strconv.Itoa(*req.AIMaxSubtitleChars)
+	}
+	if req.AIASRBaseURL != nil {
+		updates["ai_asr_base_url"] = strings.TrimSpace(*req.AIASRBaseURL)
+	}
+	applyOptionalAPIKeyUpdate(updates, "ai_asr_api_key", req.AIASRAPIKey, req.ClearAIASRAPIKey)
+	if req.AIASRModel != nil {
+		updates["ai_asr_model"] = strings.TrimSpace(*req.AIASRModel)
+	}
+	if req.AIASRLanguage != nil {
+		updates["ai_asr_language"] = strings.TrimSpace(*req.AIASRLanguage)
 	}
 
 	if len(updates) > 0 {
@@ -887,6 +898,21 @@ func applyCourseChaptersTx(ctx context.Context, tx *sql.Tx, courseID string, cha
 		}
 	}
 	return nil
+}
+
+func applyOptionalAPIKeyUpdate(target map[string]string, key string, val *string, clear bool) {
+	if clear {
+		target[key] = ""
+		return
+	}
+	if val == nil {
+		return
+	}
+	k := strings.TrimSpace(*val)
+	// Preserve existing stored key when blank or equal to masked placeholder.
+	if k != "" && k != maskedAPIKeyPlaceholder {
+		target[key] = k
+	}
 }
 
 func firstNonEmpty(vals ...string) string {

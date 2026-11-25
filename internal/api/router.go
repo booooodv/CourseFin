@@ -15,6 +15,7 @@ import (
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
+	"coursefin/internal/summary"
 	"coursefin/internal/updater"
 
 	"github.com/go-chi/chi/v5"
@@ -42,6 +43,7 @@ type Deps struct {
 	Scanner      *scanner.Service
 	Catalog      *catalog.Service
 	Media        *media.Service
+	Summary      *summary.Service
 	Updater      *updater.Service
 	AIHTTPClient *http.Client
 	LifecycleCtx context.Context
@@ -56,6 +58,7 @@ type handler struct {
 	scanner      *scanner.Service
 	cat          *catalog.Service
 	media        *media.Service
+	summary      *summary.Service
 	updater      *updater.Service
 	aiHTTPClient *http.Client
 	lifecycleCtx context.Context
@@ -71,6 +74,17 @@ func NewHandler(deps Deps) http.Handler {
 	if lctx == nil {
 		lctx = context.Background()
 	}
+	sumSvc := deps.Summary
+	if sumSvc == nil && deps.DB != nil && deps.Catalog != nil && deps.Media != nil {
+		sumSvc = summary.NewService(summary.Options{
+			DB:           deps.DB,
+			DataDir:      deps.DataDir,
+			Catalog:      deps.Catalog,
+			Media:        deps.Media,
+			HTTPClient:   deps.AIHTTPClient,
+			LifecycleCtx: lctx,
+		})
+	}
 	h := &handler{
 		db:           deps.DB,
 		dataDir:      deps.DataDir,
@@ -80,6 +94,7 @@ func NewHandler(deps Deps) http.Handler {
 		scanner:      deps.Scanner,
 		cat:          deps.Catalog,
 		media:        deps.Media,
+		summary:      sumSvc,
 		updater:      deps.Updater,
 		aiHTTPClient: deps.AIHTTPClient,
 		lifecycleCtx: lctx,
@@ -155,9 +170,19 @@ func NewHandler(deps Deps) http.Handler {
 			pr.Get("/settings", h.handleGetSettings)
 			pr.Put("/settings", h.handleUpdateSettings)
 			pr.Post("/settings/ai/test", h.handleTestAI)
+			pr.Post("/settings/ai/asr/test", h.handleTestASR)
 			pr.Post("/courses/{id}/ai/organize", h.handleAIOrganize)
 			pr.Post("/courses/{id}/ai/apply", h.handleAIApply)
 			pr.Post("/import/ai/organize", h.handleImportAIOrganize)
+
+			// Lesson & course AI summaries
+			pr.Get("/lessons/{id}/summary", h.handleGetLessonSummary)
+			pr.Post("/lessons/{id}/summary/generate", h.handleGenerateLessonSummary)
+			pr.Post("/lessons/{id}/summary/cancel", h.handleCancelLessonSummary)
+			pr.Delete("/lessons/{id}/summary", h.handleDeleteLessonSummary)
+			pr.Get("/courses/{id}/summaries/status", h.handleGetCourseSummariesStatus)
+			pr.Post("/courses/{id}/summaries/generate", h.handleGenerateCourseSummaries)
+			pr.Post("/courses/{id}/summaries/cancel", h.handleCancelCourseSummaries)
 
 			// System updates
 			pr.Get("/system/update", h.handleGetUpdateStatus)

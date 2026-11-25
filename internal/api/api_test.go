@@ -36,6 +36,7 @@ import (
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
+	"coursefin/internal/summary"
 	"coursefin/internal/updater"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -2222,5 +2223,744 @@ func TestLessonPlayback10BitAnd444H264RoutesToTranscode(t *testing.T) {
 				t.Fatalf("%s expected Tier 3 transcode (hls, transcoding=true, TranscodeVideo=1), got %+v", tc.name, pb)
 			}
 		})
+	}
+}
+
+type apiRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f apiRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type apiRecorderEnv struct {
+	db       *sql.DB
+	dataDir  string
+	mediaDir string
+	registry *storage.Registry
+	authSvc  *auth.Service
+	scanSvc  *scanner.Service
+	catSvc   *catalog.Service
+	mediaSvc *media.Service
+	handler  http.Handler
+}
+
+func setupRecorderAPITestEnv(t *testing.T, rt http.RoundTripper) *apiRecorderEnv {
+	t.Helper()
+
+	dataDir := t.TempDir()
+	mediaDir := t.TempDir()
+
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	reg := storage.NewRegistry()
+	authSvc := auth.NewService(conn)
+	scanSvc := scanner.NewService(conn, dataDir, reg, &fakeProber{})
+	catSvc := catalog.NewService(conn, dataDir)
+	catSvc.SetRegistry(reg)
+	mediaSvc := media.NewService(conn, dataDir, reg, "")
+	t.Cleanup(func() { _ = mediaSvc.Close() })
+
+	lctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var aiClient *http.Client
+	if rt != nil {
+		aiClient = &http.Client{Transport: rt}
+	}
+
+	h := api.NewHandler(api.Deps{
+		DB:           conn,
+		DataDir:      dataDir,
+		BaseURLHint:  "http://localhost:8096",
+		Registry:     reg,
+		Auth:         authSvc,
+		Scanner:      scanSvc,
+		Catalog:      catSvc,
+		Media:        mediaSvc,
+		AIHTTPClient: aiClient,
+		LifecycleCtx: lctx,
+	})
+
+	return &apiRecorderEnv{
+		db:       conn,
+		dataDir:  dataDir,
+		mediaDir: mediaDir,
+		registry: reg,
+		authSvc:  authSvc,
+		scanSvc:  scanSvc,
+		catSvc:   catSvc,
+		mediaSvc: mediaSvc,
+		handler:  h,
+	}
+}
+
+func (e *apiRecorderEnv) doRecJSON(t *testing.T, method, reqPath string, body any, token string) (*httptest.ResponseRecorder, []byte) {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		r = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, reqPath, r)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	e.handler.ServeHTTP(rec, req)
+	return rec, rec.Body.Bytes()
+}
+
+func (e *apiRecorderEnv) loginAdmin(t *testing.T) string {
+	t.Helper()
+	if _, err := e.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := e.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "api-rec-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	return sess.Token
+}
+
+func TestSettingsASRFieldsMaskingAndClear(t *testing.T) {
+	env := setupRecorderAPITestEnv(t, nil)
+	token := env.loginAdmin(t)
+
+	// 1. Initial GET reports empty ASR fields and configured=false
+	rec, raw := env.doRecJSON(t, http.MethodGet, "/api/v1/settings", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial GET /settings = %d: %s", rec.Code, raw)
+	}
+	var initial map[string]any
+	if err := json.Unmarshal(raw, &initial); err != nil {
+		t.Fatalf("unmarshal initial settings: %v", err)
+	}
+	for _, boolKey := range []string{"ai_asr_api_key_set", "ai_configured", "ai_asr_configured"} {
+		v, exists := initial[boolKey]
+		if !exists || v != false {
+			t.Fatalf("expected %s=false in initial GET /settings, got %v (%s)", boolKey, v, raw)
+		}
+	}
+	for _, strKey := range []string{"ai_asr_base_url", "ai_asr_api_key", "ai_asr_model", "ai_asr_language"} {
+		v, exists := initial[strKey]
+		if !exists || v != "" {
+			t.Fatalf("expected %s=\"\" in initial GET /settings, got %v (%s)", strKey, v, raw)
+		}
+	}
+
+	// 2. PUT saves ASR fields and masks API key
+	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_asr_base_url": "https://whisper.local/v1",
+		"ai_asr_api_key":  "sk-asr-secret",
+		"ai_asr_model":    "whisper-1",
+		"ai_asr_language": "zh",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings ASR = %d: %s", rec.Code, raw)
+	}
+
+	rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/settings", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /settings after ASR save = %d: %s", rec.Code, raw)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("unmarshal saved settings: %v", err)
+	}
+	if saved["ai_asr_base_url"] != "https://whisper.local/v1" ||
+		saved["ai_asr_api_key"] != "****" ||
+		saved["ai_asr_api_key_set"] != true ||
+		saved["ai_asr_model"] != "whisper-1" ||
+		saved["ai_asr_language"] != "zh" ||
+		saved["ai_configured"] != false ||
+		saved["ai_asr_configured"] != true {
+		t.Fatalf("unexpected saved ASR settings: %s", raw)
+	}
+
+	// 3. Updating with masked placeholder preserves stored key
+	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_asr_api_key":  "****",
+		"ai_asr_language": "en",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings with masked key = %d: %s", rec.Code, raw)
+	}
+	var storedKey string
+	if err := env.db.QueryRow(`SELECT value FROM app_settings WHERE key = 'ai_asr_api_key'`).Scan(&storedKey); err != nil {
+		t.Fatalf("query stored ai_asr_api_key: %v", err)
+	}
+	if storedKey != "sk-asr-secret" {
+		t.Fatalf("expected preserved ai_asr_api_key='sk-asr-secret', got %q", storedKey)
+	}
+	var afterMask map[string]any
+	_ = json.Unmarshal(raw, &afterMask)
+	if afterMask["ai_asr_api_key"] != "****" || afterMask["ai_asr_api_key_set"] != true || afterMask["ai_asr_language"] != "en" {
+		t.Fatalf("unexpected settings after masked update: %s", raw)
+	}
+
+	// 4. clear_ai_asr_api_key clears stored ASR key
+	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"clear_ai_asr_api_key": true,
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings clear ASR key = %d: %s", rec.Code, raw)
+	}
+	var afterClear map[string]any
+	_ = json.Unmarshal(raw, &afterClear)
+	if afterClear["ai_asr_api_key"] != "" || afterClear["ai_asr_api_key_set"] != false || afterClear["ai_asr_configured"] != true {
+		t.Fatalf("unexpected settings after clear_ai_asr_api_key: %s", raw)
+	}
+	if err := env.db.QueryRow(`SELECT value FROM app_settings WHERE key = 'ai_asr_api_key'`).Scan(&storedKey); err != nil {
+		t.Fatalf("query cleared ai_asr_api_key: %v", err)
+	}
+	if storedKey != "" {
+		t.Fatalf("expected empty stored ai_asr_api_key after clear, got %q", storedKey)
+	}
+
+	// 5. Main AI configured + fallback ASR configured
+	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url":     "https://main.example/v1",
+		"ai_model":        "gpt-4o-mini",
+		"ai_asr_base_url": "",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings main AI = %d: %s", rec.Code, raw)
+	}
+	var afterMain map[string]any
+	_ = json.Unmarshal(raw, &afterMain)
+	if afterMain["ai_configured"] != true || afterMain["ai_asr_configured"] != true || afterMain["ai_asr_base_url"] != "" {
+		t.Fatalf("expected ai_configured=true, ai_asr_configured=true, ai_asr_base_url='', got %s", raw)
+	}
+}
+
+func TestASRConfigDoesNotLeakMainKeyToDifferentHost(t *testing.T) {
+	var (
+		mu             sync.Mutex
+		capturedURL    string
+		capturedAuth   string
+		upstreamStatus = http.StatusOK
+		upstreamBody   = `{"text":"ok"}`
+	)
+	rt := apiRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		capturedURL = r.URL.String()
+		capturedAuth = r.Header.Get("Authorization")
+		status := upstreamStatus
+		body := upstreamBody
+		mu.Unlock()
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})
+
+	env := setupRecorderAPITestEnv(t, rt)
+	token := env.loginAdmin(t)
+
+	// Save main AI settings using an independent host and main secret key
+	rec, raw := env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url": "https://asr-and-main.example/v1",
+		"ai_api_key":  "sk-main-secret",
+		"ai_model":    "gpt-4o-mini",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings main = %d: %s", rec.Code, raw)
+	}
+
+	// 1. Independent asr_base_url + empty asr_api_key -> MUST NOT forward sk-main-secret
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/settings/ai/asr/test", map[string]any{
+		"asr_base_url": "https://other-whisper.example/v1",
+		"asr_api_key":  "",
+		"asr_model":    "whisper-1",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /settings/ai/asr/test (independent host) = %d: %s", rec.Code, raw)
+	}
+	mu.Lock()
+	gotURL, gotAuth := capturedURL, capturedAuth
+	mu.Unlock()
+	if gotURL != "https://other-whisper.example/v1/audio/transcriptions" {
+		t.Fatalf("unexpected ASR test URL %q", gotURL)
+	}
+	if gotAuth != "" {
+		t.Fatalf("main ai_api_key leaked to independent ASR host! Authorization=%q", gotAuth)
+	}
+
+	// 2. Empty asr_base_url (reusing main ai_base_url) + empty asr_api_key -> forwards Bearer sk-main-secret
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/settings/ai/asr/test", map[string]any{
+		"asr_base_url": "",
+		"asr_api_key":  "",
+		"asr_model":    "whisper-1",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /settings/ai/asr/test (reuse main) = %d: %s", rec.Code, raw)
+	}
+	mu.Lock()
+	gotURL, gotAuth = capturedURL, capturedAuth
+	mu.Unlock()
+	if gotURL != "https://asr-and-main.example/v1/audio/transcriptions" {
+		t.Fatalf("unexpected fallback ASR test URL %q", gotURL)
+	}
+	if gotAuth != "Bearer sk-main-secret" {
+		t.Fatalf("expected main Authorization 'Bearer sk-main-secret', got %q", gotAuth)
+	}
+
+	// 3. Unsaved base_url + api_key overrides & ignoring "****" & clear_ai_asr_api_key
+	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_asr_base_url": "https://saved-asr.example/v1",
+		"ai_asr_api_key":  "sk-asr-saved",
+		"ai_asr_model":    "whisper-1",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings saved ASR = %d: %s", rec.Code, raw)
+	}
+
+	// Masked placeholder preserves saved ASR key
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/settings/ai/asr/test", map[string]any{
+		"ai_asr_api_key": "****",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /settings/ai/asr/test with masked key = %d: %s", rec.Code, raw)
+	}
+	mu.Lock()
+	gotAuth = capturedAuth
+	mu.Unlock()
+	if gotAuth != "Bearer sk-asr-saved" {
+		t.Fatalf("expected preserved ASR key 'Bearer sk-asr-saved', got %q", gotAuth)
+	}
+
+	// Clearing saved ASR base URL & key in unsaved test falls back to main URL + unsaved main api_key
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/settings/ai/asr/test", map[string]any{
+		"asr_base_url":         "",
+		"clear_ai_asr_api_key": true,
+		"base_url":             "https://unsaved-main.example/v1",
+		"api_key":              "sk-unsaved-main",
+		"asr_model":            "whisper-large-v3",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /settings/ai/asr/test with unsaved overrides = %d: %s", rec.Code, raw)
+	}
+	mu.Lock()
+	gotURL, gotAuth = capturedURL, capturedAuth
+	mu.Unlock()
+	if gotURL != "https://unsaved-main.example/v1/audio/transcriptions" || gotAuth != "Bearer sk-unsaved-main" {
+		t.Fatalf("unexpected unsaved override resolution: url=%q auth=%q", gotURL, gotAuth)
+	}
+
+	// Upstream error maps to 502 Bad Gateway
+	mu.Lock()
+	upstreamStatus = http.StatusUnauthorized
+	upstreamBody = `{"error":{"message":"invalid asr key"}}`
+	mu.Unlock()
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/settings/ai/asr/test", nil, token)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("POST /settings/ai/asr/test on upstream 401 = %d, want 502: %s", rec.Code, raw)
+	}
+
+	// Missing ASR model maps to 400 with code=asr_not_configured
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/settings/ai/asr/test", map[string]any{
+		"asr_model": "",
+	}, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /settings/ai/asr/test with empty asr_model = %d, want 400: %s", rec.Code, raw)
+	}
+	var errBody struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &errBody); err != nil || errBody.Code != "asr_not_configured" {
+		t.Fatalf("expected code=asr_not_configured on ASR test, got %s", raw)
+	}
+}
+
+func TestLessonSummaryAPIEndToEndAndErrorCodes(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		gateCh      chan struct{}
+		gateEntered chan struct{}
+		gateOnce    sync.Once
+	)
+
+	rt := apiRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		ch := gateCh
+		entered := gateEntered
+		mu.Unlock()
+		if ch != nil {
+			gateOnce.Do(func() {
+				if entered != nil {
+					close(entered)
+				}
+			})
+			select {
+			case <-ch:
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
+
+		payload := map[string]any{
+			"overview": "本节课讲解了核心架构与实战命令。",
+			"outline": []map[string]any{
+				{"title": "模块一：基础概念", "summary": "介绍背景与目标", "start_sec": 0},
+				{"title": "模块二：代码实践", "summary": "演示核心实现", "start_sec": 30},
+			},
+			"timeline": []map[string]any{
+				{
+					"start_sec":  0,
+					"end_sec":    30,
+					"title":      "课程导入",
+					"summary":    "梳理整体目录与关键术语",
+					"key_points": []string{"明确学习目标", "配置基础环境"},
+				},
+				{
+					"start_sec":  30,
+					"end_sec":    90,
+					"title":      "核心实践",
+					"summary":    "编写代码并验证运行结果",
+					"key_points": []string{"运行 go test 验证"},
+				},
+			},
+		}
+		b, _ := json.Marshal(payload)
+		respObj := map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": string(b)}},
+			},
+		}
+		out, _ := json.Marshal(respObj)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(out)),
+		}, nil
+	})
+
+	env := setupRecorderAPITestEnv(t, rt)
+	token := env.loginAdmin(t)
+
+	// Seed source, course, and 2 lessons (lesson 1 has no subtitle initially; lesson 2 has no subtitle initially)
+	courseDir := filepath.Join(env.mediaDir, "SummaryCourse")
+	writeDummyFile(t, filepath.Join(courseDir, "01_intro.mp4"), []byte("video1"))
+	writeDummyFile(t, filepath.Join(courseDir, "02_deep.mp4"), []byte("video2"))
+
+	src, err := env.catSvc.CreateSource(context.Background(), "SummaryDisk", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	course, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "SummaryCourse",
+	})
+	if err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+	l1ID := course.Chapters[0].Lessons[0].ID
+	l2ID := course.Chapters[0].Lessons[1].ID
+
+	// 1. Unauthenticated requests return 401
+	unauthEndpoints := [][2]string{
+		{http.MethodPost, "/api/v1/settings/ai/asr/test"},
+		{http.MethodGet, "/api/v1/lessons/" + l1ID + "/summary"},
+		{http.MethodPost, "/api/v1/lessons/" + l1ID + "/summary/generate"},
+		{http.MethodPost, "/api/v1/lessons/" + l1ID + "/summary/cancel"},
+		{http.MethodDelete, "/api/v1/lessons/" + l1ID + "/summary"},
+		{http.MethodGet, "/api/v1/courses/" + course.ID + "/summaries/status"},
+		{http.MethodPost, "/api/v1/courses/" + course.ID + "/summaries/generate"},
+		{http.MethodPost, "/api/v1/courses/" + course.ID + "/summaries/cancel"},
+	}
+	for _, ep := range unauthEndpoints {
+		rec, _ := env.doRecJSON(t, ep[0], ep[1], nil, "")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated %s %s = %d, want 401", ep[0], ep[1], rec.Code)
+		}
+	}
+
+	// 2. Unknown lesson/course returns 404
+	notFoundEndpoints := [][2]string{
+		{http.MethodGet, "/api/v1/lessons/nonexistent-lesson-id/summary"},
+		{http.MethodPost, "/api/v1/lessons/nonexistent-lesson-id/summary/generate"},
+		{http.MethodPost, "/api/v1/lessons/nonexistent-lesson-id/summary/cancel"},
+		{http.MethodDelete, "/api/v1/lessons/nonexistent-lesson-id/summary"},
+		{http.MethodGet, "/api/v1/courses/nonexistent-course-id/summaries/status"},
+		{http.MethodPost, "/api/v1/courses/nonexistent-course-id/summaries/generate"},
+		{http.MethodPost, "/api/v1/courses/nonexistent-course-id/summaries/cancel"},
+	}
+	for _, ep := range notFoundEndpoints {
+		rec, raw := env.doRecJSON(t, ep[0], ep[1], nil, token)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("unknown ID %s %s = %d, want 404: %s", ep[0], ep[1], rec.Code, raw)
+		}
+	}
+
+	// 3. AI unconfigured -> 400 with code == "ai_not_configured"
+	rec, raw := env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+l1ID+"/summary/generate", nil, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /lessons/{id}/summary/generate (no AI) = %d, want 400: %s", rec.Code, raw)
+	}
+	var errPayload struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &errPayload); err != nil || errPayload.Code != "ai_not_configured" || errPayload.Error == "" {
+		t.Fatalf("expected code=ai_not_configured, got %s", raw)
+	}
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/summaries/generate", nil, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /courses/{id}/summaries/generate (no AI) = %d, want 400: %s", rec.Code, raw)
+	}
+	errPayload = struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}{}
+	if err := json.Unmarshal(raw, &errPayload); err != nil || errPayload.Code != "ai_not_configured" {
+		t.Fatalf("expected code=ai_not_configured on batch generate, got %s", raw)
+	}
+
+	// 4. Configure AI (no ASR) -> lesson without subtitle returns 400 with code == "asr_not_configured"
+	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url": "https://llm.example/v1",
+		"ai_api_key":  "sk-llm",
+		"ai_model":    "gpt-4o-mini",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings = %d: %s", rec.Code, raw)
+	}
+
+	// Verify capabilities via GET /lessons/{id}/summary (also test dashless ID normalization!)
+	dashlessL1 := strings.ReplaceAll(l1ID, "-", "")
+	rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/lessons/"+dashlessL1+"/summary", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /lessons/{dashless}/summary = %d: %s", rec.Code, raw)
+	}
+	var state summary.LessonSummaryState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("unmarshal LessonSummaryState: %v (%s)", err, raw)
+	}
+	if state.LessonID != l1ID || state.Summary != nil || !state.Capabilities.AIConfigured || state.Capabilities.ASRConfigured || state.Capabilities.HasSubtitle || state.Capabilities.HasCachedTranscript {
+		t.Fatalf("unexpected initial lesson summary state: %+v", state)
+	}
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+l1ID+"/summary/generate", nil, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /lessons/{id}/summary/generate (no sub, no ASR) = %d, want 400: %s", rec.Code, raw)
+	}
+	errPayload = struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}{}
+	if err := json.Unmarshal(raw, &errPayload); err != nil || errPayload.Code != "asr_not_configured" {
+		t.Fatalf("expected code=asr_not_configured, got %s", raw)
+	}
+
+	// 5. Post manual transcript -> 202, poll until completed, verify summary & cached transcript
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+l1ID+"/summary/generate", map[string]any{
+		"manual_transcript": "Welcome to Go interfaces. First we define an interface, then implement it.",
+	}, token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /lessons/{id}/summary/generate (manual) = %d, want 202: %s", rec.Code, raw)
+	}
+	var job summary.LessonJobStatus
+	if err := json.Unmarshal(raw, &job); err != nil || job.LessonID != l1ID {
+		t.Fatalf("unexpected 202 LessonJobStatus: %s", raw)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/lessons/"+l1ID+"/summary", nil, token)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("poll GET /summary = %d: %s", rec.Code, raw)
+		}
+		if err := json.Unmarshal(raw, &state); err != nil {
+			t.Fatalf("unmarshal polled state: %v", err)
+		}
+		if state.Job != nil && !state.Job.Running {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if state.Job == nil || state.Job.Running || state.Job.Stage != summary.StageCompleted {
+		t.Fatalf("expected completed summary job, got %+v", state.Job)
+	}
+	if state.Summary == nil || state.Summary.SourceType != "manual" || state.Summary.Overview == "" || len(state.Summary.Outline) == 0 || len(state.Summary.Timeline) == 0 {
+		t.Fatalf("expected persisted manual summary, got %+v", state.Summary)
+	}
+	if !state.Capabilities.HasCachedTranscript || state.Capabilities.TranscriptSource != "manual" {
+		t.Fatalf("expected cached manual transcript capability, got %+v", state.Capabilities)
+	}
+
+	// 6. DELETE without delete_transcript removes summary but retains cached transcript
+	rec, raw = env.doRecJSON(t, http.MethodDelete, "/api/v1/lessons/"+l1ID+"/summary", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE /summary = %d: %s", rec.Code, raw)
+	}
+	rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/lessons/"+l1ID+"/summary", nil, token)
+	_ = json.Unmarshal(raw, &state)
+	if state.Summary != nil || !state.Capabilities.HasCachedTranscript {
+		t.Fatalf("expected summary=nil and cached transcript retained, got summary=%v caps=%+v", state.Summary, state.Capabilities)
+	}
+
+	// DELETE with ?delete_transcript=true clears cached transcript as well
+	rec, raw = env.doRecJSON(t, http.MethodDelete, "/api/v1/lessons/"+l1ID+"/summary?delete_transcript=true", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE /summary?delete_transcript=true = %d: %s", rec.Code, raw)
+	}
+	rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/lessons/"+l1ID+"/summary", nil, token)
+	_ = json.Unmarshal(raw, &state)
+	if state.Summary != nil || state.Capabilities.HasCachedTranscript {
+		t.Fatalf("expected summary=nil and cached transcript deleted, got summary=%v caps=%+v", state.Summary, state.Capabilities)
+	}
+
+	// 7. Attach SRT subtitles to both lessons and test course batch lifecycle (202, 409 conflict, cancel, complete, 200 when 0 pending)
+	writeDummyFile(t, filepath.Join(courseDir, "01_intro.srt"), []byte("1\n00:00:00,000 --> 00:00:05,000\nLesson 1 subtitle\n"))
+	writeDummyFile(t, filepath.Join(courseDir, "02_deep.srt"), []byte("1\n00:00:00,000 --> 00:00:05,000\nLesson 2 subtitle\n"))
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("rescan subtitles: %v", err)
+	}
+
+	// Gate LLM call to deterministically test 409 conflict & cancel while running
+	mu.Lock()
+	gateCh = make(chan struct{})
+	gateEntered = make(chan struct{})
+	gateOnce = sync.Once{}
+	mu.Unlock()
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/summaries/generate", map[string]any{"mode": "missing_only"}, token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /courses/{id}/summaries/generate = %d, want 202: %s", rec.Code, raw)
+	}
+	var batch summary.CourseBatchStatus
+	if err := json.Unmarshal(raw, &batch); err != nil || !batch.Running || batch.Total != 2 {
+		t.Fatalf("unexpected 202 CourseBatchStatus: %s", raw)
+	}
+
+	<-gateEntered
+
+	// Second batch generate while running -> 409 Conflict
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/summaries/generate", nil, token)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("concurrent POST /courses/{id}/summaries/generate = %d, want 409: %s", rec.Code, raw)
+	}
+
+	// Status endpoint shows running batch
+	rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/courses/"+course.ID+"/summaries/status", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /courses/{id}/summaries/status = %d: %s", rec.Code, raw)
+	}
+	var courseStatus summary.CourseSummariesStatus
+	if err := json.Unmarshal(raw, &courseStatus); err != nil || courseStatus.BatchJob == nil || !courseStatus.BatchJob.Running {
+		t.Fatalf("expected running batch_job in status, got %s", raw)
+	}
+
+	// Cancel running batch -> 200
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/summaries/cancel", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /courses/{id}/summaries/cancel = %d: %s", rec.Code, raw)
+	}
+
+	// Wait for cancelled batch to settle
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/courses/"+course.ID+"/summaries/status", nil, token)
+		_ = json.Unmarshal(raw, &courseStatus)
+		if courseStatus.BatchJob != nil && !courseStatus.BatchJob.Running {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if courseStatus.BatchJob == nil || courseStatus.BatchJob.Running || courseStatus.BatchJob.CurrentStage != summary.StageCancelled {
+		t.Fatalf("expected cancelled batch_job, got %+v", courseStatus.BatchJob)
+	}
+
+	// Remove gate and run full batch to completion
+	mu.Lock()
+	gateCh = nil
+	gateEntered = nil
+	mu.Unlock()
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/summaries/generate", map[string]any{"mode": "all"}, token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /courses/{id}/summaries/generate (all) = %d, want 202: %s", rec.Code, raw)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/courses/"+course.ID+"/summaries/status", nil, token)
+		_ = json.Unmarshal(raw, &courseStatus)
+		if courseStatus.BatchJob != nil && !courseStatus.BatchJob.Running {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if courseStatus.BatchJob == nil || courseStatus.BatchJob.Running || courseStatus.BatchJob.CurrentStage != summary.StageCompleted || courseStatus.BatchJob.Completed != 2 {
+		t.Fatalf("expected completed batch of 2, got %+v", courseStatus.BatchJob)
+	}
+	if len(courseStatus.SummaryLessonIDs) != 2 || courseStatus.SummaryLessonIDs[0] != l1ID || courseStatus.SummaryLessonIDs[1] != l2ID {
+		t.Fatalf("expected summary_lesson_ids=[%s, %s], got %v", l1ID, l2ID, courseStatus.SummaryLessonIDs)
+	}
+
+	// When 0 pending lessons in missing_only mode -> returns 200 OK (not 202)
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/summaries/generate", map[string]any{"mode": "missing_only"}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /courses/{id}/summaries/generate (0 pending) = %d, want 200: %s", rec.Code, raw)
+	}
+	if err := json.Unmarshal(raw, &batch); err != nil || batch.Running || batch.Skipped != 2 || batch.CurrentStage != summary.StageCompleted {
+		t.Fatalf("expected non-running completed batch with skipped=2, got %+v (%s)", batch, raw)
+	}
+
+	// Invalid batch mode returns 400
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/summaries/generate", map[string]any{"mode": "invalid"}, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /courses/{id}/summaries/generate (invalid mode) = %d, want 400: %s", rec.Code, raw)
+	}
+
+	// Single-lesson cancel while running settles as cancelled and preserves existing summary
+	mu.Lock()
+	gateCh = make(chan struct{})
+	gateEntered = make(chan struct{})
+	gateOnce = sync.Once{}
+	mu.Unlock()
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+l1ID+"/summary/generate", map[string]any{"force": true}, token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /lessons/{id}/summary/generate (for cancel) = %d, want 202: %s", rec.Code, raw)
+	}
+	<-gateEntered
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+l1ID+"/summary/cancel", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /lessons/{id}/summary/cancel = %d: %s", rec.Code, raw)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/lessons/"+l1ID+"/summary", nil, token)
+		_ = json.Unmarshal(raw, &state)
+		if state.Job != nil && !state.Job.Running {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if state.Job == nil || state.Job.Running || state.Job.Stage != summary.StageCancelled {
+		t.Fatalf("expected cancelled single lesson job, got %+v", state.Job)
+	}
+	if state.Summary == nil || state.Summary.Overview == "" {
+		t.Fatalf("expected existing saved summary preserved after cancel, got %+v", state.Summary)
 	}
 }
