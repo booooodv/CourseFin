@@ -4,13 +4,16 @@ import type {
   BindSubtitleInput,
   ChapterDetail,
   CommitImportInput,
+  CourseBatchSummaryJob,
   CourseDetail,
   CourseFilterParams,
   CourseOrganizeProposal,
+  CourseSummariesStatusResponse,
   CourseSummary,
   CreateCourseInput,
   DeleteLibraryOptions,
   FsBrowseResponse,
+  GenerateLessonSummaryInput,
   HealthStatus,
   HomeResponse,
   ImportAIOrganizeInput,
@@ -21,6 +24,8 @@ import type {
   LessonDetail,
   LessonPlacement,
   LessonPlaybackInfo,
+  LessonSummaryJob,
+  LessonSummaryStateResponse,
   Library,
   LoginRequest,
   LoginResponse,
@@ -35,6 +40,7 @@ import type {
   SetupStatusResponse,
   StorageSource,
   Tag,
+  TestASROverrides,
   UpdateConfigInput,
   UpdateCourseInput,
   UpdateSettingsInput,
@@ -45,11 +51,13 @@ export const TOKEN_STORAGE_KEY = 'coursefin_token';
 
 export class ApiError extends Error {
   status: number;
+  code?: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -147,19 +155,27 @@ async function request<T>(
 
   if (!res.ok) {
     let message = `请求失败 (${res.status})`;
+    let code: string | undefined;
     if (isJson) {
       try {
-        const errBody = (await res.json()) as { error?: string; message?: string };
+        const errBody = (await res.json()) as {
+          error?: string;
+          message?: string;
+          code?: string;
+        };
         if (errBody.error) {
           message = errBody.error;
         } else if (errBody.message) {
           message = errBody.message;
         }
+        if (typeof errBody.code === 'string' && errBody.code.trim() !== '') {
+          code = errBody.code.trim();
+        }
       } catch {
         // keep default message
       }
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, code);
   }
 
   if (res.status === 204) {
@@ -512,6 +528,12 @@ export const api = {
       body: JSON.stringify(overrides),
     });
   },
+  testASR(overrides: TestASROverrides = {}): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>('/api/v1/settings/ai/asr/test', {
+      method: 'POST',
+      body: JSON.stringify(overrides),
+    });
+  },
   aiOrganizeCourse(courseId: string): Promise<CourseOrganizeProposal> {
     return request<CourseOrganizeProposal>(`/api/v1/courses/${encodeURIComponent(courseId)}/ai/organize`, {
       method: 'POST',
@@ -522,6 +544,72 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input),
     });
+  },
+
+  // Lesson & Course AI Summaries
+  getLessonSummary(lessonId: string): Promise<LessonSummaryStateResponse> {
+    return request<LessonSummaryStateResponse>(
+      `/api/v1/lessons/${encodeURIComponent(lessonId)}/summary`,
+    );
+  },
+  generateLessonSummary(
+    lessonId: string,
+    input: GenerateLessonSummaryInput = {},
+  ): Promise<LessonSummaryJob> {
+    return request<LessonSummaryJob>(
+      `/api/v1/lessons/${encodeURIComponent(lessonId)}/summary/generate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    );
+  },
+  cancelLessonSummary(lessonId: string): Promise<LessonSummaryJob> {
+    return request<LessonSummaryJob>(
+      `/api/v1/lessons/${encodeURIComponent(lessonId)}/summary/cancel`,
+      { method: 'POST' },
+    );
+  },
+  deleteLessonSummary(
+    lessonId: string,
+    options?: boolean | { deleteTranscript?: boolean },
+  ): Promise<{ ok: boolean }> {
+    const deleteTranscript =
+      typeof options === 'boolean' ? options : Boolean(options?.deleteTranscript);
+    const qs = toQueryString({
+      delete_transcript: deleteTranscript ? 'true' : undefined,
+    });
+    return request<{ ok: boolean }>(
+      `/api/v1/lessons/${encodeURIComponent(lessonId)}/summary${qs}`,
+      { method: 'DELETE' },
+    );
+  },
+  getCourseSummariesStatus(courseId: string): Promise<CourseSummariesStatusResponse> {
+    return request<CourseSummariesStatusResponse>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/summaries/status`,
+    );
+  },
+  generateCourseSummaries(
+    courseId: string,
+    modeOrOptions: 'missing_only' | 'all' | { mode?: 'missing_only' | 'all' } = 'missing_only',
+  ): Promise<CourseBatchSummaryJob> {
+    const mode =
+      typeof modeOrOptions === 'string'
+        ? modeOrOptions
+        : modeOrOptions.mode ?? 'missing_only';
+    return request<CourseBatchSummaryJob>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/summaries/generate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ mode }),
+      },
+    );
+  },
+  cancelCourseSummaries(courseId: string): Promise<CourseBatchSummaryJob> {
+    return request<CourseBatchSummaryJob>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/summaries/cancel`,
+      { method: 'POST' },
+    );
   },
 
   // System Update & Health

@@ -421,6 +421,13 @@ export interface SettingsPayload {
   ai_api_key_set: boolean;
   ai_model: string;
   ai_max_subtitle_chars: number;
+  ai_asr_base_url?: string;
+  ai_asr_api_key?: string;
+  ai_asr_api_key_set?: boolean;
+  ai_asr_model?: string;
+  ai_asr_language?: string;
+  ai_configured?: boolean;
+  ai_asr_configured?: boolean;
 }
 
 export interface UpdateSettingsInput {
@@ -431,6 +438,135 @@ export interface UpdateSettingsInput {
   clear_ai_api_key?: boolean;
   ai_model?: string;
   ai_max_subtitle_chars?: number;
+  ai_asr_base_url?: string;
+  ai_asr_api_key?: string;
+  clear_ai_asr_api_key?: boolean;
+  ai_asr_model?: string;
+  ai_asr_language?: string;
+}
+
+export interface TestASROverrides {
+  asr_base_url?: string;
+  ai_asr_base_url?: string;
+  asr_api_key?: string;
+  ai_asr_api_key?: string;
+  clear_ai_asr_api_key?: boolean;
+  clear_asr_api_key?: boolean;
+  asr_model?: string;
+  ai_asr_model?: string;
+  asr_language?: string;
+  ai_asr_language?: string;
+  base_url?: string;
+  ai_base_url?: string;
+  api_key?: string;
+  ai_api_key?: string;
+  clear_ai_api_key?: boolean;
+  clear_api_key?: boolean;
+}
+
+export type SummaryJobStage =
+  | 'queued'
+  | 'reading_subtitle'
+  | 'extracting_audio'
+  | 'transcribing'
+  | 'summarizing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface OutlineItem {
+  title: string;
+  summary: string;
+  start_sec: number | null;
+}
+
+export interface TimelineSection {
+  start_sec: number | null;
+  end_sec: number | null;
+  title: string;
+  summary: string;
+  key_points: string[];
+}
+
+export interface LessonSummary {
+  lesson_id: string;
+  media_file_id: string;
+  source_type: string;
+  source_label: string;
+  has_timestamps: boolean;
+  model: string;
+  overview: string;
+  outline: OutlineItem[];
+  timeline: TimelineSection[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LessonSummaryJob {
+  lesson_id: string;
+  course_id: string;
+  running: boolean;
+  stage: SummaryJobStage;
+  message: string;
+  chunk_index: number;
+  chunk_total: number;
+  source_type: string;
+  error?: string;
+  error_code?: string;
+  started_at: string;
+  finished_at?: string;
+}
+
+export interface LessonSummaryCapabilities {
+  has_subtitle: boolean;
+  has_cached_transcript: boolean;
+  transcript_source: string;
+  ai_configured: boolean;
+  asr_configured: boolean;
+  has_ffmpeg: boolean;
+}
+
+export interface LessonSummaryStateResponse {
+  lesson_id: string;
+  summary: LessonSummary | null;
+  job: LessonSummaryJob | null;
+  capabilities: LessonSummaryCapabilities;
+}
+
+export interface GenerateLessonSummaryInput {
+  force?: boolean;
+  force_retranscribe?: boolean;
+  manual_transcript?: string;
+}
+
+export interface CourseBatchLessonError {
+  lesson_id: string;
+  lesson_title: string;
+  error: string;
+  error_code?: string;
+}
+
+export interface CourseBatchSummaryJob {
+  course_id: string;
+  running: boolean;
+  total: number;
+  completed: number;
+  skipped: number;
+  failed: number;
+  current_lesson_id: string;
+  current_lesson_title: string;
+  current_stage: SummaryJobStage;
+  chunk_index: number;
+  chunk_total: number;
+  errors: CourseBatchLessonError[];
+  started_at: string;
+  finished_at?: string;
+}
+
+export interface CourseSummariesStatusResponse {
+  course_id: string;
+  summary_lesson_ids: string[];
+  batch_job: CourseBatchSummaryJob | null;
 }
 
 export interface ProposalLesson {

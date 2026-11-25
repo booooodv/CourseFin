@@ -7,6 +7,7 @@ import {
   KeyRound,
   Laptop,
   Loader2,
+  Mic,
   Save,
   Server,
   Sparkles,
@@ -19,7 +20,12 @@ import SystemUpdateSection from '../components/SystemUpdateSection';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import { copyTextToClipboard } from '../utils/clipboard';
-import type { Session, SettingsPayload, UpdateSettingsInput } from '../types/coursefin';
+import type {
+  Session,
+  SettingsPayload,
+  TestASROverrides,
+  UpdateSettingsInput,
+} from '../types/coursefin';
 
 const MASKED_KEY_PLACEHOLDER = '****';
 
@@ -44,10 +50,19 @@ export default function SettingsPage() {
   const [aiModel, setAiModel] = useState('');
   const [aiMaxSubtitleChars, setAiMaxSubtitleChars] = useState('4000');
 
+  // ASR (speech-to-text) settings form
+  const [aiAsrBaseUrl, setAiAsrBaseUrl] = useState('');
+  const [aiAsrApiKey, setAiAsrApiKey] = useState('');
+  const [clearAiAsrKey, setClearAiAsrKey] = useState(false);
+  const [aiAsrModel, setAiAsrModel] = useState('');
+  const [aiAsrLanguage, setAiAsrLanguage] = useState('');
+
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState<string | null>(null);
   const [testingAI, setTestingAI] = useState(false);
   const [aiTestMessage, setAiTestMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [testingASR, setTestingASR] = useState(false);
+  const [asrTestMessage, setAsrTestMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Copy button feedback states
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -80,6 +95,11 @@ export default function SettingsPage() {
     setClearAiKey(false);
     setAiModel(data.ai_model || '');
     setAiMaxSubtitleChars(String(data.ai_max_subtitle_chars ?? 4000));
+    setAiAsrBaseUrl(data.ai_asr_base_url || '');
+    setAiAsrApiKey('');
+    setClearAiAsrKey(false);
+    setAiAsrModel(data.ai_asr_model || '');
+    setAiAsrLanguage(data.ai_asr_language || '');
   }, []);
 
   const loadData = useCallback(async () => {
@@ -167,6 +187,9 @@ export default function SettingsPage() {
       ai_base_url: aiBaseUrl.trim(),
       ai_model: aiModel.trim(),
       ai_max_subtitle_chars: maxSubNum,
+      ai_asr_base_url: aiAsrBaseUrl.trim(),
+      ai_asr_model: aiAsrModel.trim(),
+      ai_asr_language: aiAsrLanguage.trim(),
     };
 
     if (clearAiKey) {
@@ -175,6 +198,15 @@ export default function SettingsPage() {
       const trimmedKey = aiApiKey.trim();
       if (trimmedKey !== '' && trimmedKey !== MASKED_KEY_PLACEHOLDER) {
         payload.ai_api_key = trimmedKey;
+      }
+    }
+
+    if (clearAiAsrKey) {
+      payload.clear_ai_asr_api_key = true;
+    } else {
+      const trimmedAsrKey = aiAsrApiKey.trim();
+      if (trimmedAsrKey !== '' && trimmedAsrKey !== MASKED_KEY_PLACEHOLDER) {
+        payload.ai_asr_api_key = trimmedAsrKey;
       }
     }
 
@@ -226,6 +258,52 @@ export default function SettingsPage() {
       toast.error(msg);
     } finally {
       setTestingAI(false);
+    }
+  }
+
+  async function handleTestASR() {
+    if (testingASR) return;
+    setTestingASR(true);
+    setAsrTestMessage(null);
+
+    const overrides: TestASROverrides = {
+      asr_base_url: aiAsrBaseUrl.trim(),
+      asr_model: aiAsrModel.trim(),
+      asr_language: aiAsrLanguage.trim(),
+      ai_base_url: aiBaseUrl.trim(),
+    };
+
+    if (clearAiAsrKey) {
+      overrides.clear_ai_asr_api_key = true;
+    } else {
+      const trimmedAsrKey = aiAsrApiKey.trim();
+      if (trimmedAsrKey !== '' && trimmedAsrKey !== MASKED_KEY_PLACEHOLDER) {
+        overrides.asr_api_key = trimmedAsrKey;
+      }
+    }
+
+    if (clearAiKey) {
+      overrides.clear_ai_api_key = true;
+    } else {
+      const trimmedAiKey = aiApiKey.trim();
+      if (trimmedAiKey !== '' && trimmedAiKey !== MASKED_KEY_PLACEHOLDER) {
+        overrides.ai_api_key = trimmedAiKey;
+      }
+    }
+
+    try {
+      await api.testASR(overrides);
+      setAsrTestMessage({ ok: true, text: '语音转文字接口连接测试成功！' });
+      toast.success('语音转文字接口连接测试成功');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '语音转文字接口连接测试失败';
+      setAsrTestMessage({
+        ok: false,
+        text: msg,
+      });
+      toast.error(msg);
+    } finally {
+      setTestingASR(false);
     }
   }
 
@@ -523,6 +601,125 @@ export default function SettingsPage() {
               className={FIELD_INPUT_CLASS}
             />
           </div>
+
+          <div className="space-y-1.5 sm:col-span-2 pt-3 border-t border-subtle">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-accent-ink">
+              <Mic className="h-3.5 w-3.5" />
+              <span>语音转文字接口（用于无字幕视频自动转写并生成 AI 字幕）</span>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="settings-asr-model" className="block text-xs font-medium text-ink-secondary">
+              ASR 模型名称
+            </label>
+            <input
+              id="settings-asr-model"
+              type="text"
+              value={aiAsrModel}
+              onChange={(e) => setAiAsrModel(e.target.value)}
+              placeholder="whisper-1（留空表示关闭自动转写）"
+              className={FIELD_INPUT_CLASS}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="settings-asr-base-url" className="block text-xs font-medium text-ink-secondary">
+              ASR Base URL
+            </label>
+            <input
+              id="settings-asr-base-url"
+              type="url"
+              value={aiAsrBaseUrl}
+              onChange={(e) => setAiAsrBaseUrl(e.target.value)}
+              placeholder="留空默认复用上方 AI Base URL"
+              className={FIELD_INPUT_CLASS}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label htmlFor="settings-asr-key" className="block text-xs font-medium text-ink-secondary">
+                ASR API Key
+              </label>
+              {settings?.ai_asr_api_key_set && (
+                <label className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted cursor-pointer">
+                  <input
+                    id="settings-asr-clear-key"
+                    type="checkbox"
+                    checked={clearAiAsrKey}
+                    onChange={(e) => setClearAiAsrKey(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-default bg-card text-status-danger focus:ring-2 focus:ring-accent-ring"
+                  />
+                  <span>清除已存 Key</span>
+                </label>
+              )}
+            </div>
+            <input
+              id="settings-asr-key"
+              type="password"
+              value={aiAsrApiKey}
+              disabled={clearAiAsrKey}
+              onChange={(e) => setAiAsrApiKey(e.target.value)}
+              placeholder={
+                settings?.ai_asr_api_key_set
+                  ? '已配置（留空则保留当前密钥）'
+                  : aiAsrBaseUrl.trim() === ''
+                    ? '留空复用上方 AI API Key'
+                    : '留空表示该服务无需认证'
+              }
+              autoComplete="off"
+              className={FIELD_INPUT_CLASS}
+            />
+            <p className="text-[11px] text-ink-muted">
+              {aiAsrBaseUrl.trim() === ''
+                ? '留空复用上方 AI API Key'
+                : '留空表示该服务无需认证（不透传主 AI 密钥）'}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="settings-asr-language" className="block text-xs font-medium text-ink-secondary">
+              识别语言提示
+            </label>
+            <input
+              id="settings-asr-language"
+              type="text"
+              list="settings-asr-language-presets"
+              value={aiAsrLanguage}
+              onChange={(e) => setAiAsrLanguage(e.target.value)}
+              placeholder="留空为自动检测（如 zh、en）"
+              className={FIELD_INPUT_CLASS}
+            />
+            <datalist id="settings-asr-language-presets">
+              <option value="zh">中文 (zh)</option>
+              <option value="en">英文 (en)</option>
+            </datalist>
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-ink-muted">常用：</span>
+              {[
+                { label: '自动检测', value: '' },
+                { label: '中文 (zh)', value: 'zh' },
+                { label: '英文 (en)', value: 'en' },
+              ].map((preset) => {
+                const active = aiAsrLanguage.trim() === preset.value;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => setAiAsrLanguage(preset.value)}
+                    className={`rounded-lg border px-2 py-0.5 transition-colors cursor-pointer ${
+                      active
+                        ? 'border-accent/40 bg-accent-soft text-accent-ink font-medium'
+                        : 'border-default bg-subtle text-ink-secondary hover:bg-muted hover:text-ink-primary'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         {aiTestMessage && (
@@ -537,6 +734,18 @@ export default function SettingsPage() {
           </div>
         )}
 
+        {asrTestMessage && (
+          <div
+            className={`rounded-2xl border px-3.5 py-2.5 text-xs font-medium ${
+              asrTestMessage.ok
+                ? 'border-status-success/30 bg-status-success-soft text-status-success-ink'
+                : 'border-status-danger/30 bg-status-danger-soft text-status-danger-ink'
+            }`}
+          >
+            {asrTestMessage.text}
+          </div>
+        )}
+
         {settingsSuccess && (
           <div className="rounded-2xl border border-status-success/30 bg-status-success-soft px-3.5 py-2.5 text-xs font-medium text-status-success-ink">
             {settingsSuccess}
@@ -544,19 +753,33 @@ export default function SettingsPage() {
         )}
 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-          <Tooltip content="验证当前填写的 AI 接口地址、模型与密钥是否可用">
-            <button
-              type="button"
-              disabled={testingAI}
-              onClick={() => void handleTestAI()}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-3.5 py-2 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary disabled:opacity-50 transition-colors cursor-pointer"
-            >
-              {testingAI ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-              <span>{testingAI ? '测试中...' : '测试连接'}</span>
-            </button>
-          </Tooltip>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <Tooltip content="验证当前填写的 AI 接口地址、模型与密钥是否可用">
+              <button
+                type="button"
+                disabled={testingAI}
+                onClick={() => void handleTestAI()}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-3.5 py-2 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                {testingAI ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                <span>{testingAI ? '测试中...' : '测试连接'}</span>
+              </button>
+            </Tooltip>
 
-          <Tooltip content="保存服务器名称、定时扫描与 AI 接口配置">
+            <Tooltip content="发送一段 0.5 秒静音音频验证当前语音转文字接口与模型是否可用">
+              <button
+                type="button"
+                disabled={testingASR}
+                onClick={() => void handleTestASR()}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-3.5 py-2 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                {testingASR ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mic className="h-3.5 w-3.5" />}
+                <span>{testingASR ? '转写测试中...' : '测试语音转文字'}</span>
+              </button>
+            </Tooltip>
+          </div>
+
+          <Tooltip content="保存服务器名称、定时扫描、AI 与语音转文字接口配置">
             <button
               type="submit"
               disabled={savingSettings}
