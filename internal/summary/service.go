@@ -802,13 +802,7 @@ func (s *Service) CancelCourseBatch(courseID string) (*CourseBatchStatus, error)
 		}
 		batch.activeLessonCancel()
 	} else {
-		batch.status.Running = false
-		batch.status.CurrentStage = StageCancelled
-		batch.status.CurrentLessonID = ""
-		batch.status.CurrentLessonTitle = ""
-		batch.status.ChunkIndex = 0
-		batch.status.ChunkTotal = 0
-		batch.status.FinishedAt = nowUTC()
+		finishBatchLocked(batch, StageCancelled)
 	}
 
 	cp := cloneBatchStatus(batch.status)
@@ -921,18 +915,25 @@ func (s *Service) cancelQueuedOnShutdownLocked() {
 	s.singleQueue = nil
 
 	for _, batch := range s.batchQueue {
-		batch.pending = nil
+		batch.cancelRequested = true
 		if batch.status.Running {
-			batch.status.Running = false
-			batch.status.CurrentStage = StageCancelled
-			batch.status.CurrentLessonID = ""
-			batch.status.CurrentLessonTitle = ""
-			batch.status.ChunkIndex = 0
-			batch.status.ChunkTotal = 0
-			batch.status.FinishedAt = now
+			finishBatchLocked(batch, StageCancelled)
+		} else {
+			batch.pending = nil
 		}
 	}
 	s.batchQueue = nil
+}
+
+func finishBatchLocked(batch *batchEntry, stage JobStage) {
+	batch.pending = nil
+	batch.status.Running = false
+	batch.status.CurrentStage = stage
+	batch.status.CurrentLessonID = ""
+	batch.status.CurrentLessonTitle = ""
+	batch.status.ChunkIndex = 0
+	batch.status.ChunkTotal = 0
+	batch.status.FinishedAt = nowUTC()
 }
 
 func (s *Service) executeSingleTask(req *singleJobRequest) {
@@ -991,14 +992,9 @@ func (s *Service) executeSingleTask(req *singleJobRequest) {
 func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 	s.mu.Lock()
 	if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
-		batch.pending = nil
-		batch.status.Running = false
-		batch.status.CurrentStage = StageCancelled
-		batch.status.CurrentLessonID = ""
-		batch.status.CurrentLessonTitle = ""
-		batch.status.ChunkIndex = 0
-		batch.status.ChunkTotal = 0
-		batch.status.FinishedAt = nowUTC()
+		if batch.status.Running {
+			finishBatchLocked(batch, StageCancelled)
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -1011,15 +1007,16 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 		err := s.db.QueryRowContext(s.lifecycleCtx, `SELECT 1 FROM lesson_summaries WHERE lesson_id = ?`, item.lessonID).Scan(&exists)
 		if err == nil {
 			s.mu.Lock()
+			if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
+				if batch.status.Running {
+					finishBatchLocked(batch, StageCancelled)
+				}
+				s.mu.Unlock()
+				return
+			}
 			batch.status.Skipped++
 			if len(batch.pending) == 0 {
-				batch.status.Running = false
-				batch.status.CurrentStage = StageCompleted
-				batch.status.CurrentLessonID = ""
-				batch.status.CurrentLessonTitle = ""
-				batch.status.ChunkIndex = 0
-				batch.status.ChunkTotal = 0
-				batch.status.FinishedAt = nowUTC()
+				finishBatchLocked(batch, StageCompleted)
 			}
 			s.mu.Unlock()
 			return
@@ -1031,14 +1028,9 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 
 	s.mu.Lock()
 	if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
-		batch.pending = nil
-		batch.status.Running = false
-		batch.status.CurrentStage = StageCancelled
-		batch.status.CurrentLessonID = ""
-		batch.status.CurrentLessonTitle = ""
-		batch.status.ChunkIndex = 0
-		batch.status.ChunkTotal = 0
-		batch.status.FinishedAt = nowUTC()
+		if batch.status.Running {
+			finishBatchLocked(batch, StageCancelled)
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -1095,14 +1087,9 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 	batch.activeLessonCancel = nil
 
 	if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
-		batch.pending = nil
-		batch.status.Running = false
-		batch.status.CurrentStage = StageCancelled
-		batch.status.CurrentLessonID = ""
-		batch.status.CurrentLessonTitle = ""
-		batch.status.ChunkIndex = 0
-		batch.status.ChunkTotal = 0
-		batch.status.FinishedAt = nowUTC()
+		if batch.status.Running {
+			finishBatchLocked(batch, StageCancelled)
+		}
 		return
 	}
 
@@ -1124,13 +1111,7 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 	}
 
 	if len(batch.pending) == 0 {
-		batch.status.Running = false
-		batch.status.CurrentStage = StageCompleted
-		batch.status.CurrentLessonID = ""
-		batch.status.CurrentLessonTitle = ""
-		batch.status.ChunkIndex = 0
-		batch.status.ChunkTotal = 0
-		batch.status.FinishedAt = nowUTC()
+		finishBatchLocked(batch, StageCompleted)
 	}
 }
 

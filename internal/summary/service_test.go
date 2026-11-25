@@ -1362,3 +1362,99 @@ func TestSingleLessonPriorityOverBatchAndIdempotencyAndCancelAndDelete(t *testin
 	}
 }
 
+func TestCourseBatchMissingOnlyCancelDuringSkipCheck(t *testing.T) {
+	conn, dataDir, catSvc, mediaSvc := openTestEnv(t)
+	setAppSettings(t, conn, map[string]string{
+		"ai_base_url": "https://mock-llm.local/v1",
+		"ai_api_key":  "sk-llm",
+		"ai_model":    "gpt-4o-mini",
+	})
+
+	// Exercise CancelCourseBatch racing against executeBatchItem's missing_only SQLite skip check
+	// immediately after prioritized single-lesson jobs finish summarizing L1 and L2.
+	for iter := 0; iter < 15; iter++ {
+		courseID, lessonIDs, _ := seedTestCourse(t, conn, fmt.Sprintf("竞态取消测试-%d", iter), []lessonSeedOpts{
+			{RelPath: "l1.mp4", SubtitleRel: "l1.srt", SubtitleBody: "1\n00:00:01,000 --> 00:00:02,000\nL1\n"},
+			{RelPath: "l2.mp4", SubtitleRel: "l2.srt", SubtitleBody: "1\n00:00:01,000 --> 00:00:02,000\nL2\n"},
+		})
+
+		l1Entered := make(chan struct{})
+		releaseL1 := make(chan struct{})
+		rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(req.Body)
+			if strings.Contains(string(raw), "L1") {
+				select {
+				case <-l1Entered:
+				default:
+					close(l1Entered)
+				}
+				select {
+				case <-releaseL1:
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				}
+			}
+			return jsonResponse(http.StatusOK, map[string]any{
+				"choices": []map[string]any{{
+					"message": map[string]any{
+						"role": "assistant",
+						"content": `{
+							"overview": "概览",
+							"outline": [{"title": "模块", "summary": "描述", "start_sec": 1}],
+							"timeline": [{"start_sec": 1, "end_sec": 2, "title": "分段", "summary": "内容", "key_points": ["要点"]}]
+						}`,
+					},
+				}},
+			}), nil
+		})
+
+		svc, _ := newTestService(t, conn, dataDir, catSvc, mediaSvc, rt, nil)
+
+		if _, err := svc.StartLessonSummary(context.Background(), lessonIDs[0], summary.GenerateLessonOptions{}); err != nil {
+			t.Fatalf("iter %d StartLessonSummary L1 failed: %v", iter, err)
+		}
+		if _, err := svc.StartLessonSummary(context.Background(), lessonIDs[1], summary.GenerateLessonOptions{}); err != nil {
+			t.Fatalf("iter %d StartLessonSummary L2 failed: %v", iter, err)
+		}
+		<-l1Entered
+
+		// Enqueue missing_only batch while L1 and L2 are not yet persisted in lesson_summaries.
+		if _, err := svc.StartCourseBatch(context.Background(), courseID, "missing_only"); err != nil {
+			t.Fatalf("iter %d StartCourseBatch failed: %v", iter, err)
+		}
+
+		// Release L1/L2 and race CancelCourseBatch right as the worker enters batch skip checks.
+		var cancelRes *summary.CourseBatchStatus
+		var cancelErr error
+		var cancelWG sync.WaitGroup
+		cancelWG.Add(1)
+		go func() {
+			defer cancelWG.Done()
+			if iter%3 != 0 {
+				time.Sleep(time.Duration(iter%5) * 50 * time.Microsecond)
+			}
+			cancelRes, cancelErr = svc.CancelCourseBatch(courseID)
+		}()
+		close(releaseL1)
+		cancelWG.Wait()
+		if cancelErr != nil {
+			t.Fatalf("iter %d CancelCourseBatch failed: %v", iter, cancelErr)
+		}
+		svc.Wait()
+
+		st, err := svc.GetCourseSummaryStatus(context.Background(), courseID)
+		if err != nil {
+			t.Fatalf("iter %d GetCourseSummaryStatus failed: %v", iter, err)
+		}
+		if st.BatchJob == nil || st.BatchJob.Running {
+			t.Fatalf("iter %d expected finished batch, got %+v", iter, st.BatchJob)
+		}
+		// Whenever CancelCourseBatch cancelled a running batch (returning StageCancelled),
+		// a concurrent missing_only skip check must never overwrite CurrentStage to StageCompleted.
+		if cancelRes.CurrentStage == summary.StageCancelled && st.BatchJob.CurrentStage != summary.StageCancelled {
+			t.Fatalf("iter %d CurrentStage = %q after CancelCourseBatch returned %q, want %q",
+				iter, st.BatchJob.CurrentStage, cancelRes.CurrentStage, summary.StageCancelled)
+		}
+	}
+}
+
