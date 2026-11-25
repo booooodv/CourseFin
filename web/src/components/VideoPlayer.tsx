@@ -289,6 +289,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function Vid
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const resumeAppliedRef = useRef(false);
+  const pendingSeekRef = useRef<{ seconds: number; autoPlay: boolean } | null>(null);
   const latestTimeRef = useRef<number>(0);
   const endedRef = useRef<boolean>(false);
   const hasPlayedRef = useRef<boolean>(false);
@@ -369,6 +370,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function Vid
         const video = videoRef.current;
         if (!video) return;
 
+        resumeAppliedRef.current = true;
+
         const fallbackDuration =
           playbackRef.current.duration_ms > 0 ? playbackRef.current.duration_ms / 1000 : 0;
         const duration =
@@ -378,7 +381,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function Vid
         const clamped =
           duration > 0 ? Math.min(duration, Math.max(0, seconds)) : Math.max(0, seconds);
 
-        video.currentTime = clamped;
+        if (video.readyState === 0) {
+          pendingSeekRef.current = { seconds: clamped, autoPlay };
+        } else {
+          pendingSeekRef.current = null;
+        }
+
+        try {
+          video.currentTime = clamped;
+        } catch {
+          // Browsers may reject setting currentTime before metadata loads
+        }
         latestTimeRef.current = clamped;
         emitTimeProgress(video, true);
 
@@ -542,6 +555,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function Vid
     if (!mountEl) return;
 
     resumeAppliedRef.current = false;
+    pendingSeekRef.current = null;
     hasPlayedRef.current = false;
     fallbackTriggeredRef.current = false;
     setIsPlaying(false);
@@ -653,6 +667,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function Vid
 
     const handleLoadedMetadata = () => {
       video.playbackRate = readSavedPlaybackRate();
+      const pendingSeek = pendingSeekRef.current;
+      if (pendingSeek) {
+        pendingSeekRef.current = null;
+        resumeAppliedRef.current = true;
+        const target =
+          Number.isFinite(video.duration) && video.duration > 0
+            ? Math.min(video.duration, Math.max(0, pendingSeek.seconds))
+            : Math.max(0, pendingSeek.seconds);
+        video.currentTime = target;
+        latestTimeRef.current = target;
+        emitTimeProgress(video, true);
+        if (pendingSeek.autoPlay && video.paused) {
+          void Promise.resolve(video.play()).catch(() => {});
+        }
+        return;
+      }
       if (
         !resumeAppliedRef.current &&
         progressSnapshot &&
@@ -773,6 +803,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function Vid
       art.destroy(false);
       artRef.current = null;
       videoRef.current = null;
+      pendingSeekRef.current = null;
       subtitleMenusMountedRef.current = false;
       lastSyncedSubtitlesRef.current = null;
 

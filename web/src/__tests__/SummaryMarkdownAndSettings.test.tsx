@@ -481,16 +481,27 @@ describe('SettingsPage ASR section', () => {
     // Legacy CSS guard across SettingsPage
     expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
 
-    // Key-isolation hint when ASR Base URL is empty
-    expect(screen.getByText('留空复用上方 AI API Key')).toBeInTheDocument();
+    // Accurate helper text when an independent ASR key is already saved
+    expect(
+      screen.getByText('已保存独立 ASR 密钥，留空将保留当前密钥；勾选上方「清除已存 Key」可清空'),
+    ).toBeInTheDocument();
 
     const user = userEvent.setup();
+    const asrKeyFieldGroupInit = asrApiKeyInput.closest('div')!;
+    const clearAsrCheckboxInit = within(asrKeyFieldGroupInit).getByRole('checkbox');
+
+    // When clearing saved ASR key with empty ASR Base URL -> switches to reuse-key hint
+    await user.click(clearAsrCheckboxInit);
+    expect(screen.getByText('留空复用上方 AI API Key')).toBeInTheDocument();
 
     // Entering an independent ASR Base URL switches the hint to explicit key-isolation warning
     await user.type(asrBaseUrlInput, 'http://whisper:8000/v1');
     expect(
       screen.getByText('留空表示该服务无需认证（不透传主 AI 密钥）'),
     ).toBeInTheDocument();
+
+    // Uncheck so user can enter a new unsaved ASR key
+    await user.click(clearAsrCheckboxInit);
 
     // Test unsaved ASR config before saving
     await user.clear(asrModelInput);

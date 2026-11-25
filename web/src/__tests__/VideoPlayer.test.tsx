@@ -865,6 +865,47 @@ describe('VideoPlayer', () => {
     expect(video.currentTime).toBe(120);
   });
 
+  it('preserves early seekTo before loadedmetadata on partially watched lesson and re-applies when readyState was 0', () => {
+    const ref = createRef<VideoPlayerHandle>();
+    const onTimeProgress = vi.fn();
+    const playback = makePlayback({
+      duration_ms: 300_000,
+      progress: {
+        position_ticks: 120 * 10_000_000,
+        played: false,
+        play_count: 0,
+      },
+    });
+
+    const { container } = render(
+      <VideoPlayer ref={ref} playback={playback} onTimeProgress={onTimeProgress} />,
+    );
+    const video = container.querySelector('video') as HTMLVideoElement;
+    expect(video).toBeTruthy();
+    expect(video.readyState).toBe(0);
+
+    const playSpy = vi.spyOn(video, 'play').mockResolvedValue();
+
+    // Seek to 75s before loadedmetadata fires
+    act(() => {
+      ref.current!.seekTo(75);
+    });
+    expect(video.currentTime).toBe(75);
+
+    // Simulate a real browser that ignored setting currentTime while readyState === 0
+    video.currentTime = 0;
+    Object.defineProperty(video, 'duration', { value: 300, configurable: true });
+    playSpy.mockClear();
+    onTimeProgress.mockClear();
+
+    fireEvent.loadedMetadata(video);
+
+    // Must apply pending seek (75s), NOT overwrite with progressSnapshot auto-resume (120s)
+    expect(video.currentTime).toBe(75);
+    expect(playSpy).toHaveBeenCalledTimes(1);
+    expect(onTimeProgress).toHaveBeenCalledWith('l1', 75, 300);
+  });
+
   it('updates subtitle selectors in-place without destroying Artplayer when subtitles prop updates for the same lesson', () => {
     const initialPlayback = makePlayback({ subtitles: [] });
     const { rerender } = render(<VideoPlayer playback={initialPlayback} />);

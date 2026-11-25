@@ -17,7 +17,10 @@ import {
 } from 'lucide-react';
 import { api, itemPrimaryImageUrl } from '../api/client';
 import LessonProgressIcon from '../components/LessonProgressIcon';
-import LessonSummaryPanel, { BatchSummaryBanner } from '../components/LessonSummaryPanel';
+import LessonSummaryPanel, {
+  BatchSummaryBanner,
+  shouldShowBatchBanner,
+} from '../components/LessonSummaryPanel';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import VideoPlayer, { type VideoPlayerHandle } from '../components/VideoPlayer';
@@ -197,11 +200,14 @@ export default function CourseDetailPage() {
   const [activeCurrentTimeSec, setActiveCurrentTimeSec] = useState(0);
   const [summaryLessonIds, setSummaryLessonIds] = useState<string[]>([]);
   const [batchJob, setBatchJob] = useState<CourseBatchSummaryJob | null>(null);
+  const [batchResultDismissed, setBatchResultDismissed] = useState(false);
   const [startingBatch, setStartingBatch] = useState(false);
   const [cancellingBatch, setCancellingBatch] = useState(false);
 
   const batchJobRef = useRef<CourseBatchSummaryJob | null>(null);
   batchJobRef.current = batchJob;
+  const prevBatchRunningRef = useRef(false);
+  const userCancelledBatchRef = useRef(false);
   const summaryStatusInitializedRef = useRef(false);
   const knownSummaryLessonIdsRef = useRef<Set<string>>(new Set());
   const subtitlesRefreshInFlightRef = useRef<string | null>(null);
@@ -324,6 +330,9 @@ export default function CourseDetailPage() {
     setActiveCurrentTimeSec(0);
     setSummaryLessonIds([]);
     setBatchJob(null);
+    setBatchResultDismissed(false);
+    prevBatchRunningRef.current = false;
+    userCancelledBatchRef.current = false;
     setRightTab('syllabus');
     setSummaryTabOpened(false);
     summaryStatusInitializedRef.current = false;
@@ -351,6 +360,32 @@ export default function CourseDetailPage() {
     setActiveCurrentTimeSec(0);
     latestKnownSubtitlesRef.current = null;
   }, [activeLessonId]);
+
+  // Detect batch running transitions to clear dismissed errors on start and surface completion toast
+  useEffect(() => {
+    const wasRunning = prevBatchRunningRef.current;
+    const nowRunning = Boolean(batchJob?.running);
+    prevBatchRunningRef.current = nowRunning;
+
+    if (!wasRunning && nowRunning) {
+      setBatchResultDismissed(false);
+      return;
+    }
+
+    if (wasRunning && !nowRunning) {
+      const wasUserCancelled = userCancelledBatchRef.current;
+      userCancelledBatchRef.current = false;
+
+      if (batchJob && !wasUserCancelled && batchJob.current_stage !== 'cancelled') {
+        const msg = `批量总结完成：成功 ${batchJob.completed}，跳过 ${batchJob.skipped}，失败 ${batchJob.failed}`;
+        if (batchJob.failed > 0 || (batchJob.errors?.length ?? 0) > 0) {
+          toast.error(msg);
+        } else {
+          toast.success(msg);
+        }
+      }
+    }
+  }, [batchJob, toast]);
 
   // Visibility-aware 1.5s polling while a course batch summary job is running
   const isBatchRunning = Boolean(batchJob?.running);
@@ -514,6 +549,8 @@ export default function CourseDetailPage() {
     async (mode: 'missing_only' | 'all' = 'missing_only') => {
       if (!courseId || startingBatch) return;
       setStartingBatch(true);
+      userCancelledBatchRef.current = false;
+      setBatchResultDismissed(false);
       try {
         const job = await api.generateCourseSummaries(courseId, { mode });
         if (activeCourseIdRef.current !== courseId) return;
@@ -537,12 +574,14 @@ export default function CourseDetailPage() {
   const handleCancelBatch = useCallback(async () => {
     if (!courseId || cancellingBatch) return;
     setCancellingBatch(true);
+    userCancelledBatchRef.current = true;
     try {
       const job = await api.cancelCourseSummaries(courseId);
       if (activeCourseIdRef.current !== courseId) return;
       setBatchJob(job);
       void fetchCourseSummariesStatus(courseId);
     } catch (err) {
+      userCancelledBatchRef.current = false;
       const msg = err instanceof Error ? err.message : '取消批量任务失败';
       toast.error(msg);
     } finally {
@@ -899,11 +938,15 @@ export default function CourseDetailPage() {
         </div>
 
         {/* Right Sticky Chapter & Lesson Playlist / AI Summary Sidebar */}
-        {sidebarOpen && (
-          <aside
-            aria-label={rightTab === 'syllabus' ? '课程目录' : 'AI 总结'}
-            className="rounded-3xl bg-card border border-subtle shadow-card overflow-hidden lg:sticky lg:top-6"
-          >
+        <aside
+          aria-label={rightTab === 'syllabus' ? '课程目录' : 'AI 总结'}
+          hidden={!sidebarOpen}
+          className={
+            sidebarOpen
+              ? 'rounded-3xl bg-card border border-subtle shadow-card overflow-hidden lg:sticky lg:top-6'
+              : 'hidden'
+          }
+        >
             <div
               role="tablist"
               aria-label="课程右侧栏"
@@ -981,12 +1024,13 @@ export default function CourseDetailPage() {
                 </Tooltip>
               </div>
 
-              {batchJob?.running && (
+              {shouldShowBatchBanner(batchJob, batchResultDismissed) && (
                 <div className="border-b border-subtle p-3">
                   <BatchSummaryBanner
                     batchJob={batchJob}
                     cancelling={cancellingBatch}
                     onCancel={handleCancelBatch}
+                    onDismiss={() => setBatchResultDismissed(true)}
                   />
                 </div>
               )}
@@ -1104,6 +1148,8 @@ export default function CourseDetailPage() {
                   onSummaryUpdated={handleSummaryUpdated}
                   batchJob={batchJob}
                   batchSyncKey={batchSyncKey}
+                  batchResultDismissed={batchResultDismissed}
+                  onDismissBatch={() => setBatchResultDismissed(true)}
                   onStartBatch={handleStartBatch}
                   onCancelBatch={handleCancelBatch}
                   startingBatch={startingBatch}
@@ -1112,7 +1158,6 @@ export default function CourseDetailPage() {
               </div>
             )}
           </aside>
-        )}
       </div>
     </div>
   );

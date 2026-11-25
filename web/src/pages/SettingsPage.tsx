@@ -672,9 +672,11 @@ export default function SettingsPage() {
               className={FIELD_INPUT_CLASS}
             />
             <p className="text-[11px] text-ink-muted">
-              {aiAsrBaseUrl.trim() === ''
-                ? '留空复用上方 AI API Key'
-                : '留空表示该服务无需认证（不透传主 AI 密钥）'}
+              {settings?.ai_asr_api_key_set && !clearAiAsrKey
+                ? '已保存独立 ASR 密钥，留空将保留当前密钥；勾选上方「清除已存 Key」可清空'
+                : aiAsrBaseUrl.trim() === ''
+                  ? '留空复用上方 AI API Key'
+                  : '留空表示该服务无需认证（不透传主 AI 密钥）'}
             </p>
           </div>
 

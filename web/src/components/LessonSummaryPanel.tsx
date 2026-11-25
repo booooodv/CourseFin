@@ -16,6 +16,7 @@ import {
   Settings,
   Sparkles,
   Square,
+  X,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { useToast } from './Toast';
@@ -126,17 +127,78 @@ function findActiveTimelineIndex(
   return -1;
 }
 
+export function shouldShowBatchBanner(
+  batchJob: CourseBatchSummaryJob | null,
+  dismissed = false,
+): batchJob is CourseBatchSummaryJob {
+  if (!batchJob) return false;
+  if (batchJob.running) return true;
+  if (dismissed) return false;
+  return batchJob.failed > 0 || (batchJob.errors?.length ?? 0) > 0;
+}
+
 export interface BatchSummaryBannerProps {
   batchJob: CourseBatchSummaryJob;
   cancelling?: boolean;
   onCancel: () => void | Promise<void>;
+  onDismiss?: () => void;
 }
 
 export function BatchSummaryBanner({
   batchJob,
   cancelling = false,
   onCancel,
+  onDismiss,
 }: BatchSummaryBannerProps) {
+  if (!batchJob.running) {
+    const errors = batchJob.errors ?? [];
+    const summaryHeading =
+      batchJob.current_stage === 'cancelled'
+        ? `批量总结已取消：成功 ${batchJob.completed}，跳过 ${batchJob.skipped}，失败 ${batchJob.failed}`
+        : `批量总结完成：成功 ${batchJob.completed}，跳过 ${batchJob.skipped}，失败 ${batchJob.failed}`;
+
+    return (
+      <div
+        role="status"
+        className="rounded-2xl border border-status-danger/30 bg-status-danger-soft p-3 space-y-2"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex items-start gap-1.5 min-w-0 text-xs font-semibold text-status-danger-ink">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+            <span className="leading-snug break-words">{summaryHeading}</span>
+          </div>
+
+          {onDismiss && (
+            <button
+              type="button"
+              onClick={onDismiss}
+              aria-label="关闭批量错误提示"
+              className="rounded-lg p-1 text-status-danger-ink hover:bg-card/60 transition-colors shrink-0 cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+
+        {errors.length > 0 && (
+          <ul className="space-y-1.5 max-h-40 overflow-y-auto">
+            {errors.map((item, idx) => (
+              <li
+                key={`${item.lesson_id}-${idx}`}
+                className="rounded-xl border border-status-danger/20 bg-card/85 px-2.5 py-1.5 text-[11px] text-ink-secondary leading-snug break-words"
+              >
+                <span className="font-semibold text-status-danger-ink">
+                  {item.lesson_title || item.lesson_id}
+                </span>
+                <span>：{item.error}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
   const doneCount = batchJob.completed + batchJob.skipped + batchJob.failed;
   const pct =
     batchJob.total > 0 ? Math.min(100, Math.round((doneCount / batchJob.total) * 100)) : 0;
@@ -191,6 +253,8 @@ export interface LessonSummaryPanelProps {
   onSummaryUpdated: (lessonId: string, sourceType?: string, isNewlyCompleted?: boolean) => void;
   batchJob: CourseBatchSummaryJob | null;
   batchSyncKey?: string;
+  batchResultDismissed?: boolean;
+  onDismissBatch?: () => void;
   onStartBatch: (mode?: 'missing_only' | 'all') => void | Promise<void>;
   onCancelBatch: () => void | Promise<void>;
   startingBatch?: boolean;
@@ -205,6 +269,8 @@ export default function LessonSummaryPanel({
   onSummaryUpdated,
   batchJob,
   batchSyncKey,
+  batchResultDismissed,
+  onDismissBatch,
   onStartBatch,
   onCancelBatch,
   startingBatch = false,
@@ -225,6 +291,26 @@ export default function LessonSummaryPanel({
   const [copied, setCopied] = useState(false);
   const [showManualInput, setShowManualInput] = useState(false);
   const [manualTranscript, setManualTranscript] = useState('');
+  const [localBatchDismissed, setLocalBatchDismissed] = useState(false);
+
+  const scopedSummary = lessonId && summary?.lesson_id === lessonId ? summary : null;
+  const scopedJob = lessonId && job?.lesson_id === lessonId ? job : null;
+
+  useEffect(() => {
+    setLocalBatchDismissed(false);
+  }, [course.id]);
+
+  useEffect(() => {
+    if (batchJob?.running) {
+      setLocalBatchDismissed(false);
+    }
+  }, [batchJob?.running]);
+
+  const effectiveBatchDismissed = batchResultDismissed ?? localBatchDismissed;
+  const handleDismissBatch = useCallback(() => {
+    setLocalBatchDismissed(true);
+    onDismissBatch?.();
+  }, [onDismissBatch]);
 
   const activeLessonIdRef = useRef<string | null>(lessonId);
   activeLessonIdRef.current = lessonId;
@@ -293,6 +379,10 @@ export default function LessonSummaryPanel({
     requestSeqRef.current += 1;
     const seq = requestSeqRef.current;
 
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = null;
+    }
     awaitingCompletionForLessonRef.current = null;
     setSummary(null);
     setJob(null);
@@ -322,13 +412,13 @@ export default function LessonSummaryPanel({
     }
     prevBatchSyncKeyRef.current = batchSyncKey;
     if (!lessonId || !batchSyncKey) return;
-    if (job?.running || submitting) return;
+    if (scopedJob?.running || submitting) return;
     const seq = requestSeqRef.current;
     void fetchLessonSummaryState(lessonId, seq, false);
-  }, [batchSyncKey, lessonId, job?.running, submitting, fetchLessonSummaryState]);
+  }, [batchSyncKey, lessonId, scopedJob?.running, submitting, fetchLessonSummaryState]);
 
   // Visibility-aware 1.5s polling while a single-lesson summary job is running
-  const isJobRunning = Boolean(job?.running);
+  const isJobRunning = Boolean(scopedJob?.running);
   useEffect(() => {
     if (!lessonId || !isJobRunning) {
       return;
@@ -433,12 +523,12 @@ export default function LessonSummaryPanel({
   }, [lessonId, cancelling, fetchLessonSummaryState, toast]);
 
   const handleCopyMarkdown = useCallback(async () => {
-    if (!summary || !activeEntry) return;
+    if (!scopedSummary || !activeEntry) return;
     const markdown = formatLessonSummaryMarkdown({
       courseTitle: course.title,
       chapterTitle: activeEntry.chapterTitle,
       lessonTitle: activeEntry.lesson.title,
-      summary,
+      summary: scopedSummary,
     });
 
     const ok = await copyTextToClipboard(markdown);
@@ -454,23 +544,26 @@ export default function LessonSummaryPanel({
     } else {
       toast.error('复制失败，请检查浏览器剪贴板权限');
     }
-  }, [summary, activeEntry, course.title, toast]);
+  }, [scopedSummary, activeEntry, course.title, toast]);
 
   const activeTimelineIndex = useMemo(() => {
-    if (!summary) return -1;
-    return findActiveTimelineIndex(summary.timeline, summary.has_timestamps, currentTimeSec);
-  }, [summary, currentTimeSec]);
+    if (!scopedSummary) return -1;
+    return findActiveTimelineIndex(scopedSummary.timeline, scopedSummary.has_timestamps, currentTimeSec);
+  }, [scopedSummary, currentTimeSec]);
+
+  const batchBanner = shouldShowBatchBanner(batchJob, effectiveBatchDismissed) ? (
+    <BatchSummaryBanner
+      batchJob={batchJob}
+      cancelling={cancellingBatch}
+      onCancel={onCancelBatch}
+      onDismiss={handleDismissBatch}
+    />
+  ) : null;
 
   if (!activeEntry || !lessonId) {
     return (
       <div className="p-5 space-y-4">
-        {batchJob?.running && (
-          <BatchSummaryBanner
-            batchJob={batchJob}
-            cancelling={cancellingBatch}
-            onCancel={onCancelBatch}
-          />
-        )}
+        {batchBanner}
         <div className="rounded-2xl border border-dashed border-default bg-subtle/50 p-6 text-center text-xs text-ink-secondary">
           请选择一个课时查看或生成 AI 总结
         </div>
@@ -478,16 +571,10 @@ export default function LessonSummaryPanel({
     );
   }
 
-  if (loading && !summary && !job && !capabilities) {
+  if (loading && !scopedSummary && !scopedJob && !capabilities) {
     return (
       <div className="p-5 space-y-4">
-        {batchJob?.running && (
-          <BatchSummaryBanner
-            batchJob={batchJob}
-            cancelling={cancellingBatch}
-            onCancel={onCancelBatch}
-          />
-        )}
+        {batchBanner}
         <div className="flex flex-col items-center justify-center py-12 gap-2.5 text-ink-secondary">
           <Loader2 className="h-6 w-6 animate-spin text-accent" />
           <p className="text-xs">正在加载 AI 总结...</p>
@@ -496,16 +583,10 @@ export default function LessonSummaryPanel({
     );
   }
 
-  if (fetchError && !summary && !capabilities) {
+  if (fetchError && !scopedSummary && !capabilities) {
     return (
       <div className="p-5 space-y-4">
-        {batchJob?.running && (
-          <BatchSummaryBanner
-            batchJob={batchJob}
-            cancelling={cancellingBatch}
-            onCancel={onCancelBatch}
-          />
-        )}
+        {batchBanner}
         <div className="rounded-2xl border border-status-danger/30 bg-status-danger-soft p-4 text-center space-y-3">
           <p className="text-xs font-medium text-status-danger-ink">{fetchError}</p>
           <button
@@ -531,27 +612,22 @@ export default function LessonSummaryPanel({
   const hasCachedTranscript = capabilities?.has_cached_transcript ?? false;
   const hasFfmpeg = capabilities?.has_ffmpeg ?? true;
   const canRetranscribe =
-    summary?.source_type === 'asr' || Boolean(capabilities?.has_cached_transcript);
+    scopedSummary?.source_type === 'asr' || Boolean(capabilities?.has_cached_transcript);
 
   const showFailureBanner =
-    !job?.running && (Boolean(actionError) || job?.stage === 'failed' || job?.stage === 'cancelled');
+    !scopedJob?.running &&
+    (Boolean(actionError) || scopedJob?.stage === 'failed' || scopedJob?.stage === 'cancelled');
   const failureMessage =
     actionError ||
-    (job?.stage === 'failed' ? job.error || job.message || '生成 AI 总结失败' : '') ||
-    (job?.stage === 'cancelled' ? '任务已取消，可随时重新生成' : '');
+    (scopedJob?.stage === 'failed' ? scopedJob.error || scopedJob.message || '生成 AI 总结失败' : '') ||
+    (scopedJob?.stage === 'cancelled' ? '任务已取消，可随时重新生成' : '');
 
   return (
     <div className="max-h-[calc(100vh-8rem)] overflow-y-auto p-4 space-y-4">
-      {batchJob?.running && (
-        <BatchSummaryBanner
-          batchJob={batchJob}
-          cancelling={cancellingBatch}
-          onCancel={onCancelBatch}
-        />
-      )}
+      {batchBanner}
 
       {/* Single-lesson running stage card (kept above old summary if one exists) */}
-      {job?.running && (
+      {scopedJob?.running && (
         <div className="rounded-2xl border border-accent-ring/40 bg-accent-soft p-3.5 space-y-2.5">
           <div className="flex items-start justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
@@ -559,13 +635,13 @@ export default function LessonSummaryPanel({
               <div className="min-w-0">
                 <p className="text-xs font-semibold text-accent-ink break-words">
                   {formatSummaryJobStageText(
-                    job.stage,
-                    job.chunk_index,
-                    job.chunk_total,
-                    job.message,
+                    scopedJob.stage,
+                    scopedJob.chunk_index,
+                    scopedJob.chunk_total,
+                    scopedJob.message,
                   )}
                 </p>
-                {job.stage === 'transcribing' && (
+                {scopedJob.stage === 'transcribing' && (
                   <p className="text-[11px] text-ink-secondary mt-0.5">
                     转写完成后将自动保存为「AI 转写字幕」轨道
                   </p>
@@ -584,12 +660,12 @@ export default function LessonSummaryPanel({
             </button>
           </div>
 
-          {job.chunk_total > 0 && (
+          {scopedJob.chunk_total > 0 && (
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
               <div
                 className="h-full rounded-full bg-accent transition-all"
                 style={{
-                  width: `${Math.min(100, Math.max(8, Math.round((job.chunk_index / job.chunk_total) * 100)))}%`,
+                  width: `${Math.min(100, Math.max(8, Math.round((scopedJob.chunk_index / scopedJob.chunk_total) * 100)))}%`,
                 }}
               />
             </div>
@@ -601,7 +677,7 @@ export default function LessonSummaryPanel({
       {showFailureBanner && failureMessage && (
         <div
           className={`rounded-2xl border p-3 flex items-start gap-2 text-xs ${
-            job?.stage === 'cancelled' && !actionError
+            scopedJob?.stage === 'cancelled' && !actionError
               ? 'border-status-warning/30 bg-status-warning-soft text-status-warning-ink'
               : 'border-status-danger/30 bg-status-danger-soft text-status-danger-ink'
           }`}
@@ -612,18 +688,18 @@ export default function LessonSummaryPanel({
       )}
 
       {/* Saved summary view */}
-      {summary && (
+      {scopedSummary && (
         <div className="space-y-4">
           {/* Action toolbar */}
           <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-subtle">
             <div className="flex flex-wrap items-center gap-1.5 min-w-0">
               <span className="inline-flex items-center gap-1 rounded-full border border-subtle bg-subtle px-2.5 py-0.5 text-[11px] font-medium text-ink-secondary">
                 <Sparkles className="h-3 w-3 text-accent" />
-                <span>{formatSourceBadge(summary.source_type, summary.source_label)}</span>
+                <span>{formatSourceBadge(scopedSummary.source_type, scopedSummary.source_label)}</span>
               </span>
-              {summary.model && (
+              {scopedSummary.model && (
                 <span className="text-[11px] text-ink-muted truncate max-w-[140px]">
-                  {summary.model}
+                  {scopedSummary.model}
                 </span>
               )}
             </div>
@@ -651,7 +727,7 @@ export default function LessonSummaryPanel({
                 <button
                   type="button"
                   onClick={() => void handleGenerate({ force: true })}
-                  disabled={Boolean(job?.running) || submitting || !aiConfigured}
+                  disabled={Boolean(scopedJob?.running) || submitting || !aiConfigured}
                   className="inline-flex items-center gap-1 rounded-full border border-default bg-card px-2.5 py-1.5 text-xs font-medium text-ink-primary hover:bg-subtle disabled:opacity-50 disabled:pointer-events-none transition-colors cursor-pointer"
                 >
                   <RefreshCw className="h-3 w-3" />
@@ -671,7 +747,7 @@ export default function LessonSummaryPanel({
                     type="button"
                     onClick={() => void handleGenerate({ force: true, force_retranscribe: true })}
                     disabled={
-                      Boolean(job?.running) || submitting || !aiConfigured || !asrConfigured || !hasFfmpeg
+                      Boolean(scopedJob?.running) || submitting || !aiConfigured || !asrConfigured || !hasFfmpeg
                     }
                     className="inline-flex items-center gap-1 rounded-full border border-subtle bg-subtle px-2.5 py-1.5 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary disabled:opacity-50 disabled:pointer-events-none transition-colors cursor-pointer"
                   >
@@ -690,17 +766,17 @@ export default function LessonSummaryPanel({
               <h3 className="text-sm font-bold text-ink-primary">AI 总结视频大纲</h3>
             </div>
 
-            {summary.overview && (
+            {scopedSummary.overview && (
               <div className="rounded-2xl border border-subtle bg-subtle/70 p-3 text-xs sm:text-sm text-ink-secondary leading-relaxed">
-                {summary.overview}
+                {scopedSummary.overview}
               </div>
             )}
 
-            {summary.outline.length > 0 && (
+            {scopedSummary.outline.length > 0 && (
               <ol className="space-y-2">
-                {summary.outline.map((item, idx) => {
+                {scopedSummary.outline.map((item, idx) => {
                   const hasStart =
-                    summary.has_timestamps &&
+                    scopedSummary.has_timestamps &&
                     item.start_sec !== null &&
                     item.start_sec !== undefined;
                   return (
@@ -751,14 +827,14 @@ export default function LessonSummaryPanel({
             </div>
 
             <div className="space-y-2.5">
-              {summary.timeline.map((section, idx) => {
+              {scopedSummary.timeline.map((section, idx) => {
                 const isActive = idx === activeTimelineIndex;
                 const hasStart =
-                  summary.has_timestamps &&
+                  scopedSummary.has_timestamps &&
                   section.start_sec !== null &&
                   section.start_sec !== undefined;
                 const hasEnd =
-                  summary.has_timestamps &&
+                  scopedSummary.has_timestamps &&
                   section.end_sec !== null &&
                   section.end_sec !== undefined;
 
@@ -832,7 +908,7 @@ export default function LessonSummaryPanel({
       )}
 
       {/* Empty states when no saved summary exists and no single-lesson job is running */}
-      {!summary && !job?.running && capabilities && (
+      {!scopedSummary && !scopedJob?.running && capabilities && (
         <div className="rounded-2xl border border-subtle bg-subtle/40 p-4 space-y-3.5">
           {!aiConfigured ? (
             <div className="space-y-3 text-center py-2">

@@ -690,7 +690,9 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
 
     const { container } = renderCoursePage();
     expect(await screen.findByText('无可用字幕')).toBeInTheDocument();
-    expect(artMockInstances).toHaveLength(1);
+    await waitFor(() => {
+      expect(artMockInstances).toHaveLength(1);
+    });
     const initialArt = artMockInstances[0];
 
     await user.click(screen.getByRole('tab', { name: /AI 总结/ }));
@@ -1293,5 +1295,316 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
     });
     expect(playbackCalls).toBe(2);
     expect(screen.getAllByText(/已生成 AI 转写字幕，可在播放器字幕菜单开启/)).toHaveLength(1);
+    expect(screen.getByText('批量总结完成：成功 2，跳过 0，失败 0')).toBeInTheDocument();
+  });
+
+  it('surfaces batch completion toast and dismissible error breakdown on failures, and clears dismissed state on new batch', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
+    const course = makeCourse();
+    const playback = makePlayback();
+    let batchRun = 0;
+    let pollCount = 0;
+    let batchActive = false;
+
+    const makeRunningBatch = (): CourseBatchSummaryJob => ({
+      course_id: 'c1',
+      running: true,
+      total: 2,
+      completed: 0,
+      skipped: 0,
+      failed: 0,
+      current_lesson_id: 'l1',
+      current_lesson_title: '1.1 服务拆分原则',
+      current_stage: 'summarizing',
+      chunk_index: 0,
+      chunk_total: 0,
+      errors: [],
+      started_at: '2026-11-25T00:00:00Z',
+    });
+
+    const makeFailedBatch = (): CourseBatchSummaryJob => ({
+      course_id: 'c1',
+      running: false,
+      total: 2,
+      completed: 1,
+      skipped: 0,
+      failed: 1,
+      current_lesson_id: '',
+      current_lesson_title: '',
+      current_stage: 'completed',
+      chunk_index: 0,
+      chunk_total: 0,
+      errors: [
+        {
+          lesson_id: 'l2',
+          lesson_title: '1.2 gRPC 实战与拦截器',
+          error: `ASR 请求超时 504 (run ${batchRun})`,
+          error_code: 'asr_failed',
+        },
+      ],
+      started_at: '2026-11-25T00:00:00Z',
+      finished_at: '2026-11-25T00:01:00Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) return jsonResponse(course);
+        if (url.includes('/api/v1/lessons/l1/playback')) return jsonResponse(playback);
+        if (url.endsWith('/api/v1/courses/c1/summaries/status')) {
+          if (batchRun === 0) {
+            return jsonResponse({
+              course_id: 'c1',
+              summary_lesson_ids: [],
+              batch_job: null,
+            });
+          }
+          if (batchActive) {
+            pollCount += 1;
+            if (pollCount >= 1) {
+              batchActive = false;
+              return jsonResponse({
+                course_id: 'c1',
+                summary_lesson_ids: ['l1'],
+                batch_job: makeFailedBatch(),
+              });
+            }
+          }
+          return jsonResponse({
+            course_id: 'c1',
+            summary_lesson_ids: ['l1'],
+            batch_job: makeFailedBatch(),
+          });
+        }
+        if (url.endsWith('/api/v1/courses/c1/summaries/generate') && init?.method === 'POST') {
+          batchRun += 1;
+          pollCount = 0;
+          batchActive = true;
+          return jsonResponse(makeRunningBatch(), 202);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = renderCoursePage();
+    expect(await screen.findByRole('heading', { name: 'Go 微服务全栈实战' })).toBeInTheDocument();
+
+    const sidebar = screen.getByRole('complementary');
+    await user.click(within(sidebar).getByRole('button', { name: /批量总结/ }));
+    expect(await within(sidebar).findByText(/批量生成中 0\/2/)).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    await waitFor(() => {
+      expect(within(sidebar).queryByText(/批量生成中/)).toBeNull();
+      expect(within(sidebar).getByText(/ASR 请求超时 504 \(run 1\)/)).toBeInTheDocument();
+    });
+
+    const errorBanner = within(sidebar).getByRole('status');
+    expect(
+      within(errorBanner).getByText('批量总结完成：成功 1，跳过 0，失败 1'),
+    ).toBeInTheDocument();
+    expect(within(errorBanner).getByText('1.2 gRPC 实战与拦截器')).toBeInTheDocument();
+    expect(within(errorBanner).getByText(/ASR 请求超时 504 \(run 1\)/)).toBeInTheDocument();
+    // Completion toast also surfaced
+    expect(screen.getAllByText('批量总结完成：成功 1，跳过 0，失败 1').length).toBeGreaterThanOrEqual(2);
+    expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
+
+    // Dismiss the error banner
+    await user.click(within(sidebar).getByRole('button', { name: '关闭批量错误提示' }));
+    expect(within(sidebar).queryByText(/ASR 请求超时 504/)).toBeNull();
+
+    // Starting a new batch auto-clears dismissed state and shows new failure details on completion
+    await user.click(within(sidebar).getByRole('button', { name: /批量总结/ }));
+    expect(await within(sidebar).findByText(/批量生成中 0\/2/)).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    await waitFor(() => {
+      expect(within(sidebar).getByText(/ASR 请求超时 504 \(run 2\)/)).toBeInTheDocument();
+    });
+  });
+
+  it('keeps ASR polling alive and refreshes playback subtitles in-place when sidebar is collapsed', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
+    const course = makeCourse();
+    const initialPlayback = makePlayback({ subtitles: [] });
+    const refreshedPlayback = makePlayback({
+      subtitles: [
+        {
+          index: 100,
+          language: 'zh',
+          title: 'AI 转写字幕',
+          format: 'vtt',
+          is_default: false,
+          is_external: true,
+          is_text: true,
+          url: '/Videos/l1/mf1/Subtitles/100/Stream.vtt',
+        },
+      ],
+    });
+
+    let playbackCalls = 0;
+    let summaryGetCalls = 0;
+    let phase: 'empty' | 'running' | 'completed' = 'empty';
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) return jsonResponse(course);
+        if (url.includes('/api/v1/lessons/l1/playback')) {
+          playbackCalls += 1;
+          return jsonResponse(phase === 'completed' ? refreshedPlayback : initialPlayback);
+        }
+        if (url.endsWith('/api/v1/courses/c1/summaries/status')) {
+          return jsonResponse({
+            course_id: 'c1',
+            summary_lesson_ids: phase === 'completed' ? ['l1'] : [],
+            batch_job: null,
+          });
+        }
+        if (url.endsWith('/api/v1/lessons/l1/summary') && (!init?.method || init.method === 'GET')) {
+          summaryGetCalls += 1;
+          if (phase === 'running') {
+            if (summaryGetCalls >= 3) {
+              phase = 'completed';
+              return jsonResponse({
+                lesson_id: 'l1',
+                summary: makeSampleSummary({
+                  source_type: 'asr',
+                  source_label: 'AI 语音转写',
+                }),
+                job: {
+                  lesson_id: 'l1',
+                  course_id: 'c1',
+                  running: false,
+                  stage: 'completed',
+                  message: 'AI 总结生成完成',
+                  chunk_index: 2,
+                  chunk_total: 2,
+                  source_type: 'asr',
+                  started_at: '2026-11-25T00:00:00Z',
+                  finished_at: '2026-11-25T00:01:00Z',
+                },
+                capabilities: {
+                  has_subtitle: false,
+                  has_cached_transcript: true,
+                  transcript_source: 'asr',
+                  ai_configured: true,
+                  asr_configured: true,
+                  has_ffmpeg: true,
+                },
+              });
+            }
+            return jsonResponse({
+              lesson_id: 'l1',
+              summary: null,
+              job: {
+                lesson_id: 'l1',
+                course_id: 'c1',
+                running: true,
+                stage: 'transcribing',
+                message: '正在语音转写（分片 1/2）...',
+                chunk_index: 1,
+                chunk_total: 2,
+                source_type: 'asr',
+                started_at: '2026-11-25T00:00:00Z',
+              },
+              capabilities: {
+                has_subtitle: false,
+                has_cached_transcript: false,
+                transcript_source: '',
+                ai_configured: true,
+                asr_configured: true,
+                has_ffmpeg: true,
+              },
+            });
+          }
+          return jsonResponse({
+            lesson_id: 'l1',
+            summary: null,
+            job: null,
+            capabilities: {
+              has_subtitle: false,
+              has_cached_transcript: false,
+              transcript_source: '',
+              ai_configured: true,
+              asr_configured: true,
+              has_ffmpeg: true,
+            },
+          });
+        }
+        if (url.endsWith('/api/v1/lessons/l1/summary/generate') && init?.method === 'POST') {
+          phase = 'running';
+          return jsonResponse(
+            {
+              lesson_id: 'l1',
+              course_id: 'c1',
+              running: true,
+              stage: 'transcribing',
+              message: '正在语音转写（分片 1/2）...',
+              chunk_index: 1,
+              chunk_total: 2,
+              source_type: 'asr',
+              started_at: '2026-11-25T00:00:00Z',
+            },
+            202,
+          );
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = renderCoursePage();
+    expect(await screen.findByText('无可用字幕')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(artMockInstances).toHaveLength(1);
+    });
+    const initialArt = artMockInstances[0];
+
+    await user.click(screen.getByRole('tab', { name: /AI 总结/ }));
+    await user.click(await screen.findByRole('button', { name: '转写并生成总结' }));
+    expect(await screen.findByText(/正在语音转写（分片 1\/2）/)).toBeInTheDocument();
+
+    // User collapses the sidebar while ASR is running
+    await user.click(screen.getByRole('button', { name: /收起目录/ }));
+    expect(screen.getByRole('button', { name: /展开目录/ })).toBeInTheDocument();
+    const collapsedAside = container.querySelector('aside');
+    expect(collapsedAside).toBeTruthy();
+    expect(collapsedAside).toHaveAttribute('hidden');
+    expect(collapsedAside).toHaveClass('hidden');
+
+    // Polling continues in the mounted-but-hidden sidebar until ASR completes
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    await waitFor(() => {
+      expect(playbackCalls).toBe(2);
+    });
+
+    expect(artMockInstances).toHaveLength(1);
+    expect(initialArt.destroy).not.toHaveBeenCalled();
+    expect(initialArt.controls.update).toHaveBeenCalled();
+    expect(screen.getByText(/已生成 AI 转写字幕，可在播放器字幕菜单开启/)).toBeInTheDocument();
+
+    // Re-open sidebar -> summary & sparkle badge are present
+    await user.click(screen.getByRole('button', { name: /展开目录/ }));
+    expect(collapsedAside).not.toHaveAttribute('hidden');
+    expect(screen.getByText('AI 总结视频大纲')).toBeInTheDocument();
+    expect(screen.getByText('AI 语音转写')).toBeInTheDocument();
   });
 });
