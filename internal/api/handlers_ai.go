@@ -15,6 +15,7 @@ import (
 	"coursefin/internal/ai"
 	"coursefin/internal/catalog"
 	"coursefin/internal/id"
+	"coursefin/internal/media"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -341,7 +342,172 @@ func (h *handler) handleAIOrganize(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, proposal)
 }
 
+type importProposalLesson struct {
+	MediaFileID string `json:"media_file_id"`
+	Title       string `json:"title"`
+}
+
+type importProposalChapter struct {
+	Title   string                 `json:"title"`
+	Lessons []importProposalLesson `json:"lessons"`
+}
+
+type importOrganizeProposal struct {
+	Title    string                  `json:"title"`
+	Overview string                  `json:"overview"`
+	Tags     []string                `json:"tags"`
+	Chapters []importProposalChapter `json:"chapters"`
+}
+
+func (h *handler) handleImportAIOrganize(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var req struct {
+		SourceID   string `json:"source_id"`
+		DirRelPath string `json:"dir_rel_path"`
+		Title      string `json:"title"`
+		Overview   string `json:"overview"`
+		Chapters   []struct {
+			Title   string `json:"title"`
+			Lessons []struct {
+				MediaFileID string `json:"media_file_id"`
+				Title       string `json:"title"`
+			} `json:"lessons"`
+		} `json:"chapters"`
+	}
+	if err := decodeJSON(r, &req, false); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	aiCfg, err := h.loadAIConfig(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if aiCfg.BaseURL == "" || aiCfg.Model == "" {
+		writeError(w, http.StatusBadRequest, "AI provider is not configured (ai_base_url and ai_model required)")
+		return
+	}
+
+	sourceID := normalizeID(req.SourceID)
+	if sourceID == "" {
+		writeError(w, http.StatusBadRequest, "source_id is required")
+		return
+	}
+	if _, err := h.cat.GetSource(ctx, sourceID); err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+
+	var mfIDs []string
+	seen := make(map[string]bool)
+	for _, ch := range req.Chapters {
+		for _, l := range ch.Lessons {
+			mid := normalizeID(l.MediaFileID)
+			if mid == "" {
+				writeError(w, http.StatusBadRequest, "media_file_id cannot be empty")
+				return
+			}
+			if seen[mid] {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("duplicate media_file_id %q", l.MediaFileID))
+				return
+			}
+			seen[mid] = true
+			mfIDs = append(mfIDs, mid)
+		}
+	}
+	if len(mfIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "chapters must contain at least one lesson")
+		return
+	}
+
+	mfMeta, err := h.loadMediaAndSubtitlesByIDs(ctx, mfIDs, aiCfg.MaxSubtitleChars > 0)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, mid := range mfIDs {
+		meta, ok := mfMeta[mid]
+		if !ok || meta.sourceID != sourceID {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("media_file_id %q does not belong to source %s", mid, sourceID))
+			return
+		}
+	}
+
+	input := ai.CourseOrganizeInput{
+		CurrentTitle:   strings.TrimSpace(req.Title),
+		SourceRootPath: strings.TrimSpace(req.DirRelPath),
+		Overview:       strings.TrimSpace(req.Overview),
+		Chapters:       make([]ai.OrganizeChapterInput, 0, len(req.Chapters)),
+	}
+
+	remainingBudget := aiCfg.MaxSubtitleChars
+	if remainingBudget < 0 {
+		remainingBudget = 0
+	}
+
+	for _, ch := range req.Chapters {
+		chIn := ai.OrganizeChapterInput{
+			Title:   ch.Title,
+			Lessons: make([]ai.OrganizeLessonInput, 0, len(ch.Lessons)),
+		}
+		for _, l := range ch.Lessons {
+			mid := normalizeID(l.MediaFileID)
+			meta := mfMeta[mid]
+			excerpt := ""
+			if remainingBudget > 0 && meta.hasSub {
+				excerpt = h.readSubtitleExcerpt(ctx, meta, ai.DefaultPerLessonSubtitleChars)
+				if excerpt != "" {
+					remainingBudget -= utf8.RuneCountInString(excerpt)
+				}
+			}
+			chIn.Lessons = append(chIn.Lessons, ai.OrganizeLessonInput{
+				LessonID:        mid,
+				Title:           l.Title,
+				FileName:        meta.fileName,
+				RelativePath:    meta.relativePath,
+				SubtitleExcerpt: excerpt,
+			})
+		}
+		input.Chapters = append(input.Chapters, chIn)
+	}
+
+	provider := ai.NewOpenAICompatibleProvider(aiCfg, h.aiHTTPClient)
+	proposal, err := provider.OrganizeCourse(ctx, input)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	out := importOrganizeProposal{
+		Title:    proposal.Title,
+		Overview: proposal.Overview,
+		Tags:     proposal.Tags,
+		Chapters: make([]importProposalChapter, 0, len(proposal.Chapters)),
+	}
+	if out.Tags == nil {
+		out.Tags = []string{}
+	}
+	for _, ch := range proposal.Chapters {
+		ich := importProposalChapter{
+			Title:   ch.Title,
+			Lessons: make([]importProposalLesson, 0, len(ch.Lessons)),
+		}
+		for _, l := range ch.Lessons {
+			ich.Lessons = append(ich.Lessons, importProposalLesson{
+				MediaFileID: l.LessonID,
+				Title:       l.Title,
+			})
+		}
+		out.Chapters = append(out.Chapters, ich)
+	}
+
+	writeJSON(w, http.StatusOK, out)
+}
+
 type lessonMediaSubtitleMeta struct {
+	sourceID     string
 	fileName     string
 	relativePath string
 	hasSub       bool
@@ -352,7 +518,6 @@ type lessonMediaSubtitleMeta struct {
 }
 
 func (h *handler) loadLessonMediaAndSubtitles(ctx context.Context, course *catalog.CourseDetail, includeSubtitles bool) (map[string]lessonMediaSubtitleMeta, error) {
-	out := make(map[string]lessonMediaSubtitleMeta)
 	var mfIDs []string
 	seen := make(map[string]bool)
 	for _, ch := range course.Chapters {
@@ -363,6 +528,11 @@ func (h *handler) loadLessonMediaAndSubtitles(ctx context.Context, course *catal
 			}
 		}
 	}
+	return h.loadMediaAndSubtitlesByIDs(ctx, mfIDs, includeSubtitles)
+}
+
+func (h *handler) loadMediaAndSubtitlesByIDs(ctx context.Context, mfIDs []string, includeSubtitles bool) (map[string]lessonMediaSubtitleMeta, error) {
+	out := make(map[string]lessonMediaSubtitleMeta)
 	if len(mfIDs) == 0 {
 		return out, nil
 	}
@@ -376,19 +546,20 @@ func (h *handler) loadLessonMediaAndSubtitles(ctx context.Context, course *catal
 	inClause := strings.Join(placeholders, ",")
 
 	rows, err := h.db.QueryContext(ctx, `
-		SELECT id, file_name, relative_path
+		SELECT id, source_id, file_name, relative_path
 		FROM media_files
 		WHERE id IN (`+inClause+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var mid, fn, rp string
-		if err := rows.Scan(&mid, &fn, &rp); err != nil {
+		var mid, sid, fn, rp string
+		if err := rows.Scan(&mid, &sid, &fn, &rp); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		out[mid] = lessonMediaSubtitleMeta{
+			sourceID:     sid,
 			fileName:     fn,
 			relativePath: rp,
 		}
@@ -448,7 +619,7 @@ func (h *handler) readSubtitleExcerpt(ctx context.Context, meta lessonMediaSubti
 		return ""
 	}
 
-	text := strings.TrimPrefix(string(raw), "\xEF\xBB\xBF")
+	text := media.DecodeSubtitleToUTF8(raw)
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	var parts []string
 	for _, line := range strings.Split(text, "\n") {

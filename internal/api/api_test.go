@@ -37,6 +37,8 @@ import (
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
 	"coursefin/internal/updater"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 type fakeProber struct{}
@@ -1813,5 +1815,172 @@ func TestSourceSubtitlesAndManualBindEndpoints(t *testing.T) {
 	}
 	if len(pb.Subtitles) != 1 || pb.Subtitles[0].Title != "手工关联字幕" || pb.Subtitles[0].URL == "" {
 		t.Fatalf("expected bound subtitle in playback response, got %+v", pb.Subtitles)
+	}
+}
+
+func TestImportAIOrganizeEndpoint(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "import-ai-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	courseDir := filepath.Join(env.mediaDir, "RawGoCourse")
+	writeDummyFile(t, filepath.Join(courseDir, "01_intro_1080p.mp4"), []byte("v1"))
+	writeDummyFile(t, filepath.Join(courseDir, "02_chan_1080p.mp4"), []byte("v2"))
+
+	// Write a GBK-encoded subtitle for 01_intro_1080p.mp4
+	gbkSRT, err := simplifiedchinese.GB18030.NewEncoder().Bytes([]byte("1\n00:00:00,000 --> 00:00:03,000\n欢迎来到 Go 并发编程课程\n"))
+	if err != nil {
+		t.Fatalf("encode GB18030: %v", err)
+	}
+	writeDummyFile(t, filepath.Join(courseDir, "01_intro_1080p.zh.srt"), gbkSRT)
+
+	src, err := env.catSvc.CreateSource(context.Background(), "ImportAISrc", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+
+	preview, err := env.catSvc.PreviewDirectoryImport(context.Background(), src.ID, "RawGoCourse")
+	if err != nil {
+		t.Fatalf("PreviewDirectoryImport: %v", err)
+	}
+	if len(preview.Chapters) != 1 || len(preview.Chapters[0].Lessons) != 2 {
+		t.Fatalf("unexpected preview chapters: %+v", preview.Chapters)
+	}
+	mf1 := preview.Chapters[0].Lessons[0].MediaFileID
+	mf2 := preview.Chapters[0].Lessons[1].MediaFileID
+
+	validBody := map[string]any{
+		"source_id":    src.ID,
+		"dir_rel_path": "RawGoCourse",
+		"title":        "RawGoCourse",
+		"overview":     "",
+		"chapters": []map[string]any{
+			{
+				"title": "正片",
+				"lessons": []map[string]any{
+					{"media_file_id": mf1, "title": "01_intro_1080p"},
+					{"media_file_id": mf2, "title": "02_chan_1080p"},
+				},
+			},
+		},
+	}
+
+	// 1. Without AI config -> 400
+	resp, raw := env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", validBody, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("import AI organize without config = %d, want 400: %s", resp.StatusCode, raw)
+	}
+
+	var seenPrompt string
+	mockAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenPrompt = string(body)
+		prop := map[string]any{
+			"title":    "Go 并发编程实战",
+			"overview": "系统讲解 Go 并发模型与通道机制",
+			"tags":     []string{"Go", "并发"},
+			"chapters": []map[string]any{
+				{
+					"title": "第一章：入门",
+					"lessons": []map[string]any{
+						{"lesson_id": mf1, "title": "课程导论"},
+					},
+				},
+				{
+					"title": "第二章：核心机制",
+					"lessons": []map[string]any{
+						{"lesson_id": mf2, "title": "Channel 深入解析"},
+					},
+				},
+			},
+		}
+		pb, _ := json.Marshal(prop)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": string(pb)}},
+			},
+		})
+	}))
+	defer mockAI.Close()
+
+	resp, raw = env.doJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url":           mockAI.URL + "/v1",
+		"ai_api_key":            "sk-import",
+		"ai_model":              "gpt-4o-mini",
+		"ai_max_subtitle_chars": 2000,
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT settings = %d: %s", resp.StatusCode, raw)
+	}
+
+	// 2. Empty lessons -> 400
+	resp, _ = env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", map[string]any{
+		"source_id":    src.ID,
+		"dir_rel_path": "RawGoCourse",
+		"title":        "RawGoCourse",
+		"chapters":     []map[string]any{},
+	}, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty chapters = %d, want 400", resp.StatusCode)
+	}
+
+	// 3. Unknown media_file_id -> 400
+	resp, _ = env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", map[string]any{
+		"source_id":    src.ID,
+		"dir_rel_path": "RawGoCourse",
+		"title":        "RawGoCourse",
+		"chapters": []map[string]any{
+			{"title": "Ch", "lessons": []map[string]any{{"media_file_id": "00000000000000000000000000000099", "title": "X"}}},
+		},
+	}, token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("foreign media_file_id = %d, want 400", resp.StatusCode)
+	}
+
+	// 4. Valid request -> 200 with clean UTF-8 GBK subtitle excerpt and media_file_id mapped
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", validBody, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/v1/import/ai/organize = %d, want 200: %s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(seenPrompt, "欢迎来到 Go 并发编程课程") {
+		t.Fatalf("expected UTF-8 decoded GBK subtitle excerpt in AI prompt, got: %s", seenPrompt)
+	}
+
+	var out struct {
+		Title    string   `json:"title"`
+		Overview string   `json:"overview"`
+		Tags     []string `json:"tags"`
+		Chapters []struct {
+			Title   string `json:"title"`
+			Lessons []struct {
+				MediaFileID string `json:"media_file_id"`
+				Title       string `json:"title"`
+			} `json:"lessons"`
+		} `json:"chapters"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal import AI response: %v", err)
+	}
+	if out.Title != "Go 并发编程实战" || len(out.Chapters) != 2 || out.Chapters[0].Lessons[0].MediaFileID != mf1 || out.Chapters[1].Lessons[0].MediaFileID != mf2 {
+		t.Fatalf("unexpected import AI proposal: %+v", out)
+	}
+
+	// Ensure no courses were mutated/created in DB
+	courses, err := env.catSvc.ListCourses(context.Background(), catalog.CourseFilter{})
+	if err != nil {
+		t.Fatalf("ListCourses: %v", err)
+	}
+	if len(courses) != 0 {
+		t.Fatalf("expected 0 courses in DB after preview AI organize, got %d", len(courses))
 	}
 }

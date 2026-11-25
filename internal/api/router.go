@@ -157,6 +157,7 @@ func NewHandler(deps Deps) http.Handler {
 			pr.Post("/settings/ai/test", h.handleTestAI)
 			pr.Post("/courses/{id}/ai/organize", h.handleAIOrganize)
 			pr.Post("/courses/{id}/ai/apply", h.handleAIApply)
+			pr.Post("/import/ai/organize", h.handleImportAIOrganize)
 
 			// System updates
 			pr.Get("/system/update", h.handleGetUpdateStatus)
