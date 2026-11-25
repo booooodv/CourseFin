@@ -1,6 +1,6 @@
 GO ?= go
 PNPM ?= pnpm
-VERSION ?= 1.3.0
+VERSION ?= 1.4.0
 
 .PHONY: build-web sync-web build test docker-build
 

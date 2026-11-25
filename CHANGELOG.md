@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.4.0 (2026-11-25)
+
+新增每课 AI 总结、无字幕语音转文字（ASR）与 AI 转写字幕托管、以及整门课批量总结队列：
+
+- **每课结构化 AI 总结与一键导入笔记**：
+  - 新增数据库迁移 `003_lesson_ai_summary.sql`（`media_transcripts`、`lesson_summaries`，支持级联删除）及 `{dataDir}/cache/asr` 临时切片目录；
+  - 每节课 AI 总结分为 **AI 总结视频大纲**（核心一句话概览 + 结构化大纲要点与跳转时间）和 **AI 总结视频内容（按时间顺序）**（带起止时间戳区间、段落概括与核心知识点列表），常规课时单次生成，超长课程（> 24,000 字）自动按时间分块 Map-Reduce 提炼并汇总，避免截断丢失后半段内容；
+  - 支持一键复制单课干净的 Markdown（含课程/章节元信息、视频大纲与 `[MM:SS - MM:SS]` 时间线要点），直接粘贴至 Obsidian / Notion 等笔记工具，并支持无时间戳文稿的整洁降级排版。
+- **无字幕视频全链路闭环（OpenAI 兼容 ASR + AI 字幕复用）**：
+  - 文本获取按优先级自动流转：外挂字幕 → 内嵌文本字幕 → 已缓存转写稿 → FFmpeg 抽取 16kHz 单声道 MP3 自动分片（20 分钟/片）调用 OpenAI 兼容 `/audio/transcriptions` 接口（自动兼容 `verbose_json → srt → json` 格式降级与精确偏移合并）；未配置 ASR 时支持直接在播放页手动粘贴文稿/字幕生成总结；
+  - ASR 转写出的标准 WebVTT 持久化于 SQLite `media_transcripts`（绝不写入只读挂载的 `/media` 目录，也不受定时扫描影响），通过 `media.Service` 自动暴露为 **「AI 转写字幕」** 轨道——Web 端 Artplayer 与 Infuse / VidHub / SenPlayer 等 Jellyfin 客户端均可直接开启，且重新生成总结时直接复用、免重复转写；
+  - 系统设置页新增独立的语音转文字（ASR）配置区块（模型、Base URL、API Key、语言提示与 0.5s 静音 WAV 连通性测试），严格隔离跨域名密钥（填写独立 ASR 地址且留空 Key 时绝不透传主 AI API Key，兼顾云端服务与免密本地 Whisper 容器）。
+- **单课异步任务、整门课批量队列与播放页双 Tab 交互**：
+  - 新增独立后台服务 `internal/summary` 及受鉴权 REST 接口（`/api/v1/settings/ai/asr/test`、`/api/v1/lessons/{id}/summary*`、`/api/v1/courses/{id}/summaries/*`），串行单并发 worker 支持单课插队优先、阶段级进度轮询、随时取消、单课失败容错隔离、重生成失败保留旧总结与优雅停机；
+  - `VideoPlayer` 暴露 `seekTo` 句柄（兼容 `loadedmetadata` 前提前跳转不被自动续播覆盖）并支持不中断播放、不重建 Artplayer 的原地字幕轨刷新；
+  - 课程播放页右侧栏升级为 **「课程目录 / AI 总结」** 双 Tab：目录展示已总结微标与整门课批量生成/失败明细横幅，AI 总结栏支持点击时间戳精准跳转播放、随当前播放进度实时高亮对应段落，切回目录或收起侧栏不中断进行中的 ASR 轮询与字幕注入。
+
 ## v1.3.0 (2026-11-25)
 
 播放器体验、字幕系统、导入 AI 整理与课程管理交互全面升级：
