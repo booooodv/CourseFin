@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import VideoPlayer, {
   SUBTITLE_PREF_STORAGE_KEY,
   pickInitialSubtitle,
 } from '../components/VideoPlayer';
+import LessonProgressIcon from '../components/LessonProgressIcon';
 import CourseDetailPage from '../pages/CourseDetailPage';
 import type { CourseDetail, LessonPlaybackInfo, PlaybackSubtitleItem } from '../types/coursefin';
 
@@ -985,5 +986,159 @@ describe('CourseDetailPage', () => {
 
     expect(container.innerHTML).not.toMatch(/\bbg-slate-900\b/);
     expect(container.innerHTML).not.toMatch(/\b(slate|indigo|rose|emerald)-/);
+  });
+
+  it('sends browser codecs, renders syllabus circular progress rings, and updates active ring live on timeupdate', async () => {
+    const course = makeCourse();
+    // l2 has watched 50% (90s / 180s)
+    course.chapters[0].lessons[1].position_ticks = 90 * 10_000_000;
+    const playbackL1 = makePlayback({ lesson_id: 'l1' });
+    const playbackUrls: string[] = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) {
+          return jsonResponse(course);
+        }
+        if (url.includes('/api/v1/lessons/l1/playback')) {
+          playbackUrls.push(url);
+          return jsonResponse(playbackL1);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/courses/c1?lesson=l1']}>
+        <Routes>
+          <Route path="/courses/:courseId" element={<CourseDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    let video: HTMLVideoElement | null = null;
+    await waitFor(() => {
+      video = container.querySelector('video');
+      expect(video).toBeTruthy();
+    });
+
+    // Must send ?codecs= on playback request
+    expect(playbackUrls).toHaveLength(1);
+    expect(playbackUrls[0]).toContain('codecs=');
+
+    // l2 should show 50% circular ring
+    expect(screen.getByLabelText('已观看 50%')).toHaveAttribute('data-progress-percent', '50');
+
+    // Simulate live playback advancing l1 to 78s / 120s (65%)
+    Object.defineProperty(video!, 'duration', { value: 120, configurable: true });
+    video!.currentTime = 78;
+    fireEvent.timeUpdate(video!);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('正在播放 · 已观看 65%')).toHaveAttribute(
+        'data-progress-percent',
+        '65',
+      );
+    });
+  });
+
+  it('retries once with force_transcode=1 on pre-play DirectPlay error and does not loop on second error', async () => {
+    const course = makeCourse();
+    const playbackUrls: string[] = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) {
+          return jsonResponse(course);
+        }
+        if (url.includes('/api/v1/lessons/l1/playback')) {
+          playbackUrls.push(url);
+          if (url.includes('force_transcode=1')) {
+            return jsonResponse(
+              makePlayback({
+                lesson_id: 'l1',
+                mode: 'hls',
+                transcoding: true,
+                play_session_id: 'sess-transcode',
+                stream_url:
+                  '/Videos/l1/master.m3u8?PlaySessionId=sess-transcode&MediaSourceId=mf1&TranscodeVideo=1',
+              }),
+            );
+          }
+          return jsonResponse(
+            makePlayback({
+              lesson_id: 'l1',
+              mode: 'direct',
+              play_session_id: 'sess-direct',
+            }),
+          );
+        }
+        return jsonResponse({}, 204);
+      }),
+    );
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/courses/c1']}>
+        <Routes>
+          <Route path="/courses/:courseId" element={<CourseDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector('video')).toBeTruthy();
+    });
+    expect(playbackUrls).toHaveLength(1);
+    expect(playbackUrls[0]).not.toContain('force_transcode=1');
+
+    // Direct play fails before starting -> auto-fallback to force_transcode=1
+    fireEvent.error(container.querySelector('video')!);
+
+    await waitFor(() => {
+      expect(playbackUrls).toHaveLength(2);
+      expect(playbackUrls[1]).toContain('force_transcode=1');
+      expect(screen.getByText('兼容转码播放')).toBeInTheDocument();
+    });
+
+    // If fallback HLS video also errors, must NOT trigger another playback fetch
+    fireEvent.error(container.querySelector('video')!);
+    expect(playbackUrls).toHaveLength(2);
+  });
+});
+
+describe('LessonProgressIcon', () => {
+  it('renders all 4 visual states with accurate aria-label, data-progress-percent, and SVG elements', () => {
+    const { container: cPlayed } = render(
+      <LessonProgressIcon played={true} progressRatio={0.4} isActive={false} />,
+    );
+    const playedEl = within(cPlayed).getByLabelText('已学完');
+    expect(playedEl).toHaveAttribute('data-progress-percent', '100');
+
+    const { container: cActive } = render(
+      <LessonProgressIcon played={false} progressRatio={0.65} isActive={true} />,
+    );
+    const activeEl = within(cActive).getByLabelText('正在播放 · 已观看 65%');
+    expect(activeEl).toHaveAttribute('data-progress-percent', '65');
+    expect(cActive.querySelector('circle[stroke-dashoffset]')).toBeTruthy();
+    expect(cActive.querySelector('polygon')).toBeTruthy();
+
+    const { container: cPartial } = render(
+      <LessonProgressIcon played={false} progressRatio={0.42} isActive={false} />,
+    );
+    const partialEl = within(cPartial).getByLabelText('已观看 42%');
+    expect(partialEl).toHaveAttribute('data-progress-percent', '42');
+    expect(cPartial.querySelector('circle[stroke-dashoffset]')).toBeTruthy();
+    expect(cPartial.querySelector('polygon')).toBeNull();
+
+    const { container: cUnwatched } = render(
+      <LessonProgressIcon played={false} progressRatio={0} isActive={false} />,
+    );
+    const unwatchedEl = within(cUnwatched).getByLabelText('未播放');
+    expect(unwatchedEl).toHaveAttribute('data-progress-percent', '0');
+    expect(cUnwatched.querySelector('polygon')).toBeNull();
   });
 });
