@@ -614,9 +614,14 @@ func (h *handler) readSubtitleExcerpt(ctx context.Context, meta lessonMediaSubti
 	}
 	defer rc.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(rc, maxSubtitleExcerptRead))
+	raw, err := io.ReadAll(io.LimitReader(rc, maxSubtitleExcerptRead+1))
 	if err != nil || len(raw) == 0 {
 		return ""
+	}
+	truncated := len(raw) > maxSubtitleExcerptRead
+	if truncated {
+		raw = raw[:maxSubtitleExcerptRead]
+		raw = trimTruncatedSubtitleBytes(raw)
 	}
 
 	text := media.DecodeSubtitleToUTF8(raw)
@@ -644,6 +649,27 @@ func (h *handler) readSubtitleExcerpt(ctx context.Context, meta lessonMediaSubti
 		count++
 	}
 	return joined
+}
+
+// trimTruncatedSubtitleBytes trims trailing incomplete bytes caused by a fixed-size
+// prefix read so a mid-rune UTF-8 cut does not fail utf8.Valid and fall back to GB18030.
+func trimTruncatedSubtitleBytes(raw []byte) []byte {
+	if len(raw) >= 2 && ((raw[0] == 0xFF && raw[1] == 0xFE) || (raw[0] == 0xFE && raw[1] == 0xFF)) {
+		if len(raw)%2 == 1 {
+			return raw[:len(raw)-1]
+		}
+		return raw
+	}
+	if utf8.Valid(raw) {
+		return raw
+	}
+	for k := 1; k <= 3 && k < len(raw); k++ {
+		tail := raw[len(raw)-k:]
+		if !utf8.FullRune(tail) && utf8.Valid(raw[:len(raw)-k]) {
+			return raw[:len(raw)-k]
+		}
+	}
+	return raw
 }
 
 func (h *handler) handleAIApply(w http.ResponseWriter, r *http.Request) {

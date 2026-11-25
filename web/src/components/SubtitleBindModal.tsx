@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link2, Loader2, Search, Subtitles, Unlink, X } from 'lucide-react';
 import { api } from '../api/client';
 import { useToast } from './Toast';
@@ -29,11 +29,13 @@ export default function SubtitleBindModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const loadSeqRef = useRef(0);
 
   const sourceId = lesson?.source_id || fallbackSourceId || '';
 
   const loadSubtitles = useCallback(async () => {
     if (!isOpen || !sourceId) return;
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -41,21 +43,27 @@ export default function SubtitleBindModal({
         unmatched: filterMode === 'unmatched' ? true : undefined,
         search: appliedSearch.trim() || undefined,
       });
+      if (seq !== loadSeqRef.current) return;
       setSubtitles(res.subtitles ?? []);
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       setError(err instanceof Error ? err.message : '加载字幕列表失败');
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [isOpen, sourceId, filterMode, appliedSearch]);
 
   useEffect(() => {
-    if (!isOpen) return;
-    setFilterMode('unmatched');
-    setSearchInput('');
-    setAppliedSearch('');
-    setError(null);
-  }, [isOpen, lesson?.id]);
+    if (!isOpen) {
+      loadSeqRef.current += 1;
+      setFilterMode('unmatched');
+      setSearchInput('');
+      setAppliedSearch('');
+      setError(null);
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     void loadSubtitles();

@@ -2059,3 +2059,168 @@ func TestStorageSourcesDirsAndFilesAssignmentAPI(t *testing.T) {
 		t.Fatalf("unexpected unassigned files: %+v", fileRes.Files)
 	}
 }
+
+func TestImportAIOrganizeLargeUTF8SubtitleBoundaryNoMojibake(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "utf8-boundary"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	// Craft a BOM-less UTF-8 Chinese SRT > 8192 bytes where byte 8192 slices mid-rune.
+	header := "1\n00:00:01,000 --> 00:00:05,000\n微服务架构实战课程导学\n\n2\n00:00:06,000 --> 00:00:10,000\n"
+	// Pad ASCII bytes so that the repeated 3-byte Chinese rune '中' straddles offset 8192.
+	padLen := (8192 - len(header) - 1) % 3
+	content := header + strings.Repeat("a", padLen) + strings.Repeat("中", 3000) + "\n"
+	// Confirm byte 8192 really falls mid-rune!
+	rawBytes := []byte(content)
+	if len(rawBytes) <= 8192 {
+		t.Fatalf("expected > 8192 bytes, got %d", len(rawBytes))
+	}
+
+	writeDummyFile(t, filepath.Join(env.mediaDir, "UTF8Course", "01.mp4"), []byte("v1"))
+	writeDummyFile(t, filepath.Join(env.mediaDir, "UTF8Course", "01.zh.srt"), rawBytes)
+
+	src, err := env.catSvc.CreateSource(context.Background(), "UTF8Src", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	files, err := env.catSvc.ListMediaFiles(context.Background(), src.ID, "", "", "")
+	if err != nil || len(files) != 1 {
+		t.Fatalf("ListMediaFiles: %v (len=%d)", err, len(files))
+	}
+	mfID := files[0].ID
+
+	var capturedPrompt string
+	fakeLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capturedPrompt = string(body)
+		respObj := map[string]any{
+			"choices": []map[string]any{
+				{
+					"message": map[string]any{
+						"content": fmt.Sprintf(`{"title":"微服务课程","overview":"简介","tags":["Go"],"chapters":[{"title":"第一章","lessons":[{"lesson_id":%q,"title":"导学"}]}]}`, mfID),
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(respObj)
+	}))
+	defer fakeLLM.Close()
+
+	resp, raw := env.doJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url":           fakeLLM.URL + "/v1",
+		"ai_api_key":            "test-key",
+		"ai_model":              "gpt-test",
+		"ai_max_subtitle_chars": 2000,
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT settings = %d: %s", resp.StatusCode, raw)
+	}
+
+	resp, raw = env.doJSON(t, http.MethodPost, "/api/v1/import/ai/organize", map[string]any{
+		"source_id":    src.ID,
+		"dir_rel_path": "UTF8Course",
+		"title":        "UTF8Course",
+		"chapters": []map[string]any{
+			{
+				"title": "默认",
+				"lessons": []map[string]any{
+					{"media_file_id": mfID, "title": "01"},
+				},
+			},
+		},
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /import/ai/organize = %d: %s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(capturedPrompt, "微服务架构实战课程导学") {
+		t.Fatalf("expected clean UTF-8 Chinese subtitle excerpt in AI prompt, got mojibake/missing: %s", capturedPrompt)
+	}
+}
+
+func TestLessonPlayback10BitAnd444H264RoutesToTranscode(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if !env.mediaSvc.HasFFmpeg() {
+		t.Skip("ffmpeg not available")
+	}
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "pixfmt-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	src, err := env.catSvc.CreateSource(context.Background(), "PixFmtSrc", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	course, err := env.catSvc.CreateCourse(context.Background(), catalog.CreateCourseInput{Title: "Screen Recordings"})
+	if err != nil {
+		t.Fatalf("CreateCourse: %v", err)
+	}
+	chapID := course.Chapters[0].ID
+
+	for _, tc := range []struct {
+		name        string
+		fileName    string
+		container   string
+		streamsJSON string
+	}{
+		{
+			name:        "h264_10bit_mkv",
+			fileName:    "screen_10bit.mkv",
+			container:   "mkv",
+			streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p10le"}]`,
+		},
+		{
+			name:        "h264_444_mp4",
+			fileName:    "obs_444.mp4",
+			container:   "mp4",
+			streamsJSON: `[{"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv444p"}]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeDummyFile(t, filepath.Join(env.mediaDir, tc.fileName), []byte("dummy"))
+			mfID := id.New()
+			now := time.Now().UTC().Format(time.RFC3339)
+			if _, err := env.db.Exec(
+				`INSERT INTO media_files (id, source_id, relative_path, file_name, file_size, mod_time, status, duration_ms, container, video_codec, audio_codec, width, height, bitrate, streams_json, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, 1024, ?, 'active', 60000, ?, 'h264', 'aac', 1920, 1080, 2000000, ?, ?, ?)`,
+				mfID, src.ID, tc.fileName, tc.fileName, now, tc.container, tc.streamsJSON, now, now,
+			); err != nil {
+				t.Fatalf("insert media_file: %v", err)
+			}
+			lesson, err := env.catSvc.AddLesson(context.Background(), chapID, mfID, tc.name)
+			if err != nil {
+				t.Fatalf("AddLesson: %v", err)
+			}
+
+			resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/lessons/"+lesson.ID+"/playback?codecs=h264,hevc,vp9,av1", nil, token)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET /playback = %d: %s", resp.StatusCode, raw)
+			}
+			var pb struct {
+				Mode        string `json:"mode"`
+				Transcoding bool   `json:"transcoding"`
+				StreamURL   string `json:"stream_url"`
+			}
+			if err := json.Unmarshal(raw, &pb); err != nil {
+				t.Fatalf("unmarshal playback: %v", err)
+			}
+			if pb.Mode != "hls" || !pb.Transcoding || !strings.Contains(pb.StreamURL, "TranscodeVideo=1") {
+				t.Fatalf("%s expected Tier 3 transcode (hls, transcoding=true, TranscodeVideo=1), got %+v", tc.name, pb)
+			}
+		})
+	}
+}

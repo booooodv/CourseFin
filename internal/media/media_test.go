@@ -1157,3 +1157,59 @@ func TestServeMasterPlaylistPropagatesTranscodeVideoAndTranscodesMPEG4(t *testin
 		}
 	}
 }
+
+func TestTranscodeOddDimensionVideoSucceeds(t *testing.T) {
+	ffmpegBin := findTestBinary("ffmpeg")
+	ffprobeBin := findTestBinary("ffprobe")
+	if ffmpegBin == "" {
+		t.Skip("ffmpeg not available")
+	}
+
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+
+	// Odd resolution 319x179 (common in window screen recordings)
+	oddPath := filepath.Join(mediaRoot, "odd_screen.avi")
+	genCmd := exec.Command(
+		ffmpegBin, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "color=c=green:size=319x179:rate=15:duration=6",
+		"-c:v", "mpeg4",
+		oddPath,
+	)
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate odd dimension video: %v\n%s", err, string(out))
+	}
+
+	prober := scanner.NewFFmpegProber(ffprobeBin, ffmpegBin)
+	probeRes, err := prober.Probe(context.Background(), oddPath)
+	if err != nil {
+		t.Fatalf("probe odd video: %v", err)
+	}
+	_, mfID := seedSourceAndMedia(t, conn, "local", mediaRoot, "odd_screen.avi", "avi", probeRes.VideoCodec, probeRes.AudioCodec, probeRes.DurationMs, probeRes.StreamsJSON, "")
+	_, _, _, lessonID := seedCourseHierarchy(t, conn, mfID, "", "")
+
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), ffmpegBin)
+	defer svc.Close()
+
+	segRec := httptest.NewRecorder()
+	svc.ServeHLSSegment(segRec, httptest.NewRequest(http.MethodGet, "/Videos/"+lessonID+"/hls1/main/0.ts?PlaySessionId=odd1&TranscodeVideo=1", nil), lessonID, "odd1", 0)
+	if segRec.Code != http.StatusOK || segRec.Body.Len() < 188 || segRec.Body.Bytes()[0] != 0x47 {
+		t.Fatalf("odd-dimension transcode failed: status=%d len=%d body=%s", segRec.Code, segRec.Body.Len(), segRec.Body.String())
+	}
+
+	if ffprobeBin != "" {
+		outTS := filepath.Join(t.TempDir(), "odd0.ts")
+		if err := os.WriteFile(outTS, segRec.Body.Bytes(), 0o644); err != nil {
+			t.Fatalf("write odd0.ts: %v", err)
+		}
+		pCmd := exec.Command(ffprobeBin, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt,width,height", "-of", "csv=p=0", outTS)
+		pOut, err := pCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("ffprobe odd0.ts: %v (%s)", err, string(pOut))
+		}
+		firstLine := strings.TrimSpace(strings.Split(strings.TrimSpace(string(pOut)), "\n")[0])
+		if firstLine != "h264,320,180,yuv420p" && firstLine != "h264,yuv420p,320,180" {
+			t.Fatalf("odd transcoded stream = %q, want h264 + yuv420p + 320x180", firstLine)
+		}
+	}
+}

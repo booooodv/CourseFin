@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -136,6 +136,7 @@ export default function CourseDetailPage() {
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [playbackRetryNonce, setPlaybackRetryNonce] = useState(0);
   const [forceTranscodeLessonId, setForceTranscodeLessonId] = useState<string | null>(null);
+  const fallbackRequestedForRef = useRef<string | null>(null);
   const [activeLiveProgress, setActiveLiveProgress] = useState<{
     lessonId: string;
     ratio: number;
@@ -156,6 +157,7 @@ export default function CourseDetailPage() {
     setActiveLessonId(null);
     setPlayback(null);
     setForceTranscodeLessonId(null);
+    fallbackRequestedForRef.current = null;
     setActiveLiveProgress(null);
     try {
       const data = await api.getCourse(courseId);
@@ -250,6 +252,9 @@ export default function CourseDetailPage() {
   const selectLesson = useCallback(
     (lessonId: string) => {
       setActiveLessonId(lessonId);
+      if (fallbackRequestedForRef.current !== lessonId) {
+        fallbackRequestedForRef.current = null;
+      }
       setForceTranscodeLessonId((prev) => (prev === lessonId ? prev : null));
       setActiveLiveProgress(null);
       setSearchParams(
@@ -266,11 +271,10 @@ export default function CourseDetailPage() {
 
   const handleRequestTranscodeFallback = useCallback(() => {
     if (!activeLessonId) return;
-    setForceTranscodeLessonId((prev) => {
-      if (prev === activeLessonId) return prev;
-      toast.info('浏览器无法直接解码该视频，已自动切换为兼容转码模式');
-      return activeLessonId;
-    });
+    if (fallbackRequestedForRef.current === activeLessonId) return;
+    fallbackRequestedForRef.current = activeLessonId;
+    toast.info('浏览器无法直接解码该视频，已自动切换为兼容转码模式');
+    setForceTranscodeLessonId(activeLessonId);
   }, [activeLessonId, toast]);
 
   const handleTimeProgress = useCallback(

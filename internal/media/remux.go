@@ -524,6 +524,7 @@ func (s *Service) launchFFmpegRemuxLocked(sess *remuxSession, absPath, audioCode
 	}
 	if transcodeVideo {
 		args = append(args,
+			"-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
 			"-c:v", "libx264",
 			"-preset", "veryfast",
 			"-crf", "23",

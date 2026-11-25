@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -210,6 +211,39 @@ func StripVideoQualityTags(stem string) string {
 	return cur
 }
 
+// isoLangCodes enumerates valid ISO 639-1 (2-letter) and common ISO 639-2 (3-letter)
+// language codes mapped to canonical codes, avoiding false-positive matches on arbitrary
+// 2–3 letter English words like "go", "web", "for", "new", or "api".
+var isoLangCodes = map[string]string{
+	// ISO 639-1
+	"af": "af", "ar": "ar", "az": "az", "be": "be", "bg": "bg", "bn": "bn",
+	"bs": "bs", "ca": "ca", "cs": "cs", "cy": "cy", "da": "da", "de": "de",
+	"el": "el", "en": "en", "eo": "eo", "es": "es", "et": "et", "eu": "eu",
+	"fa": "fa", "fi": "fi", "fr": "fr", "ga": "ga", "gl": "gl", "gu": "gu",
+	"he": "he", "hi": "hi", "hr": "hr", "hu": "hu", "hy": "hy", "id": "id",
+	"is": "is", "it": "it", "ja": "ja", "ka": "ka", "kk": "kk", "km": "km",
+	"kn": "kn", "ko": "ko", "la": "la", "lo": "lo", "lt": "lt", "lv": "lv",
+	"mk": "mk", "ml": "ml", "mn": "mn", "mr": "mr", "ms": "ms", "my": "my",
+	"nb": "nb", "ne": "ne", "nl": "nl", "nn": "nn", "no": "no", "pa": "pa",
+	"pl": "pl", "pt": "pt", "ro": "ro", "ru": "ru", "si": "si", "sk": "sk",
+	"sl": "sl", "sq": "sq", "sr": "sr", "sv": "sv", "sw": "sw", "ta": "ta",
+	"te": "te", "th": "th", "tl": "tl", "tr": "tr", "uk": "uk", "ur": "ur",
+	"uz": "uz", "vi": "vi", "zh": "zh",
+	// Common ISO 639-2/B/T & BCP 47 3-letter codes
+	"ara": "ar", "bul": "bg", "cat": "ca", "ces": "cs", "cze": "cs",
+	"chi": "zh", "zho": "zh", "dan": "da", "deu": "de", "ger": "de",
+	"dut": "nl", "nld": "nl", "ell": "el", "gre": "el", "eng": "en",
+	"est": "et", "fas": "fa", "per": "fa", "fil": "fil", "fin": "fi",
+	"fra": "fr", "fre": "fr", "heb": "he", "hin": "hi", "hrv": "hr",
+	"hun": "hu", "ind": "id", "isl": "is", "ice": "is", "ita": "it",
+	"jpn": "ja", "kor": "ko", "lav": "lv", "lit": "lt", "may": "ms",
+	"msa": "ms", "nor": "no", "pol": "pl", "por": "pt", "ron": "ro",
+	"rum": "ro", "rus": "ru", "slk": "sk", "slo": "sk", "slv": "sl",
+	"spa": "es", "srp": "sr", "swe": "sv", "tam": "ta", "tel": "te",
+	"tha": "th", "tur": "tr", "ukr": "uk", "und": "und", "urd": "ur",
+	"vie": "vi", "yue": "zh",
+}
+
 // NormalizeSubtitleLang maps common language tags (e.g. zh, chs, cht, zh-cn, en, ja)
 // to canonical ISO language codes.
 func NormalizeSubtitleLang(tag string) (string, bool) {
@@ -220,11 +254,8 @@ func NormalizeSubtitleLang(tag string) (string, bool) {
 	if entry, ok := langAliases[normTag]; ok {
 		return entry.code, true
 	}
-	if len(normTag) == 2 && isASCIIAlpha(normTag) {
-		return normTag, true
-	}
-	if len(normTag) == 3 && isASCIIAlpha(normTag) {
-		return normTag, true
+	if code, ok := isoLangCodes[normTag]; ok {
+		return code, true
 	}
 	return "", false
 }
@@ -285,14 +316,11 @@ func matchStemPair(videoStem, subStem, subRelPath, format string) (SubtitleMatch
 		}, true
 	}
 
-	if len(subStem) <= len(videoStem) {
-		return SubtitleMatch{}, false
-	}
-	if !strings.EqualFold(subStem[:len(videoStem)], videoStem) {
+	rest, ok := trimFoldPrefix(subStem, videoStem)
+	if !ok || rest == "" {
 		return SubtitleMatch{}, false
 	}
 
-	rest := subStem[len(videoStem):]
 	delim, restAfterDelim, ok := splitLeadingSubtitleDelimiter(rest)
 	if !ok {
 		return SubtitleMatch{}, false
@@ -486,11 +514,42 @@ func isPureDigitsOrNumericRange(s string) bool {
 	return hasDigit
 }
 
-func isASCIIAlpha(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < 'a' || s[i] > 'z' {
-			return false
+// trimFoldPrefix checks whether s starts with prefix under Unicode case-folding
+// on rune boundaries (avoiding mid-rune byte slicing when folded runes have different UTF-8 widths).
+func trimFoldPrefix(s, prefix string) (string, bool) {
+	si, pi := 0, 0
+	for pi < len(prefix) {
+		if si >= len(s) {
+			return "", false
+		}
+		sr, sw := utf8.DecodeRuneInString(s[si:])
+		pr, pw := utf8.DecodeRuneInString(prefix[pi:])
+		if sr != pr && !runesEqualFold(sr, pr) {
+			return "", false
+		}
+		si += sw
+		pi += pw
+	}
+	return s[si:], true
+}
+
+func runesEqualFold(a, b rune) bool {
+	if a == b {
+		return true
+	}
+	if a < utf8.RuneSelf && b < utf8.RuneSelf {
+		if 'A' <= a && a <= 'Z' {
+			a += 'a' - 'A'
+		}
+		if 'A' <= b && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		return a == b
+	}
+	for r := unicode.SimpleFold(a); r != a; r = unicode.SimpleFold(r) {
+		if r == b {
+			return true
 		}
 	}
-	return len(s) > 0
+	return false
 }

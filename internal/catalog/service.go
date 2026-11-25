@@ -1945,13 +1945,19 @@ func (s *Service) BindSubtitle(ctx context.Context, subtitleID string, input Bin
 			nextManual = 1
 		} else {
 			normMF := normalizeOrRaw(trimmed)
-			var exists int
-			err := s.db.QueryRowContext(ctx, `SELECT 1 FROM media_files WHERE id = ?`, normMF).Scan(&exists)
+			var mfSourceID, mfStatus string
+			err := s.db.QueryRowContext(ctx, `SELECT source_id, status FROM media_files WHERE id = ?`, normMF).Scan(&mfSourceID, &mfStatus)
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, fmt.Errorf("%w: media_file %s", ErrNotFound, normMF)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("verify media_file %s: %w", normMF, err)
+			}
+			if mfSourceID != sub.SourceID {
+				return nil, fmt.Errorf("%w: media_file %s does not belong to subtitle source %s", ErrInvalidInput, normMF, sub.SourceID)
+			}
+			if mfStatus != "active" {
+				return nil, fmt.Errorf("%w: media_file %s is not active", ErrInvalidInput, normMF)
 			}
 			nextMediaID = sql.NullString{String: normMF, Valid: true}
 			nextManual = 1

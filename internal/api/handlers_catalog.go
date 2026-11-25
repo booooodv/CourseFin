@@ -581,7 +581,7 @@ func (h *handler) handleLessonPlayback(w http.ResponseWriter, r *http.Request) {
 			q.Set("api_key", ac.Token)
 		}
 		streamURL = fmt.Sprintf("/Videos/%s/stream.%s?%s", lesson.ID, container, q.Encode())
-	case !forceTranscode && hasFFmpeg && (vcodec == "" || h.media.CanWebRemuxVideoCodec(vcodec)):
+	case !forceTranscode && hasFFmpeg && (vcodec == "" || h.media.CanWebRemuxVideoCodec(vcodec)) && hasBrowserSafePixFmt(mf.StreamsJSON):
 		mode = "hls"
 		q := url.Values{}
 		q.Set("PlaySessionId", playSessionID)
@@ -605,31 +605,33 @@ func (h *handler) handleLessonPlayback(w http.ResponseWriter, r *http.Request) {
 		mode = "unsupported"
 	}
 
-	streams, err := h.media.ResolveStreams(ctx, mf.ID)
 	subtitles := make([]playbackSubtitleItem, 0)
-	if err == nil {
-		for _, st := range streams {
-			if !strings.EqualFold(st.Type, "subtitle") {
-				continue
-			}
-			isText := !isBitmapSubtitleCodec(st.Codec)
-			subURL := ""
-			if isText {
-				subURL = fmt.Sprintf("/Videos/%s/%s/Subtitles/%d/Stream.vtt", lesson.ID, mf.ID, st.Index)
-				if ac != nil && ac.Token != "" {
-					subURL += "?api_key=" + url.QueryEscape(ac.Token)
+	if h.media != nil {
+		streams, err := h.media.ResolveStreams(ctx, mf.ID)
+		if err == nil {
+			for _, st := range streams {
+				if !strings.EqualFold(st.Type, "subtitle") {
+					continue
 				}
+				isText := !isBitmapSubtitleCodec(st.Codec)
+				subURL := ""
+				if isText {
+					subURL = fmt.Sprintf("/Videos/%s/%s/Subtitles/%d/Stream.vtt", lesson.ID, mf.ID, st.Index)
+					if ac != nil && ac.Token != "" {
+						subURL += "?api_key=" + url.QueryEscape(ac.Token)
+					}
+				}
+				subtitles = append(subtitles, playbackSubtitleItem{
+					Index:      st.Index,
+					Language:   st.Language,
+					Title:      st.Title,
+					Format:     st.Format,
+					IsDefault:  st.IsDefault,
+					IsExternal: st.IsExternal,
+					IsText:     isText,
+					URL:        subURL,
+				})
 			}
-			subtitles = append(subtitles, playbackSubtitleItem{
-				Index:      st.Index,
-				Language:   st.Language,
-				Title:      st.Title,
-				Format:     st.Format,
-				IsDefault:  st.IsDefault,
-				IsExternal: st.IsExternal,
-				IsText:     isText,
-				URL:        subURL,
-			})
 		}
 	}
 

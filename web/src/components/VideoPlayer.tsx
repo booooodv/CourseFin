@@ -303,7 +303,8 @@ export default function VideoPlayer({
 
     Artplayer.SEEK_STEP = 10;
     Artplayer.PLAYBACK_RATE = [...PLAYBACK_RATES];
-    Artplayer.RECONNECT_TIME_MAX = 1;
+    Artplayer.RECONNECT_TIME_MAX = 0;
+    Artplayer.LOG_VERSION = false;
 
     const savedRate = readSavedPlaybackRate();
     const savedSize = readSavedSubtitleSize();
@@ -315,74 +316,108 @@ export default function VideoPlayer({
     const progressSnapshot = playback.progress;
     const durationMsSnapshot = playback.duration_ms;
 
-    const applySubtitleSelection = (
-      art: Artplayer,
-      rawValue: string | number | undefined,
-      forSetting: boolean,
-    ): string => {
-      const value = rawValue === undefined ? 'off' : String(rawValue);
-      if (value === 'off') {
-        art.subtitle.show = false;
-        saveSubtitlePref('off');
-        setSelectedSubtitleIndex(null);
-        return forSetting ? '关闭' : '字幕';
-      }
-      const targetIndex = Number(value);
-      const sub = textSubtitles.find((item) => item.index === targetIndex);
-      if (!sub) {
-        art.subtitle.show = false;
-        saveSubtitlePref('off');
-        setSelectedSubtitleIndex(null);
-        return forSetting ? '关闭' : '字幕';
-      }
-      const label = formatSubtitleLabel(sub);
-      void art.subtitle.switch(withApiKey(sub.url), {
-        name: label,
-        type: 'vtt',
-        encoding: 'utf-8',
-        escape: false,
-      });
-      art.subtitle.show = true;
-      saveSubtitlePref(subtitlePrefValue(sub));
-      setSelectedSubtitleIndex(sub.index);
-      return escapeHtml(label);
-    };
-
-    const subtitleSelectors = [
+    const buildSubtitleSelectors = (activeIdx: number | null) => [
       {
-        default: !initialSub,
+        default: activeIdx === null,
         html: '关闭',
         value: 'off',
       },
       ...textSubtitles.map((sub) => ({
-        default: initialSub?.index === sub.index,
+        default: activeIdx === sub.index,
         html: escapeHtml(formatSubtitleLabel(sub)),
         value: String(sub.index),
       })),
     ];
 
+    const applySubtitleSelection = (
+      art: Artplayer,
+      rawValue: string | number | undefined,
+      source: 'control' | 'setting',
+    ): string => {
+      const value = rawValue === undefined ? 'off' : String(rawValue);
+      const targetIndex = value === 'off' ? null : Number(value);
+      const sub =
+        targetIndex !== null && !Number.isNaN(targetIndex)
+          ? textSubtitles.find((item) => item.index === targetIndex) ?? null
+          : null;
+
+      let controlLabel = '字幕';
+      let settingLabel = '关闭';
+      let nextIdx: number | null = null;
+
+      if (!sub) {
+        art.subtitle.show = false;
+        saveSubtitlePref('off');
+        setSelectedSubtitleIndex(null);
+      } else {
+        const label = formatSubtitleLabel(sub);
+        const escapedLabel = escapeHtml(label);
+        void art.subtitle.switch(withApiKey(sub.url), {
+          name: label,
+          type: 'vtt',
+          encoding: 'utf-8',
+          escape: true,
+        });
+        art.subtitle.show = true;
+        saveSubtitlePref(subtitlePrefValue(sub));
+        setSelectedSubtitleIndex(sub.index);
+        controlLabel = escapedLabel;
+        settingLabel = escapedLabel;
+        nextIdx = sub.index;
+      }
+
+      // Sync the sibling menu with freshly cloned selector items so control bar & settings stay consistent.
+      if (source === 'control') {
+        art.setting?.update?.({
+          name: 'coursefin-subtitle-setting',
+          html: '字幕轨道',
+          tooltip: settingLabel,
+          selector: buildSubtitleSelectors(nextIdx),
+          onSelect(item) {
+            return applySubtitleSelection(this, item.value, 'setting');
+          },
+        });
+      } else {
+        art.controls?.update?.({
+          name: 'coursefin-subtitle',
+          position: 'right',
+          index: 15,
+          html: controlLabel,
+          tooltip: '切换字幕',
+          selector: buildSubtitleSelectors(nextIdx),
+          onSelect(item) {
+            return applySubtitleSelection(this, item.value, 'control');
+          },
+        });
+      }
+
+      return source === 'setting' ? settingLabel : controlLabel;
+    };
+
     const controls: NonNullable<ArtOption['controls']> = [];
     const settings: Setting[] = [];
 
     if (textSubtitles.length > 0) {
+      const initialIdx = initialSub ? initialSub.index : null;
       controls.push({
         name: 'coursefin-subtitle',
         position: 'right',
         index: 15,
         html: initialSub ? escapeHtml(formatSubtitleLabel(initialSub)) : '字幕',
         tooltip: '切换字幕',
-        selector: subtitleSelectors,
+        selector: buildSubtitleSelectors(initialIdx),
         onSelect(item) {
-          return applySubtitleSelection(this, item.value, false);
+          return applySubtitleSelection(this, item.value, 'control');
         },
       });
 
       settings.push({
+        name: 'coursefin-subtitle-setting',
         html: '字幕轨道',
         tooltip: initialSub ? escapeHtml(formatSubtitleLabel(initialSub)) : '关闭',
-        selector: subtitleSelectors,
+        selector: buildSubtitleSelectors(initialIdx),
         onSelect(item) {
-          return applySubtitleSelection(this, item.value, true);
+          return applySubtitleSelection(this, item.value, 'setting');
         },
       });
 
@@ -433,7 +468,7 @@ export default function VideoPlayer({
         name: initialSub ? formatSubtitleLabel(initialSub) : '',
         type: 'vtt',
         encoding: 'utf-8',
-        escape: false,
+        escape: true,
         style: buildSubtitleStyle(savedSize),
       },
       customType: {

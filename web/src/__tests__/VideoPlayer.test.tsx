@@ -475,16 +475,22 @@ describe('VideoPlayer', () => {
       '/Videos/l1/mf1/Subtitles/2/Stream.vtt?api_key=test-token-123',
     );
     expect(art.option.subtitle.type).toBe('vtt');
-    expect(art.option.subtitle.escape).toBe(false);
+    expect(art.option.subtitle.escape).toBe(true);
 
-    // Control bar subtitle selector should have 关闭 + 中文 + English (excluding PGS bitmap)
+    // Control bar subtitle selector & settings subtitle selector must NOT share mutable item refs
     const subtitleControl = (art.option.controls as Array<Record<string, any>>).find(
       (c) => c.name === 'coursefin-subtitle',
     );
+    const subtitleSetting = (art.option.settings as Array<Record<string, any>>).find(
+      (s) => s.html === '字幕轨道',
+    );
     expect(subtitleControl).toBeTruthy();
+    expect(subtitleSetting).toBeTruthy();
+    expect(subtitleControl!.selector).not.toBe(subtitleSetting!.selector);
+    expect(subtitleControl!.selector[0]).not.toBe(subtitleSetting!.selector[0]);
     expect(subtitleControl!.selector.map((s: any) => s.html)).toEqual(['关闭', '中文', 'English']);
 
-    // Switch to English via control selector
+    // Switch to English via control selector -> syncs settings menu
     const enItem = subtitleControl!.selector[2];
     let controlLabel = '';
     act(() => {
@@ -493,16 +499,18 @@ describe('VideoPlayer', () => {
     expect(controlLabel).toContain('English');
     expect(art.subtitle.switch).toHaveBeenCalledWith(
       '/Videos/l1/mf1/Subtitles/3/Stream.vtt?api_key=test-token-123',
-      expect.objectContaining({ name: 'English', type: 'vtt' }),
+      expect.objectContaining({ name: 'English', type: 'vtt', escape: true }),
     );
     expect(art.subtitle.show).toBe(true);
     expect(localStorage.getItem(SUBTITLE_PREF_STORAGE_KEY)).toBe('en');
-
-    // Turn off via setting selector
-    const subtitleSetting = (art.option.settings as Array<Record<string, any>>).find(
-      (s) => s.html === '字幕轨道',
+    expect(art.setting.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'coursefin-subtitle-setting',
+        tooltip: 'English',
+      }),
     );
-    expect(subtitleSetting).toBeTruthy();
+
+    // Turn off via setting selector -> syncs control bar menu
     const offItem = subtitleSetting!.selector[0];
     let settingLabel = '';
     act(() => {
@@ -511,6 +519,12 @@ describe('VideoPlayer', () => {
     expect(settingLabel).toBe('关闭');
     expect(art.subtitle.show).toBe(false);
     expect(localStorage.getItem(SUBTITLE_PREF_STORAGE_KEY)).toBe('off');
+    expect(art.controls.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'coursefin-subtitle',
+        html: '字幕',
+      }),
+    );
 
     // Change subtitle size via settings
     const sizeSetting = (art.option.settings as Array<Record<string, any>>).find(

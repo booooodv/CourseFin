@@ -884,3 +884,40 @@ func TestStorageAssignmentCountsAndMultiCourseDedup(t *testing.T) {
 		t.Fatalf("expected mf2 and mf3, got %+v", unassignedOnly)
 	}
 }
+
+func TestBindSubtitleRejectsCrossSourceOrMissingMediaFile(t *testing.T) {
+	ctx := context.Background()
+	svc, conn, _ := setupTestCatalog(t)
+
+	srcA, err := svc.CreateSource(ctx, "SrcA", "local", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateSource A: %v", err)
+	}
+	srcB, err := svc.CreateSource(ctx, "SrcB", "local", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateSource B: %v", err)
+	}
+	mfA := seedMediaFile(t, conn, srcA.ID, "a.mp4", 60000)
+	mfB := seedMediaFile(t, conn, srcB.ID, "b.mp4", 60000)
+
+	// Mark mfA missing
+	if _, err := conn.Exec(`UPDATE media_files SET status = 'missing' WHERE id = ?`, mfA); err != nil {
+		t.Fatalf("mark mfA missing: %v", err)
+	}
+
+	subID := "sub00000000000000000000000000099"
+	if _, err := conn.Exec(
+		`INSERT INTO subtitle_files (id, source_id, media_file_id, relative_path, language, title, format, is_default, manually_bound, status)
+		 VALUES (?, ?, NULL, 'a.srt', 'zh', '中文', 'srt', 0, 0, 'active')`,
+		subID, srcA.ID,
+	); err != nil {
+		t.Fatalf("insert subtitle: %v", err)
+	}
+
+	if _, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{MediaFileID: &mfB}); !errors.Is(err, catalog.ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for cross-source bind, got %v", err)
+	}
+	if _, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{MediaFileID: &mfA}); !errors.Is(err, catalog.ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for missing media_file bind, got %v", err)
+	}
+}

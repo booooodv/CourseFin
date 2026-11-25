@@ -616,6 +616,44 @@ func TestFFmpegProberIntegration(t *testing.T) {
 	}
 }
 
+func TestSubtitleMatcherRejectsNonISOTwoThreeLetterWordsAndUnicodeFold(t *testing.T) {
+	m1, ok := scanner.MatchSubtitle("course/01.mp4", "course/01 - go api.srt")
+	if !ok {
+		t.Fatalf("expected 01 - go api.srt to match 01.mp4")
+	}
+	if m1.Language != "und" || m1.Title != "go api" {
+		t.Fatalf("01 - go api.srt => lang=%q title=%q, want lang=und title='go api'", m1.Language, m1.Title)
+	}
+
+	m2, ok := scanner.MatchSubtitle("course/01.mp4", "course/01_for_review.srt")
+	if !ok {
+		t.Fatalf("expected 01_for_review.srt to match 01.mp4")
+	}
+	if m2.Language != "und" || m2.Title != "for_review" {
+		t.Fatalf("01_for_review.srt => lang=%q title=%q, want lang=und title='for_review'", m2.Language, m2.Title)
+	}
+
+	// Valid ISO codes must still normalize cleanly
+	if code, ok := scanner.NormalizeSubtitleLang("zh"); !ok || code != "zh" {
+		t.Fatalf("NormalizeSubtitleLang(zh) = (%q, %v), want (zh, true)", code, ok)
+	}
+	if code, ok := scanner.NormalizeSubtitleLang("eng"); !ok || code != "en" {
+		t.Fatalf("NormalizeSubtitleLang(eng) = (%q, %v), want (en, true)", code, ok)
+	}
+	if _, ok := scanner.NormalizeSubtitleLang("go"); ok {
+		t.Fatalf("expected non-ISO token 'go' not to be treated as language code")
+	}
+	if _, ok := scanner.NormalizeSubtitleLang("web"); ok {
+		t.Fatalf("expected non-ISO token 'web' not to be treated as language code")
+	}
+
+	// Kelvin sign U+212A (3 UTF-8 bytes) folds to ASCII 'k' (1 byte)
+	m3, ok := scanner.MatchSubtitle("course/\u212A_intro.mp4", "course/k_intro.zh.srt")
+	if !ok || m3.Language != "zh" {
+		t.Fatalf("unicode unequal-byte casefold match failed: ok=%v m=%+v", ok, m3)
+	}
+}
+
 func findBinary(name string) string {
 	if p, err := exec.LookPath(name); err == nil {
 		return p
