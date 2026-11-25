@@ -26,6 +26,7 @@ import (
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
+	"coursefin/internal/summary"
 	"coursefin/internal/updater"
 )
 
@@ -38,6 +39,7 @@ type Server struct {
 	db        *sql.DB
 	media     *media.Service
 	scanner   *scanner.Service
+	summary   *summary.Service
 	updater   *updater.Service
 	bootID    string
 	version   string
@@ -92,6 +94,14 @@ func New(cfg config.Config) (*Server, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	summarySvc := summary.NewService(summary.Options{
+		DB:           conn,
+		DataDir:      cfg.DataDir,
+		Catalog:      catSvc,
+		Media:        mediaSvc,
+		LifecycleCtx: ctx,
+	})
+
 	apiHandler := api.NewHandler(api.Deps{
 		DB:           conn,
 		DataDir:      cfg.DataDir,
@@ -101,6 +111,7 @@ func New(cfg config.Config) (*Server, error) {
 		Scanner:      scanSvc,
 		Catalog:      catSvc,
 		Media:        mediaSvc,
+		Summary:      summarySvc,
 		Updater:      updaterSvc,
 		LifecycleCtx: ctx,
 	})
@@ -109,6 +120,7 @@ func New(cfg config.Config) (*Server, error) {
 	webSubFS, err := fs.Sub(webDistFS, "webdist")
 	if err != nil {
 		cancel()
+		summarySvc.Wait()
 		_ = mediaSvc.Close()
 		_ = conn.Close()
 		return nil, fmt.Errorf("sub webdist fs: %w", err)
@@ -119,6 +131,7 @@ func New(cfg config.Config) (*Server, error) {
 		db:      conn,
 		media:   mediaSvc,
 		scanner: scanSvc,
+		summary: summarySvc,
 		updater: updaterSvc,
 		bootID:  bootID,
 		version: version,
@@ -170,6 +183,9 @@ func (s *Server) Close() error {
 		}
 		if s.updater != nil {
 			s.updater.Wait()
+		}
+		if s.summary != nil {
+			s.summary.Wait()
 		}
 
 		var errs []error

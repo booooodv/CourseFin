@@ -168,3 +168,62 @@ func TestMigration002AddsManuallyBoundColumn(t *testing.T) {
 		t.Fatalf("expected manually_bound column in subtitle_files")
 	}
 }
+
+func TestMigration003CreatesSummaryTablesAndCascades(t *testing.T) {
+	dataDir := t.TempDir()
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer conn.Close()
+
+	// Verify cache/asr directory exists
+	info, err := os.Stat(filepath.Join(dataDir, "cache", "asr"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("expected cache/asr directory to exist: err=%v", err)
+	}
+
+	// Verify both tables exist
+	for _, tbl := range []string{"media_transcripts", "lesson_summaries"} {
+		var name string
+		if err := conn.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&name); err != nil {
+			t.Fatalf("expected table %q: %v", tbl, err)
+		}
+	}
+
+	// Seed source -> media_file -> course -> chapter -> lesson, then insert transcript & summary.
+	// Deleting lesson must cascade-delete lesson_summaries while keeping media_transcripts;
+	// deleting media_file must cascade-delete media_transcripts.
+	now := "2026-11-25T00:00:00Z"
+	var libID string
+	if err := conn.QueryRow(`SELECT id FROM libraries LIMIT 1`).Scan(&libID); err != nil {
+		t.Fatalf("query default library: %v", err)
+	}
+	mustExec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := conn.Exec(q, args...); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	mustExec(`INSERT INTO storage_sources (id, name, driver, root_path, created_at, updated_at) VALUES ('s1','src','local','/tmp',?,?)`, now, now)
+	mustExec(`INSERT INTO media_files (id, source_id, relative_path, file_name, created_at, updated_at) VALUES ('m1','s1','a.mp4','a.mp4',?,?)`, now, now)
+	mustExec(`INSERT INTO courses (id, library_id, title, created_at, updated_at) VALUES ('c1',?,'Course',?,?)`, libID, now, now)
+	mustExec(`INSERT INTO chapters (id, course_id, title, sort_order, created_at, updated_at) VALUES ('ch1','c1','Ch1',1,?,?)`, now, now)
+	mustExec(`INSERT INTO lessons (id, course_id, chapter_id, media_file_id, title, sort_order, created_at, updated_at) VALUES ('l1','c1','ch1','m1','L1',1,?,?)`, now, now)
+	mustExec(`INSERT INTO media_transcripts (media_file_id, source, language, model, content_vtt, plain_text, created_at, updated_at) VALUES ('m1','asr','zh','whisper-1','WEBVTT','',?,?)`, now, now)
+	mustExec(`INSERT INTO lesson_summaries (lesson_id, media_file_id, source_type, source_label, has_timestamps, model, overview, outline_json, timeline_json, created_at, updated_at) VALUES ('l1','m1','asr','AI 语音转写',1,'gpt-4o-mini','ov','[]','[]',?,?)`, now, now)
+
+	mustExec(`DELETE FROM lessons WHERE id = 'l1'`)
+	var sumCount, trCount int
+	_ = conn.QueryRow(`SELECT COUNT(*) FROM lesson_summaries WHERE lesson_id = 'l1'`).Scan(&sumCount)
+	_ = conn.QueryRow(`SELECT COUNT(*) FROM media_transcripts WHERE media_file_id = 'm1'`).Scan(&trCount)
+	if sumCount != 0 || trCount != 1 {
+		t.Fatalf("after deleting lesson: summaries=%d want 0, transcripts=%d want 1", sumCount, trCount)
+	}
+
+	mustExec(`DELETE FROM media_files WHERE id = 'm1'`)
+	_ = conn.QueryRow(`SELECT COUNT(*) FROM media_transcripts WHERE media_file_id = 'm1'`).Scan(&trCount)
+	if trCount != 0 {
+		t.Fatalf("after deleting media_file: transcripts=%d want 0", trCount)
+	}
+}

@@ -1072,6 +1072,50 @@ func TestHasFFmpegDetection(t *testing.T) {
 	}
 }
 
+func TestCustomFFmpegSiblingFFprobePrecedence(t *testing.T) {
+	conn, dataDir := openTestDB(t)
+	pathDir := t.TempDir()
+	pathFFprobe := filepath.Join(pathDir, "ffprobe")
+	if err := os.WriteFile(pathFFprobe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write PATH ffprobe: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	customDir := t.TempDir()
+	customFFmpeg := filepath.Join(customDir, "ffmpeg")
+	customFFprobe := filepath.Join(customDir, "ffprobe")
+	if err := os.WriteFile(customFFmpeg, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write custom ffmpeg: %v", err)
+	}
+	if err := os.WriteFile(customFFprobe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write custom ffprobe: %v", err)
+	}
+
+	svcWithSibling := media.NewService(conn, dataDir, nil, customFFmpeg)
+	defer svcWithSibling.Close()
+	if !svcWithSibling.HasFFprobe() {
+		t.Fatalf("expected HasFFprobe() == true")
+	}
+	if svcWithSibling.FFprobeBin() != customFFprobe {
+		t.Fatalf("FFprobeBin() = %q, want sibling %q over PATH %q", svcWithSibling.FFprobeBin(), customFFprobe, pathFFprobe)
+	}
+
+	noSiblingDir := t.TempDir()
+	noSiblingFFmpeg := filepath.Join(noSiblingDir, "ffmpeg")
+	if err := os.WriteFile(noSiblingFFmpeg, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write no-sibling ffmpeg: %v", err)
+	}
+
+	svcFallback := media.NewService(conn, dataDir, nil, noSiblingFFmpeg)
+	defer svcFallback.Close()
+	if !svcFallback.HasFFprobe() {
+		t.Fatalf("expected HasFFprobe() == true on PATH fallback")
+	}
+	if svcFallback.FFprobeBin() != pathFFprobe {
+		t.Fatalf("FFprobeBin() = %q, want PATH fallback %q", svcFallback.FFprobeBin(), pathFFprobe)
+	}
+}
+
 func TestServeMasterPlaylistPropagatesTranscodeVideoAndTranscodesMPEG4(t *testing.T) {
 	conn, dataDir := openTestDB(t)
 	mediaRoot := t.TempDir()
@@ -1211,5 +1255,334 @@ func TestTranscodeOddDimensionVideoSucceeds(t *testing.T) {
 		if firstLine != "h264,320,180,yuv420p" && firstLine != "h264,yuv420p,320,180" {
 			t.Fatalf("odd transcoded stream = %q, want h264 + yuv420p + 320x180", firstLine)
 		}
+	}
+}
+
+func TestBuildAndServeAIGeneratedSubtitle(t *testing.T) {
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(mediaRoot, "lesson.mp4"), []byte("dummy"), 0o644); err != nil {
+		t.Fatalf("write lesson.mp4: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaRoot, "lesson.en.srt"), []byte("1\n00:00:00,500 --> 00:00:02,000\nSidecar EN\n"), 0o644); err != nil {
+		t.Fatalf("write sidecar srt: %v", err)
+	}
+
+	streamsJSON := `[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"},{"index":2,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng"}}]`
+	sourceID, mediaID := seedSourceAndMedia(t, conn, "local", mediaRoot, "lesson.mp4", "mp4", "h264", "aac", 12000, streamsJSON, "")
+
+	if _, err := conn.Exec(
+		`INSERT INTO subtitle_files (id, source_id, relative_path, media_file_id, language, title, format, is_default, status)
+		 VALUES (?, ?, 'lesson.en.srt', ?, 'en', 'English', 'srt', 1, 'active')`,
+		id.New(), sourceID, mediaID,
+	); err != nil {
+		t.Fatalf("insert subtitle_files: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	vttPayload := "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n你好 AI 字幕\n"
+	if _, err := conn.Exec(
+		`INSERT INTO media_transcripts (media_file_id, source, language, model, content_vtt, plain_text, created_at, updated_at)
+		 VALUES (?, 'asr', 'zh', 'whisper-1', ?, '你好 AI 字幕', ?, ?)`,
+		mediaID, vttPayload, now, now,
+	); err != nil {
+		t.Fatalf("insert media_transcripts asr: %v", err)
+	}
+
+	ffmpegBin := findTestBinary("ffmpeg")
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), ffmpegBin)
+	defer svc.Close()
+
+	streams, err := svc.ResolveStreams(context.Background(), mediaID)
+	if err != nil {
+		t.Fatalf("ResolveStreams failed: %v", err)
+	}
+	// Expected: 3 embedded (0, 1, 2) + 1 sidecar (3) + 1 AI generated (4)
+	if len(streams) != 5 {
+		t.Fatalf("ResolveStreams len = %d, want 5: %+v", len(streams), streams)
+	}
+
+	sidecar := streams[3]
+	if sidecar.Index != 3 || !sidecar.IsExternal || sidecar.IsAIGenerated {
+		t.Fatalf("unexpected sidecar descriptor: %+v", sidecar)
+	}
+
+	aiTrack := streams[4]
+	if aiTrack.Index != 4 {
+		t.Errorf("aiTrack.Index = %d, want 4 (strictly after sidecar)", aiTrack.Index)
+	}
+	if !aiTrack.IsExternal || !aiTrack.IsAIGenerated || aiTrack.IsDefault {
+		t.Errorf("unexpected aiTrack flags: IsExternal=%v IsAIGenerated=%v IsDefault=%v", aiTrack.IsExternal, aiTrack.IsAIGenerated, aiTrack.IsDefault)
+	}
+	if aiTrack.Language != "zh" || aiTrack.Title != "AI 转写字幕" || aiTrack.Format != "vtt" || aiTrack.Codec != "vtt" || aiTrack.Type != "subtitle" {
+		t.Errorf("unexpected aiTrack metadata: %+v", aiTrack)
+	}
+
+	// Serve AI subtitle as VTT
+	vttRec := httptest.NewRecorder()
+	svc.ServeSubtitle(vttRec, httptest.NewRequest(http.MethodGet, "/sub.vtt", nil), mediaID, aiTrack.Index, "vtt")
+	if vttRec.Code != http.StatusOK {
+		t.Fatalf("ServeSubtitle(vtt) status = %d, want 200 (body: %s)", vttRec.Code, vttRec.Body.String())
+	}
+	if ct := vttRec.Header().Get("Content-Type"); ct != "text/vtt; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/vtt; charset=utf-8", ct)
+	}
+	if !strings.Contains(vttRec.Body.String(), "你好 AI 字幕") {
+		t.Errorf("VTT body missing AI cue: %q", vttRec.Body.String())
+	}
+
+	// Serve AI subtitle converted to SRT when ffmpeg is available
+	if ffmpegBin != "" {
+		srtRec := httptest.NewRecorder()
+		svc.ServeSubtitle(srtRec, httptest.NewRequest(http.MethodGet, "/sub.srt", nil), mediaID, aiTrack.Index, "srt")
+		if srtRec.Code != http.StatusOK {
+			t.Fatalf("ServeSubtitle(srt) status = %d, want 200 (body: %s)", srtRec.Code, srtRec.Body.String())
+		}
+		if ct := srtRec.Header().Get("Content-Type"); ct != "application/x-subrip; charset=utf-8" {
+			t.Errorf("SRT Content-Type = %q, want application/x-subrip; charset=utf-8", ct)
+		}
+		if !strings.Contains(srtRec.Body.String(), "00:00:01,000 --> 00:00:04,000") || !strings.Contains(srtRec.Body.String(), "你好 AI 字幕") {
+			t.Errorf("SRT body unexpected: %q", srtRec.Body.String())
+		}
+	}
+
+	// Unsupported target format on AI subtitle returns 415
+	badFmtRec := httptest.NewRecorder()
+	svc.ServeSubtitle(badFmtRec, httptest.NewRequest(http.MethodGet, "/sub.pgs", nil), mediaID, aiTrack.Index, "pgs")
+	if badFmtRec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("ServeSubtitle(pgs) status = %d, want 415", badFmtRec.Code)
+	}
+
+	// Empty language in media_transcripts defaults to "und"
+	if _, err := conn.Exec(`UPDATE media_transcripts SET language = '' WHERE media_file_id = ?`, mediaID); err != nil {
+		t.Fatalf("update language empty: %v", err)
+	}
+	streamsDefaultLang, err := svc.ResolveStreams(context.Background(), mediaID)
+	if err != nil {
+		t.Fatalf("ResolveStreams empty lang failed: %v", err)
+	}
+	if got := streamsDefaultLang[len(streamsDefaultLang)-1].Language; got != "und" {
+		t.Errorf("empty language fallback = %q, want und", got)
+	}
+
+	// Manual transcript must NOT be exposed in ResolveStreams
+	_, manualMediaID := seedSourceAndMedia(t, conn, "local", mediaRoot, "lesson.mp4", "mp4", "h264", "aac", 12000, streamsJSON, "")
+	if _, err := conn.Exec(
+		`INSERT INTO media_transcripts (media_file_id, source, language, model, content_vtt, plain_text, created_at, updated_at)
+		 VALUES (?, 'manual', 'zh', '', ?, '手动字幕', ?, ?)`,
+		manualMediaID, vttPayload, now, now,
+	); err != nil {
+		t.Fatalf("insert manual media_transcripts: %v", err)
+	}
+	manualStreams, err := svc.ResolveStreams(context.Background(), manualMediaID)
+	if err != nil {
+		t.Fatalf("ResolveStreams manual failed: %v", err)
+	}
+	for _, st := range manualStreams {
+		if st.IsAIGenerated {
+			t.Fatalf("manual transcript must not be exposed as AI stream: %+v", st)
+		}
+	}
+	missingSubRec := httptest.NewRecorder()
+	svc.ServeSubtitle(missingSubRec, httptest.NewRequest(http.MethodGet, "/sub.vtt", nil), manualMediaID, 99, "vtt")
+	if missingSubRec.Code != http.StatusNotFound {
+		t.Errorf("non-existent subtitle index status = %d, want 404", missingSubRec.Code)
+	}
+}
+
+func TestExtractBestSubtitleVTTPriority(t *testing.T) {
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(mediaRoot, "video.mp4"), []byte("dummy"), 0o644); err != nil {
+		t.Fatalf("write video.mp4: %v", err)
+	}
+
+	// Prepare GBK-encoded Chinese SRT and UTF-8 English SRT
+	zhSRT := "1\n00:00:01,000 --> 00:00:03,000\n你好，世界中文课程\n"
+	gbkBytes, err := simplifiedchinese.GB18030.NewEncoder().Bytes([]byte(zhSRT))
+	if err != nil {
+		t.Fatalf("encode GB18030: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaRoot, "sub.zh.srt"), gbkBytes, 0o644); err != nil {
+		t.Fatalf("write sub.zh.srt: %v", err)
+	}
+	enSRT := "1\n00:00:01,000 --> 00:00:03,000\nHello English Subtitle\n"
+	if err := os.WriteFile(filepath.Join(mediaRoot, "sub.en.srt"), []byte(enSRT), 0o644); err != nil {
+		t.Fatalf("write sub.en.srt: %v", err)
+	}
+
+	// 1. Neither external is default -> Chinese external beats English external and embedded stream
+	streamsWithEmbedded := `[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"subtitle","codec_name":"subrip","disposition":{"default":1},"tags":{"language":"eng"}}]`
+	sourceID, mediaID1 := seedSourceAndMedia(t, conn, "local", mediaRoot, "video.mp4", "mp4", "h264", "", 10000, streamsWithEmbedded, "")
+	if _, err := conn.Exec(
+		`INSERT INTO subtitle_files (id, source_id, relative_path, media_file_id, language, title, format, is_default, status)
+		 VALUES (?, ?, 'sub.en.srt', ?, 'en', 'English', 'srt', 0, 'active'),
+		        (?, ?, 'sub.zh.srt', ?, 'zh', '中文', 'srt', 0, 'active')`,
+		id.New(), sourceID, mediaID1,
+		id.New(), sourceID, mediaID1,
+	); err != nil {
+		t.Fatalf("insert external subtitles: %v", err)
+	}
+
+	ffmpegBin := findTestBinary("ffmpeg")
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), ffmpegBin)
+	defer svc.Close()
+
+	vtt, srcType, srcLabel, found, err := svc.ExtractBestSubtitleVTT(ctx, mediaID1)
+	if err != nil {
+		t.Fatalf("ExtractBestSubtitleVTT(mediaID1) err = %v", err)
+	}
+	if !found || srcType != "external_subtitle" {
+		t.Fatalf("got found=%v srcType=%q, want true, external_subtitle", found, srcType)
+	}
+	if !strings.Contains(srcLabel, "外挂字幕") || !strings.Contains(srcLabel, "zh") {
+		t.Errorf("unexpected srcLabel = %q", srcLabel)
+	}
+	if !strings.HasPrefix(vtt, "WEBVTT") || !strings.Contains(vtt, "你好，世界中文课程") {
+		t.Fatalf("expected UTF-8 WebVTT from GBK Chinese SRT, got:\n%s", vtt)
+	}
+
+	// 2. When English external is explicitly is_default=1, it beats non-default Chinese external
+	sourceID2, mediaID2 := seedSourceAndMedia(t, conn, "local", mediaRoot, "video.mp4", "mp4", "h264", "", 10000, streamsWithEmbedded, "")
+	if _, err := conn.Exec(
+		`INSERT INTO subtitle_files (id, source_id, relative_path, media_file_id, language, title, format, is_default, status)
+		 VALUES (?, ?, 'sub.en.srt', ?, 'en', 'English', 'srt', 1, 'active'),
+		        (?, ?, 'sub.zh.srt', ?, 'zh', '中文', 'srt', 0, 'active')`,
+		id.New(), sourceID2, mediaID2,
+		id.New(), sourceID2, mediaID2,
+	); err != nil {
+		t.Fatalf("insert external subtitles case 2: %v", err)
+	}
+	vtt2, srcType2, _, found2, err := svc.ExtractBestSubtitleVTT(ctx, mediaID2)
+	if err != nil {
+		t.Fatalf("ExtractBestSubtitleVTT(mediaID2) err = %v", err)
+	}
+	if !found2 || srcType2 != "external_subtitle" || !strings.Contains(vtt2, "Hello English Subtitle") {
+		t.Fatalf("expected default EN external subtitle, got found=%v srcType=%q vtt=%q", found2, srcType2, vtt2)
+	}
+
+	// 3. Only bitmap subtitle + AI transcript -> ExtractBestSubtitleVTT skips both and returns found=false, err=nil
+	bitmapStreams := `[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"zh"}}]`
+	_, mediaIDBitmap := seedSourceAndMedia(t, conn, "local", mediaRoot, "video.mp4", "mp4", "h264", "", 10000, bitmapStreams, "")
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := conn.Exec(
+		`INSERT INTO media_transcripts (media_file_id, source, language, model, content_vtt, plain_text, created_at, updated_at)
+		 VALUES (?, 'asr', 'zh', 'whisper-1', 'WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nAI 字幕\n', 'AI 字幕', ?, ?)`,
+		mediaIDBitmap, now, now,
+	); err != nil {
+		t.Fatalf("insert ai transcript on bitmap media: %v", err)
+	}
+	vttBmp, srcBmp, labelBmp, foundBmp, err := svc.ExtractBestSubtitleVTT(ctx, mediaIDBitmap)
+	if err != nil {
+		t.Fatalf("ExtractBestSubtitleVTT(bitmap) err = %v, want nil", err)
+	}
+	if foundBmp || vttBmp != "" || srcBmp != "" || labelBmp != "" {
+		t.Fatalf("expected found=false for bitmap+AI-only media, got found=%v src=%q label=%q vtt=%q", foundBmp, srcBmp, labelBmp, vttBmp)
+	}
+
+	// 4. Embedded text subtitle extraction when no external subtitle exists
+	if ffmpegBin != "" {
+		embEn := filepath.Join(mediaRoot, "emb_en.srt")
+		embZh := filepath.Join(mediaRoot, "emb_zh.srt")
+		if err := os.WriteFile(embEn, []byte("1\n00:00:00,100 --> 00:00:01,500\nEmbedded EN\n"), 0o644); err != nil {
+			t.Fatalf("write emb_en: %v", err)
+		}
+		if err := os.WriteFile(embZh, []byte("1\n00:00:00,100 --> 00:00:01,500\n内嵌中文字幕\n"), 0o644); err != nil {
+			t.Fatalf("write emb_zh: %v", err)
+		}
+		mkvPath := filepath.Join(mediaRoot, "multi_emb.mkv")
+		genCmd := exec.Command(
+			ffmpegBin, "-y",
+			"-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=15",
+			"-i", embEn,
+			"-i", embZh,
+			"-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0",
+			"-metadata:s:s:0", "language=eng",
+			"-metadata:s:s:1", "language=chi",
+			"-disposition:s:0", "0",
+			"-disposition:s:1", "0",
+			"-c:v", "libx264", "-c:s", "srt",
+			mkvPath,
+		)
+		if out, err := genCmd.CombinedOutput(); err != nil {
+			t.Fatalf("generate multi_emb.mkv: %v\n%s", err, string(out))
+		}
+		prober := scanner.NewFFmpegProber("", ffmpegBin)
+		probeRes, err := prober.Probe(ctx, mkvPath)
+		if err != nil {
+			t.Fatalf("probe multi_emb.mkv: %v", err)
+		}
+		_, mediaIDEmb := seedSourceAndMedia(t, conn, "local", mediaRoot, "multi_emb.mkv", "mkv", probeRes.VideoCodec, probeRes.AudioCodec, probeRes.DurationMs, probeRes.StreamsJSON, "")
+		vttEmb, srcTypeEmb, srcLabelEmb, foundEmb, err := svc.ExtractBestSubtitleVTT(ctx, mediaIDEmb)
+		if err != nil {
+			t.Fatalf("ExtractBestSubtitleVTT(embedded) err = %v", err)
+		}
+		if !foundEmb || srcTypeEmb != "embedded_subtitle" || !strings.Contains(srcLabelEmb, "内嵌字幕") {
+			t.Fatalf("unexpected embedded result: found=%v srcType=%q srcLabel=%q", foundEmb, srcTypeEmb, srcLabelEmb)
+		}
+		if !strings.HasPrefix(vttEmb, "WEBVTT") || !strings.Contains(vttEmb, "内嵌中文字幕") {
+			t.Fatalf("expected Chinese embedded subtitle to beat English, got:\n%s", vttEmb)
+		}
+	}
+}
+
+func TestResolveLocalMediaInfoDetectsAudio(t *testing.T) {
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+	ctx := context.Background()
+
+	videoPath := filepath.Join(mediaRoot, "clip.mp4")
+	if err := os.WriteFile(videoPath, []byte("dummy"), 0o644); err != nil {
+		t.Fatalf("write clip.mp4: %v", err)
+	}
+	wantAbsPath, err := filepath.EvalSymlinks(videoPath)
+	if err != nil {
+		wantAbsPath = videoPath
+	}
+
+	_, withAudioID := seedSourceAndMedia(t, conn, "local", mediaRoot, "clip.mp4", "mp4", "h264", "aac", 45000,
+		`[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"}]`, "")
+	_, videoOnlyID := seedSourceAndMedia(t, conn, "local", mediaRoot, "clip.mp4", "mp4", "h264", "", 45000,
+		`[{"index":0,"codec_type":"video","codec_name":"h264"}]`, "")
+	_, emptyStreamsID := seedSourceAndMedia(t, conn, "local", mediaRoot, "clip.mp4", "mp4", "h264", "", 45000,
+		`[]`, "")
+
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), "/nonexistent/coursefin-ffmpeg-bin")
+	defer svc.Close()
+
+	if svc.FFmpegBin() != "/nonexistent/coursefin-ffmpeg-bin" {
+		t.Errorf("FFmpegBin() = %q, want /nonexistent/coursefin-ffmpeg-bin", svc.FFmpegBin())
+	}
+	if ffprobeBin := findTestBinary("ffprobe"); ffprobeBin != "" {
+		if !svc.HasFFprobe() || svc.FFprobeBin() == "" {
+			t.Errorf("expected HasFFprobe() == true and non-empty FFprobeBin(), got %v %q", svc.HasFFprobe(), svc.FFprobeBin())
+		}
+	}
+
+	infoAudio, err := svc.ResolveLocalMediaInfo(ctx, withAudioID)
+	if err != nil {
+		t.Fatalf("ResolveLocalMediaInfo(withAudio) err = %v", err)
+	}
+	if !infoAudio.HasAudio || infoAudio.MediaFileID != withAudioID || infoAudio.DurationMs != 45000 || infoAudio.AbsPath != wantAbsPath {
+		t.Fatalf("unexpected infoAudio: %+v (want AbsPath=%q)", infoAudio, wantAbsPath)
+	}
+
+	infoVideoOnly, err := svc.ResolveLocalMediaInfo(ctx, videoOnlyID)
+	if err != nil {
+		t.Fatalf("ResolveLocalMediaInfo(videoOnly) err = %v", err)
+	}
+	if infoVideoOnly.HasAudio {
+		t.Errorf("expected HasAudio == false for video-only streams_json, got true")
+	}
+
+	infoEmpty, err := svc.ResolveLocalMediaInfo(ctx, emptyStreamsID)
+	if err != nil {
+		t.Fatalf("ResolveLocalMediaInfo(empty) err = %v", err)
+	}
+	if !infoEmpty.HasAudio {
+		t.Errorf("expected HasAudio == true for empty streams_json (let FFmpeg decide), got false")
 	}
 }
