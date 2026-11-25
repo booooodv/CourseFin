@@ -541,7 +541,9 @@ describe('LibraryContext, Layout AppShell, & AppRoutes', () => {
       expect(screen.queryByRole('group', { name: '媒体库 全栈架构' })).not.toBeInTheDocument();
     });
     expect(await screen.findByText('已删除媒体库「全栈架构」')).toBeInTheDocument();
-    expect(screen.getByTestId('shell-location')).toHaveTextContent(/^\/$/);
+    await waitFor(() => {
+      expect(screen.getByTestId('shell-location')).toHaveTextContent(/^\/$/);
+    });
   });
 
   it('persists desktop collapse state and falls back to expanded on invalid or throwing localStorage', async () => {
