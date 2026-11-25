@@ -184,25 +184,35 @@ type LessonPlacement struct {
 	SortOrder int    `json:"sort_order"`
 }
 
+type CourseRef struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
 type StorageSource struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Driver        string `json:"driver"`
-	RootPath      string `json:"root_path"`
-	ConfigJSON    string `json:"config_json"`
-	Enabled       bool   `json:"enabled"`
-	LastScannedAt string `json:"last_scanned_at,omitempty"`
-	MediaCount    int    `json:"media_count"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Driver          string `json:"driver"`
+	RootPath        string `json:"root_path"`
+	ConfigJSON      string `json:"config_json"`
+	Enabled         bool   `json:"enabled"`
+	LastScannedAt   string `json:"last_scanned_at,omitempty"`
+	MediaCount      int    `json:"media_count"`
+	AssignedCount   int    `json:"assigned_count"`
+	UnassignedCount int    `json:"unassigned_count"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 type IndexedDir struct {
-	RelPath     string `json:"rel_path"`
-	Name        string `json:"name"`
-	FileCount   int    `json:"file_count"`
-	DirectFiles int    `json:"direct_files"`
-	HasSubdirs  bool   `json:"has_subdirs"`
+	RelPath         string      `json:"rel_path"`
+	Name            string      `json:"name"`
+	FileCount       int         `json:"file_count"`
+	DirectFiles     int         `json:"direct_files"`
+	AssignedCount   int         `json:"assigned_count"`
+	UnassignedCount int         `json:"unassigned_count"`
+	Courses         []CourseRef `json:"courses"`
+	HasSubdirs      bool        `json:"has_subdirs"`
 }
 
 type IndexedSubtitle struct {
@@ -243,10 +253,12 @@ type MediaFile struct {
 	Height        int    `json:"height"`
 	Bitrate       int64  `json:"bitrate"`
 	StreamsJSON   string `json:"-"`
-	ThumbnailPath string `json:"thumbnail_path"`
-	ProbedAt      string `json:"probed_at,omitempty"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ThumbnailPath string      `json:"thumbnail_path"`
+	ProbedAt      string      `json:"probed_at,omitempty"`
+	Assigned      bool        `json:"assigned"`
+	Courses       []CourseRef `json:"courses"`
+	CreatedAt     string      `json:"created_at"`
+	UpdatedAt     string      `json:"updated_at"`
 }
 
 func normalizeOrRaw(raw string) string {
@@ -1432,7 +1444,9 @@ func (s *Service) ReorderLessons(ctx context.Context, courseID string, placement
 func (s *Service) ListSources(ctx context.Context) ([]StorageSource, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT ss.id, ss.name, ss.driver, ss.root_path, ss.config_json, ss.enabled,
-		       COALESCE(ss.last_scanned_at, ''), COUNT(mf.id) AS media_count,
+		       COALESCE(ss.last_scanned_at, ''),
+		       COUNT(mf.id) AS media_count,
+		       COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM lessons l WHERE l.media_file_id = mf.id) THEN mf.id END) AS assigned_count,
 		       ss.created_at, ss.updated_at
 		FROM storage_sources ss
 		LEFT JOIN media_files mf ON mf.source_id = ss.id AND mf.status = 'active'
@@ -1449,11 +1463,14 @@ func (s *Service) ListSources(ctx context.Context) ([]StorageSource, error) {
 		var enabledInt int
 		if err := rows.Scan(
 			&src.ID, &src.Name, &src.Driver, &src.RootPath, &src.ConfigJSON, &enabledInt,
-			&src.LastScannedAt, &src.MediaCount, &src.CreatedAt, &src.UpdatedAt,
+			&src.LastScannedAt, &src.MediaCount, &src.AssignedCount, &src.CreatedAt, &src.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan storage source: %w", err)
 		}
 		src.Enabled = enabledInt != 0
+		if src.MediaCount > src.AssignedCount {
+			src.UnassignedCount = src.MediaCount - src.AssignedCount
+		}
 		sources = append(sources, src)
 	}
 	return sources, rows.Err()
@@ -1465,7 +1482,9 @@ func (s *Service) GetSource(ctx context.Context, sourceID string) (*StorageSourc
 	var enabledInt int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT ss.id, ss.name, ss.driver, ss.root_path, ss.config_json, ss.enabled,
-		       COALESCE(ss.last_scanned_at, ''), COUNT(mf.id) AS media_count,
+		       COALESCE(ss.last_scanned_at, ''),
+		       COUNT(mf.id) AS media_count,
+		       COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM lessons l WHERE l.media_file_id = mf.id) THEN mf.id END) AS assigned_count,
 		       ss.created_at, ss.updated_at
 		FROM storage_sources ss
 		LEFT JOIN media_files mf ON mf.source_id = ss.id AND mf.status = 'active'
@@ -1473,7 +1492,7 @@ func (s *Service) GetSource(ctx context.Context, sourceID string) (*StorageSourc
 		GROUP BY ss.id`, sourceID).
 		Scan(
 			&src.ID, &src.Name, &src.Driver, &src.RootPath, &src.ConfigJSON, &enabledInt,
-			&src.LastScannedAt, &src.MediaCount, &src.CreatedAt, &src.UpdatedAt,
+			&src.LastScannedAt, &src.MediaCount, &src.AssignedCount, &src.CreatedAt, &src.UpdatedAt,
 		)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -1482,6 +1501,9 @@ func (s *Service) GetSource(ctx context.Context, sourceID string) (*StorageSourc
 		return nil, err
 	}
 	src.Enabled = enabledInt != 0
+	if src.MediaCount > src.AssignedCount {
+		src.UnassignedCount = src.MediaCount - src.AssignedCount
+	}
 	return &src, nil
 }
 
@@ -1551,6 +1573,53 @@ func cleanRelPrefix(raw string) string {
 	return cleaned
 }
 
+func (s *Service) loadCourseRefsByMediaFileIDs(ctx context.Context, mfIDs []string) (map[string][]CourseRef, error) {
+	out := make(map[string][]CourseRef)
+	if len(mfIDs) == 0 {
+		return out, nil
+	}
+
+	const chunkSize = 500
+	for start := 0; start < len(mfIDs); start += chunkSize {
+		end := start + chunkSize
+		if end > len(mfIDs) {
+			end = len(mfIDs)
+		}
+		batch := mfIDs[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, mid := range batch {
+			placeholders[i] = "?"
+			args[i] = mid
+		}
+
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT DISTINCT l.media_file_id, c.id, c.title
+			FROM lessons l
+			JOIN courses c ON c.id = l.course_id
+			WHERE l.media_file_id IN (`+strings.Join(placeholders, ",")+`)
+			ORDER BY c.title ASC, c.id ASC`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("load course refs for media files: %w", err)
+		}
+		for rows.Next() {
+			var mid string
+			var ref CourseRef
+			if err := rows.Scan(&mid, &ref.ID, &ref.Title); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[mid] = append(out[mid], ref)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 func (s *Service) ListIndexedDirs(ctx context.Context, sourceID, prefix string) ([]IndexedDir, error) {
 	sourceID = normalizeOrRaw(sourceID)
 	if _, err := s.GetSource(ctx, sourceID); err != nil {
@@ -1560,17 +1629,25 @@ func (s *Service) ListIndexedDirs(ctx context.Context, sourceID, prefix string) 
 	cleanPrefix := cleanRelPrefix(prefix)
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT relative_path FROM media_files
+		SELECT id, relative_path FROM media_files
 		WHERE source_id = ? AND status = 'active'`, sourceID)
 	if err != nil {
 		return nil, fmt.Errorf("list indexed dirs: %w", err)
 	}
 	defer rows.Close()
 
-	dirMap := make(map[string]*IndexedDir)
+	type dirFileEntry struct {
+		mfID      string
+		dirName   string
+		fullDir   string
+		hasSubdir bool
+	}
+	var matchedFiles []dirFileEntry
+	var matchedMFIDs []string
+
 	for rows.Next() {
-		var relPath string
-		if err := rows.Scan(&relPath); err != nil {
+		var mfID, relPath string
+		if err := rows.Scan(&mfID, &relPath); err != nil {
 			return nil, err
 		}
 		var rest string
@@ -1591,29 +1668,73 @@ func (s *Service) ListIndexedDirs(ctx context.Context, sourceID, prefix string) 
 		if cleanPrefix != "" {
 			fullDir = cleanPrefix + "/" + dirName
 		}
-
-		entry, ok := dirMap[dirName]
-		if !ok {
-			entry = &IndexedDir{
-				RelPath: fullDir,
-				Name:    dirName,
-			}
-			dirMap[dirName] = entry
-		}
-		entry.FileCount++
-		if strings.ContainsRune(rest[slashIdx+1:], '/') {
-			entry.HasSubdirs = true
-		} else {
-			entry.DirectFiles++
-		}
+		matchedFiles = append(matchedFiles, dirFileEntry{
+			mfID:      mfID,
+			dirName:   dirName,
+			fullDir:   fullDir,
+			hasSubdir: strings.ContainsRune(rest[slashIdx+1:], '/'),
+		})
+		matchedMFIDs = append(matchedMFIDs, mfID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
+	courseRefsByMF, err := s.loadCourseRefsByMediaFileIDs(ctx, matchedMFIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	type dirAgg struct {
+		dir       IndexedDir
+		courseMap map[string]CourseRef
+	}
+	dirMap := make(map[string]*dirAgg)
+	for _, f := range matchedFiles {
+		agg, ok := dirMap[f.dirName]
+		if !ok {
+			agg = &dirAgg{
+				dir: IndexedDir{
+					RelPath: f.fullDir,
+					Name:    f.dirName,
+					Courses: []CourseRef{},
+				},
+				courseMap: make(map[string]CourseRef),
+			}
+			dirMap[f.dirName] = agg
+		}
+		agg.dir.FileCount++
+		if f.hasSubdir {
+			agg.dir.HasSubdirs = true
+		} else {
+			agg.dir.DirectFiles++
+		}
+		if refs := courseRefsByMF[f.mfID]; len(refs) > 0 {
+			agg.dir.AssignedCount++
+			for _, ref := range refs {
+				agg.courseMap[ref.ID] = ref
+			}
+		} else {
+			agg.dir.UnassignedCount++
+		}
+	}
+
 	dirs := make([]IndexedDir, 0, len(dirMap))
-	for _, d := range dirMap {
-		dirs = append(dirs, *d)
+	for _, agg := range dirMap {
+		if len(agg.courseMap) > 0 {
+			refs := make([]CourseRef, 0, len(agg.courseMap))
+			for _, ref := range agg.courseMap {
+				refs = append(refs, ref)
+			}
+			sort.Slice(refs, func(i, j int) bool {
+				if refs[i].Title != refs[j].Title {
+					return NaturalCompare(refs[i].Title, refs[j].Title) < 0
+				}
+				return refs[i].ID < refs[j].ID
+			})
+			agg.dir.Courses = refs
+		}
+		dirs = append(dirs, agg.dir)
 	}
 	sort.Slice(dirs, func(i, j int) bool {
 		return NaturalCompare(dirs[i].Name, dirs[j].Name) < 0
@@ -1622,6 +1743,10 @@ func (s *Service) ListIndexedDirs(ctx context.Context, sourceID, prefix string) 
 }
 
 func (s *Service) ListMediaFiles(ctx context.Context, sourceID, dirPrefix, search, status string) ([]MediaFile, error) {
+	return s.ListMediaFilesWithAssigned(ctx, sourceID, dirPrefix, search, status, "")
+}
+
+func (s *Service) ListMediaFilesWithAssigned(ctx context.Context, sourceID, dirPrefix, search, status, assignedFilter string) ([]MediaFile, error) {
 	where := []string{"1=1"}
 	var args []any
 
@@ -1648,7 +1773,8 @@ func (s *Service) ListMediaFiles(ctx context.Context, sourceID, dirPrefix, searc
 	cleanPrefix := cleanRelPrefix(dirPrefix)
 	searchLower := strings.ToLower(strings.TrimSpace(search))
 
-	var files []MediaFile
+	var candidates []MediaFile
+	var mfIDs []string
 	for rows.Next() {
 		var mf MediaFile
 		if err := rows.Scan(
@@ -1664,10 +1790,36 @@ func (s *Service) ListMediaFiles(ctx context.Context, sourceID, dirPrefix, searc
 		if searchLower != "" && !strings.Contains(strings.ToLower(mf.RelativePath), searchLower) {
 			continue
 		}
-		files = append(files, mf)
+		mf.Courses = []CourseRef{}
+		candidates = append(candidates, mf)
+		mfIDs = append(mfIDs, mf.ID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	courseRefsByMF, err := s.loadCourseRefsByMediaFileIDs(ctx, mfIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	normAssigned := strings.ToLower(strings.TrimSpace(assignedFilter))
+	wantAssignedOnly := normAssigned == "true" || normAssigned == "1"
+	wantUnassignedOnly := normAssigned == "false" || normAssigned == "0"
+
+	files := make([]MediaFile, 0, len(candidates))
+	for i := range candidates {
+		if refs := courseRefsByMF[candidates[i].ID]; len(refs) > 0 {
+			candidates[i].Assigned = true
+			candidates[i].Courses = refs
+		}
+		if wantAssignedOnly && !candidates[i].Assigned {
+			continue
+		}
+		if wantUnassignedOnly && candidates[i].Assigned {
+			continue
+		}
+		files = append(files, candidates[i])
 	}
 
 	sort.Slice(files, func(i, j int) bool {

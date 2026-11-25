@@ -794,3 +794,93 @@ func TestListAndBindSubtitles(t *testing.T) {
 		t.Fatalf("expected reset_auto with manually_bound=false, got %+v", reset)
 	}
 }
+
+func TestStorageAssignmentCountsAndMultiCourseDedup(t *testing.T) {
+	ctx := context.Background()
+	svc, conn, _ := setupTestCatalog(t)
+	mediaRoot := t.TempDir()
+
+	src, err := svc.CreateSource(ctx, "AssignSrc", "local", mediaRoot)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	mf1 := seedMediaFile(t, conn, src.ID, "DirA/01.mp4", 60000)
+	mf2 := seedMediaFile(t, conn, src.ID, "DirA/02.mp4", 60000)
+	mf3 := seedMediaFile(t, conn, src.ID, "DirB/03.mp4", 60000)
+
+	c1, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{Title: "Beta Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse c1: %v", err)
+	}
+	c2, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{Title: "Alpha Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse c2: %v", err)
+	}
+	// Assign mf1 to BOTH courses to test deduplication
+	if _, err := svc.AddLesson(ctx, c1.Chapters[0].ID, mf1, "L1"); err != nil {
+		t.Fatalf("AddLesson c1: %v", err)
+	}
+	if _, err := svc.AddLesson(ctx, c2.Chapters[0].ID, mf1, "L1 copy"); err != nil {
+		t.Fatalf("AddLesson c2: %v", err)
+	}
+
+	gotSrc, err := svc.GetSource(ctx, src.ID)
+	if err != nil {
+		t.Fatalf("GetSource: %v", err)
+	}
+	if gotSrc.MediaCount != 3 || gotSrc.AssignedCount != 1 || gotSrc.UnassignedCount != 2 {
+		t.Fatalf("GetSource counts = media:%d assigned:%d unassigned:%d, want 3/1/2", gotSrc.MediaCount, gotSrc.AssignedCount, gotSrc.UnassignedCount)
+	}
+	sources, err := svc.ListSources(ctx)
+	if err != nil {
+		t.Fatalf("ListSources: %v", err)
+	}
+	if len(sources) != 1 || sources[0].AssignedCount != 1 || sources[0].UnassignedCount != 2 {
+		t.Fatalf("ListSources counts = %+v, want 3/1/2", sources)
+	}
+
+	dirs, err := svc.ListIndexedDirs(ctx, src.ID, "")
+	if err != nil {
+		t.Fatalf("ListIndexedDirs: %v", err)
+	}
+	if len(dirs) != 2 {
+		t.Fatalf("expected 2 dirs, got %+v", dirs)
+	}
+	dirA, dirB := dirs[0], dirs[1]
+	if dirA.Name != "DirA" || dirA.FileCount != 2 || dirA.AssignedCount != 1 || dirA.UnassignedCount != 1 {
+		t.Fatalf("unexpected DirA: %+v", dirA)
+	}
+	if len(dirA.Courses) != 2 || dirA.Courses[0].Title != "Alpha Course" || dirA.Courses[1].Title != "Beta Course" {
+		t.Fatalf("unexpected DirA.Courses: %+v", dirA.Courses)
+	}
+	if dirB.Name != "DirB" || dirB.FileCount != 1 || dirB.AssignedCount != 0 || dirB.UnassignedCount != 1 || dirB.Courses == nil || len(dirB.Courses) != 0 {
+		t.Fatalf("unexpected DirB: %+v", dirB)
+	}
+
+	allFiles, err := svc.ListMediaFilesWithAssigned(ctx, src.ID, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ListMediaFilesWithAssigned all: %v", err)
+	}
+	if len(allFiles) != 3 {
+		t.Fatalf("expected 3 files, got %d", len(allFiles))
+	}
+	if !allFiles[0].Assigned || len(allFiles[0].Courses) != 2 || allFiles[1].Assigned || allFiles[2].Assigned {
+		t.Fatalf("unexpected file assignment flags: %+v", allFiles)
+	}
+
+	assignedOnly, err := svc.ListMediaFilesWithAssigned(ctx, src.ID, "", "", "", "true")
+	if err != nil {
+		t.Fatalf("ListMediaFilesWithAssigned true: %v", err)
+	}
+	if len(assignedOnly) != 1 || assignedOnly[0].ID != mf1 {
+		t.Fatalf("expected only mf1, got %+v", assignedOnly)
+	}
+
+	unassignedOnly, err := svc.ListMediaFilesWithAssigned(ctx, src.ID, "", "", "", "false")
+	if err != nil {
+		t.Fatalf("ListMediaFilesWithAssigned false: %v", err)
+	}
+	if len(unassignedOnly) != 2 || unassignedOnly[0].ID != mf2 || unassignedOnly[1].ID != mf3 {
+		t.Fatalf("expected mf2 and mf3, got %+v", unassignedOnly)
+	}
+}

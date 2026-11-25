@@ -1984,3 +1984,78 @@ func TestImportAIOrganizeEndpoint(t *testing.T) {
 		t.Fatalf("expected 0 courses in DB after preview AI organize, got %d", len(courses))
 	}
 }
+
+func TestStorageSourcesDirsAndFilesAssignmentAPI(t *testing.T) {
+	env := setupAPITestEnv(t)
+	if _, err := env.authSvc.SetupAdmin(context.Background(), "admin", "secret123"); err != nil {
+		t.Fatalf("SetupAdmin: %v", err)
+	}
+	sess, _, err := env.authSvc.Login(context.Background(), "admin", "secret123", auth.DeviceInfo{DeviceID: "assign-api-test"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	token := sess.Token
+
+	writeDummyFile(t, filepath.Join(env.mediaDir, "Imported", "01.mp4"), []byte("v1"))
+	writeDummyFile(t, filepath.Join(env.mediaDir, "Pending", "02.mp4"), []byte("v2"))
+
+	src, err := env.catSvc.CreateSource(context.Background(), "AssignAPISrc", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	if _, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "Imported",
+		Title:      "Imported Course",
+	}); err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+
+	// 1. /api/v1/sources reports assigned_count=1, unassigned_count=1
+	resp, raw := env.doJSON(t, http.MethodGet, "/api/v1/sources", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /sources = %d: %s", resp.StatusCode, raw)
+	}
+	var srcRes struct {
+		Sources []catalog.StorageSource `json:"sources"`
+	}
+	if err := json.Unmarshal(raw, &srcRes); err != nil {
+		t.Fatalf("unmarshal sources: %v", err)
+	}
+	if len(srcRes.Sources) != 1 || srcRes.Sources[0].AssignedCount != 1 || srcRes.Sources[0].UnassignedCount != 1 {
+		t.Fatalf("unexpected source assignment counts: %+v", srcRes.Sources)
+	}
+
+	// 2. /api/v1/sources/{id}/dirs reports per-dir counts and courses
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/sources/"+src.ID+"/dirs", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /dirs = %d: %s", resp.StatusCode, raw)
+	}
+	var dirRes struct {
+		Dirs []catalog.IndexedDir `json:"dirs"`
+	}
+	if err := json.Unmarshal(raw, &dirRes); err != nil {
+		t.Fatalf("unmarshal dirs: %v", err)
+	}
+	if len(dirRes.Dirs) != 2 || dirRes.Dirs[0].AssignedCount != 1 || len(dirRes.Dirs[0].Courses) != 1 || dirRes.Dirs[1].UnassignedCount != 1 {
+		t.Fatalf("unexpected dir assignment info: %+v", dirRes.Dirs)
+	}
+
+	// 3. /api/v1/sources/{id}/files?assigned=false filters to unassigned files only
+	resp, raw = env.doJSON(t, http.MethodGet, "/api/v1/sources/"+src.ID+"/files?assigned=false", nil, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /files?assigned=false = %d: %s", resp.StatusCode, raw)
+	}
+	var fileRes struct {
+		Files []catalog.MediaFile `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &fileRes); err != nil {
+		t.Fatalf("unmarshal files: %v", err)
+	}
+	if len(fileRes.Files) != 1 || fileRes.Files[0].FileName != "02.mp4" || fileRes.Files[0].Assigned {
+		t.Fatalf("unexpected unassigned files: %+v", fileRes.Files)
+	}
+}

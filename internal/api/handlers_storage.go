@@ -118,7 +118,7 @@ func (h *handler) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	files, err := h.cat.ListMediaFiles(r.Context(), sourceID, q.Get("prefix"), q.Get("search"), q.Get("status"))
+	files, err := h.cat.ListMediaFilesWithAssigned(r.Context(), sourceID, q.Get("prefix"), q.Get("search"), q.Get("status"), q.Get("assigned"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return
