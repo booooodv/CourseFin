@@ -75,6 +75,7 @@ func New(cfg config.Config) (*Server, error) {
 
 	prober := scanner.NewFFmpegProber("", "")
 	scanSvc := scanner.NewService(conn, cfg.DataDir, reg, prober)
+	_, _ = scanSvc.RematchUnboundSubtitles(context.Background())
 	catSvc := catalog.NewService(conn, cfg.DataDir)
 	catSvc.SetRegistry(reg)
 	mediaSvc := media.NewService(conn, cfg.DataDir, reg, "")

@@ -14,6 +14,8 @@ import (
 
 	"coursefin/internal/id"
 	"coursefin/internal/storage"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const defaultProbeWorkers = 4
@@ -34,9 +36,10 @@ type ScanReport struct {
 	SkippedVideos  int       `json:"skipped_videos"`
 	MissingVideos  int       `json:"missing_videos"`
 	RestoredVideos int       `json:"restored_videos"`
-	ProbedVideos   int       `json:"probed_videos"`
-	TotalSubtitles int       `json:"total_subtitles"`
-	Errors         []string  `json:"errors,omitempty"`
+	ProbedVideos     int       `json:"probed_videos"`
+	TotalSubtitles   int       `json:"total_subtitles"`
+	MatchedSubtitles int       `json:"matched_subtitles"`
+	Errors           []string  `json:"errors,omitempty"`
 }
 
 // ScanState captures the live and most recent scan status for a storage source.
@@ -157,9 +160,11 @@ type existingMediaRecord struct {
 }
 
 type existingSubtitleRecord struct {
-	id           string
-	relativePath string
-	status       string
+	id            string
+	relativePath  string
+	mediaFileID   sql.NullString
+	manuallyBound bool
+	status        string
 }
 
 type probeJob struct {
@@ -389,10 +394,12 @@ func (s *Service) runScanLocked(ctx context.Context, sourceID string, preloadedS
 	}
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
-	if err := s.persistScanResults(ctx, sourceID, nowStr, results, restoreIDs, missingVideoIDs, videoEntries, videoIDByRel, subEntries, existingSubs); err != nil {
+	matchedSubs, err := s.persistScanResults(ctx, sourceID, nowStr, results, restoreIDs, missingVideoIDs, videoEntries, videoIDByRel, subEntries, existingSubs)
+	if err != nil {
 		scanErr = err
 		return nil, err
 	}
+	rep.MatchedSubtitles = matchedSubs
 
 	rep.FinishedAt = time.Now().UTC()
 	report = rep
@@ -503,10 +510,10 @@ func (s *Service) persistScanResults(
 	videoIDByRel map[string]string,
 	subEntries []storage.FileEntry,
 	existingSubs map[string]existingSubtitleRecord,
-) error {
+) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin scan tx: %w", err)
+		return 0, fmt.Errorf("begin scan tx: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -548,7 +555,7 @@ func (s *Service) persistScanResults(
 				durationMs, container, videoCodec, audioCodec, width, height, bitrate,
 				streamsJSON, r.thumbPath, probedAt, nowStr, nowStr,
 			); err != nil {
-				return fmt.Errorf("insert media_file %s: %w", job.entry.RelPath, err)
+				return 0, fmt.Errorf("insert media_file %s: %w", job.entry.RelPath, err)
 			}
 		} else {
 			if _, err := tx.ExecContext(ctx, `
@@ -563,35 +570,188 @@ func (s *Service) persistScanResults(
 				width, height, bitrate, streamsJSON,
 				r.thumbPath, probedAt, nowStr, job.id,
 			); err != nil {
-				return fmt.Errorf("update media_file %s: %w", job.entry.RelPath, err)
+				return 0, fmt.Errorf("update media_file %s: %w", job.entry.RelPath, err)
 			}
 		}
 	}
 
 	for _, idToRestore := range restoreIDs {
 		if _, err := tx.ExecContext(ctx, `UPDATE media_files SET status = 'active', updated_at = ? WHERE id = ?`, nowStr, idToRestore); err != nil {
-			return fmt.Errorf("restore media_file %s: %w", idToRestore, err)
+			return 0, fmt.Errorf("restore media_file %s: %w", idToRestore, err)
 		}
 	}
 
 	for _, idMissing := range missingVideoIDs {
 		if _, err := tx.ExecContext(ctx, `UPDATE media_files SET status = 'missing', updated_at = ? WHERE id = ?`, nowStr, idMissing); err != nil {
-			return fmt.Errorf("mark missing media_file %s: %w", idMissing, err)
+			return 0, fmt.Errorf("mark missing media_file %s: %w", idMissing, err)
 		}
 	}
 
-	if err := syncSubtitlesTx(ctx, tx, sourceID, videoEntries, videoIDByRel, subEntries, existingSubs); err != nil {
-		return err
+	matchedSubs, err := syncSubtitlesTx(ctx, tx, sourceID, videoEntries, videoIDByRel, subEntries, existingSubs)
+	if err != nil {
+		return 0, err
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE storage_sources SET last_scanned_at = ?, updated_at = ? WHERE id = ?`, nowStr, nowStr, sourceID); err != nil {
-		return fmt.Errorf("update storage_sources.last_scanned_at: %w", err)
+		return 0, fmt.Errorf("update storage_sources.last_scanned_at: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit scan tx: %w", err)
+		return 0, fmt.Errorf("commit scan tx: %w", err)
 	}
-	return nil
+	return matchedSubs, nil
+}
+
+type videoSubtitleIndex struct {
+	byDir          map[string][]string
+	dirsByParent   map[string][]string
+	videoIDByRel   map[string]string
+}
+
+func buildVideoSubtitleIndex(videoRels []string, videoIDByRel map[string]string) *videoSubtitleIndex {
+	idx := &videoSubtitleIndex{
+		byDir:        make(map[string][]string),
+		dirsByParent: make(map[string][]string),
+		videoIDByRel: videoIDByRel,
+	}
+	seenDir := make(map[string]bool)
+	for _, rel := range videoRels {
+		dir := norm.NFC.String(path.Dir(rel))
+		idx.byDir[dir] = append(idx.byDir[dir], rel)
+		if !seenDir[dir] {
+			seenDir[dir] = true
+			parent := norm.NFC.String(path.Dir(dir))
+			idx.dirsByParent[parent] = append(idx.dirsByParent[parent], dir)
+		}
+	}
+	// Prefer longer stems first so e.g. 01_intro.2.mp4 beats 01_intro.mp4 when matching 01_intro.2.srt.
+	for dir := range idx.byDir {
+		sort.Slice(idx.byDir[dir], func(i, j int) bool {
+			li := len(strings.TrimSuffix(norm.NFC.String(path.Base(idx.byDir[dir][i])), path.Ext(idx.byDir[dir][i])))
+			lj := len(strings.TrimSuffix(norm.NFC.String(path.Base(idx.byDir[dir][j])), path.Ext(idx.byDir[dir][j])))
+			if li != lj {
+				return li > lj
+			}
+			return idx.byDir[dir][i] < idx.byDir[dir][j]
+		})
+	}
+	for parent := range idx.dirsByParent {
+		sort.Strings(idx.dirsByParent[parent])
+	}
+	return idx
+}
+
+func (idx *videoSubtitleIndex) match(subRel string) (videoID string, match SubtitleMatch, found bool) {
+	subDir := norm.NFC.String(path.Dir(subRel))
+
+	// 1. Same directory candidates.
+	if vid, m, ok := idx.matchInCandidates(idx.byDir[subDir], subRel, false); ok {
+		return vid, m, true
+	}
+
+	// 2. If subtitle resides inside a recognized subtitle folder (Subs/, Subtitles/, 字幕/, etc.):
+	if subDir != "." && IsSubtitleDirName(path.Base(subDir)) {
+		parentDir := norm.NFC.String(path.Dir(subDir))
+		// 2a. Parent directory candidates (e.g. Course/Ch1/Subs/01.srt -> Course/Ch1/01.mp4).
+		if vid, m, ok := idx.matchInCandidates(idx.byDir[parentDir], subRel, false); ok {
+			return vid, m, true
+		}
+
+		// 2b. Sibling directories under the same parent (e.g. Course/Subtitles/01.srt -> Course/Videos/01.mp4).
+		// Require a unique match across siblings to prevent false cross-chapter binding.
+		var siblingCandidates []string
+		for _, sibDir := range idx.dirsByParent[parentDir] {
+			if sibDir == subDir {
+				continue
+			}
+			siblingCandidates = append(siblingCandidates, idx.byDir[sibDir]...)
+		}
+		if len(siblingCandidates) > 0 {
+			if vid, m, ok := idx.matchInCandidates(siblingCandidates, subRel, true); ok {
+				return vid, m, true
+			}
+		}
+	}
+
+	return "", SubtitleMatch{}, false
+}
+
+func (idx *videoSubtitleIndex) matchInCandidates(candidates []string, subRel string, requireUnique bool) (string, SubtitleMatch, bool) {
+	if len(candidates) == 0 {
+		return "", SubtitleMatch{}, false
+	}
+
+	subExt := path.Ext(subRel)
+	subStem := strings.TrimSuffix(norm.NFC.String(path.Base(subRel)), norm.NFC.String(subExt))
+
+	// Pass 1: exact stem match.
+	var exactHits []struct {
+		vid string
+		m   SubtitleMatch
+	}
+	for _, vidRel := range candidates {
+		vidExt := path.Ext(vidRel)
+		vidStem := strings.TrimSuffix(norm.NFC.String(path.Base(vidRel)), norm.NFC.String(vidExt))
+		if strings.EqualFold(subStem, vidStem) {
+			if m, ok := matchSubtitleByStem(vidRel, subRel, false); ok {
+				if !requireUnique {
+					return idx.videoIDByRel[vidRel], m, true
+				}
+				exactHits = append(exactHits, struct {
+					vid string
+					m   SubtitleMatch
+				}{vid: idx.videoIDByRel[vidRel], m: m})
+			}
+		}
+	}
+	if len(exactHits) == 1 {
+		return exactHits[0].vid, exactHits[0].m, true
+	}
+	if len(exactHits) > 1 {
+		return "", SubtitleMatch{}, false
+	}
+
+	// Pass 2: stem + separator + language/descriptor match.
+	var prefixHits []struct {
+		vid string
+		m   SubtitleMatch
+	}
+	for _, vidRel := range candidates {
+		if m, ok := matchSubtitleByStem(vidRel, subRel, false); ok {
+			if !requireUnique {
+				return idx.videoIDByRel[vidRel], m, true
+			}
+			prefixHits = append(prefixHits, struct {
+				vid string
+				m   SubtitleMatch
+			}{vid: idx.videoIDByRel[vidRel], m: m})
+		}
+	}
+	if len(prefixHits) == 1 {
+		return prefixHits[0].vid, prefixHits[0].m, true
+	}
+	if len(prefixHits) > 1 {
+		return "", SubtitleMatch{}, false
+	}
+
+	// Pass 3: quality-tag-stripped stem fallback (always require unique candidate match).
+	var strippedHits []struct {
+		vid string
+		m   SubtitleMatch
+	}
+	for _, vidRel := range candidates {
+		if m, ok := matchSubtitleByStem(vidRel, subRel, true); ok {
+			strippedHits = append(strippedHits, struct {
+				vid string
+				m   SubtitleMatch
+			}{vid: idx.videoIDByRel[vidRel], m: m})
+		}
+	}
+	if len(strippedHits) == 1 {
+		return strippedHits[0].vid, strippedHits[0].m, true
+	}
+
+	return "", SubtitleMatch{}, false
 }
 
 func syncSubtitlesTx(
@@ -602,63 +762,37 @@ func syncSubtitlesTx(
 	videoIDByRel map[string]string,
 	subEntries []storage.FileEntry,
 	existingSubs map[string]existingSubtitleRecord,
-) error {
-	videosByDir := make(map[string][]string)
+) (int, error) {
+	videoRels := make([]string, 0, len(videoEntries))
 	for _, v := range videoEntries {
-		dir := path.Dir(v.RelPath)
-		videosByDir[dir] = append(videosByDir[dir], v.RelPath)
+		videoRels = append(videoRels, v.RelPath)
 	}
-	// Prefer longer stems first so e.g. 01_intro.2.mp4 beats 01_intro.mp4 when matching 01_intro.2.srt.
-	for dir := range videosByDir {
-		sort.Slice(videosByDir[dir], func(i, j int) bool {
-			li := len(strings.TrimSuffix(path.Base(videosByDir[dir][i]), path.Ext(videosByDir[dir][i])))
-			lj := len(strings.TrimSuffix(path.Base(videosByDir[dir][j]), path.Ext(videosByDir[dir][j])))
-			if li != lj {
-				return li > lj
-			}
-			return videosByDir[dir][i] < videosByDir[dir][j]
-		})
-	}
+	vidIdx := buildVideoSubtitleIndex(videoRels, videoIDByRel)
 
+	matchedCount := 0
 	seenSubs := make(map[string]bool, len(subEntries))
 	for _, sub := range subEntries {
 		seenSubs[sub.RelPath] = true
-		dir := path.Dir(sub.RelPath)
-		candidates := videosByDir[dir]
+
+		if ex, exists := existingSubs[sub.RelPath]; exists && ex.manuallyBound {
+			if ex.status != "active" {
+				if _, err := tx.ExecContext(ctx, `UPDATE subtitle_files SET status = 'active' WHERE id = ?`, ex.id); err != nil {
+					return 0, fmt.Errorf("restore manually bound subtitle_file %s: %w", sub.RelPath, err)
+				}
+			}
+			if ex.mediaFileID.Valid && strings.TrimSpace(ex.mediaFileID.String) != "" {
+				matchedCount++
+			}
+			continue
+		}
 
 		matchedVideoID := sql.NullString{}
-		var match SubtitleMatch
-		var found bool
-
-		// First pass: exact stem match.
-		subExt := path.Ext(sub.RelPath)
-		subStem := strings.TrimSuffix(path.Base(sub.RelPath), subExt)
-		for _, vidRel := range candidates {
-			vidExt := path.Ext(vidRel)
-			vidStem := strings.TrimSuffix(path.Base(vidRel), vidExt)
-			if strings.EqualFold(subStem, vidStem) {
-				if m, ok := MatchSubtitle(vidRel, sub.RelPath); ok {
-					match = m
-					matchedVideoID = sql.NullString{String: videoIDByRel[vidRel], Valid: true}
-					found = true
-					break
-				}
-			}
-		}
-
-		// Second pass: stem + language/modifier match.
-		if !found {
-			for _, vidRel := range candidates {
-				if m, ok := MatchSubtitle(vidRel, sub.RelPath); ok {
-					match = m
-					matchedVideoID = sql.NullString{String: videoIDByRel[vidRel], Valid: true}
-					found = true
-					break
-				}
-			}
-		}
-
-		if !found {
+		vid, match, found := vidIdx.match(sub.RelPath)
+		if found {
+			matchedVideoID = sql.NullString{String: vid, Valid: true}
+			matchedCount++
+		} else {
+			subExt := path.Ext(sub.RelPath)
 			match = SubtitleMatch{
 				RelPath:  sub.RelPath,
 				Language: "und",
@@ -678,7 +812,7 @@ func syncSubtitlesTx(
 				WHERE id = ?`,
 				matchedVideoID, match.Language, match.Title, match.Format, isDef, ex.id,
 			); err != nil {
-				return fmt.Errorf("update subtitle_file %s: %w", sub.RelPath, err)
+				return 0, fmt.Errorf("update subtitle_file %s: %w", sub.RelPath, err)
 			}
 		} else {
 			if _, err := tx.ExecContext(ctx, `
@@ -686,7 +820,7 @@ func syncSubtitlesTx(
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
 				id.New(), sourceID, sub.RelPath, matchedVideoID, match.Language, match.Title, match.Format, isDef,
 			); err != nil {
-				return fmt.Errorf("insert subtitle_file %s: %w", sub.RelPath, err)
+				return 0, fmt.Errorf("insert subtitle_file %s: %w", sub.RelPath, err)
 			}
 		}
 	}
@@ -694,11 +828,127 @@ func syncSubtitlesTx(
 	for rel, ex := range existingSubs {
 		if !seenSubs[rel] && ex.status != "missing" {
 			if _, err := tx.ExecContext(ctx, `UPDATE subtitle_files SET status = 'missing' WHERE id = ?`, ex.id); err != nil {
-				return fmt.Errorf("mark missing subtitle_file %s: %w", rel, err)
+				return 0, fmt.Errorf("mark missing subtitle_file %s: %w", rel, err)
 			}
 		}
 	}
-	return nil
+	return matchedCount, nil
+}
+
+// RematchUnboundSubtitles performs a pure-database pass re-matching active
+// subtitle_files where media_file_id IS NULL AND manually_bound = 0 against
+// active media_files in the same storage source.
+func (s *Service) RematchUnboundSubtitles(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, source_id, relative_path
+		FROM subtitle_files
+		WHERE status = 'active' AND media_file_id IS NULL AND manually_bound = 0`)
+	if err != nil {
+		return 0, fmt.Errorf("query unbound subtitles: %w", err)
+	}
+	type unboundSub struct {
+		id       string
+		sourceID string
+		relPath  string
+	}
+	bySource := make(map[string][]unboundSub)
+	for rows.Next() {
+		var u unboundSub
+		if err := rows.Scan(&u.id, &u.sourceID, &u.relPath); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan unbound subtitle: %w", err)
+		}
+		bySource[u.sourceID] = append(bySource[u.sourceID], u)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	if len(bySource) == 0 {
+		return 0, nil
+	}
+
+	type subUpdate struct {
+		subID       string
+		mediaFileID string
+		language    string
+		title       string
+		isDefault   int
+	}
+	var updates []subUpdate
+
+	for sourceID, subs := range bySource {
+		mRows, err := s.db.QueryContext(ctx, `
+			SELECT id, relative_path
+			FROM media_files
+			WHERE source_id = ? AND status = 'active'`, sourceID)
+		if err != nil {
+			return 0, fmt.Errorf("query active media_files for source %s: %w", sourceID, err)
+		}
+		var videoRels []string
+		videoIDByRel := make(map[string]string)
+		for mRows.Next() {
+			var mid, rel string
+			if err := mRows.Scan(&mid, &rel); err != nil {
+				mRows.Close()
+				return 0, fmt.Errorf("scan media_file: %w", err)
+			}
+			videoRels = append(videoRels, rel)
+			videoIDByRel[rel] = mid
+		}
+		if err := mRows.Err(); err != nil {
+			mRows.Close()
+			return 0, err
+		}
+		mRows.Close()
+
+		if len(videoRels) == 0 {
+			continue
+		}
+		vidIdx := buildVideoSubtitleIndex(videoRels, videoIDByRel)
+		for _, sub := range subs {
+			if vid, m, ok := vidIdx.match(sub.relPath); ok {
+				isDef := 0
+				if m.IsDefault {
+					isDef = 1
+				}
+				updates = append(updates, subUpdate{
+					subID:       sub.id,
+					mediaFileID: vid,
+					language:    m.Language,
+					title:       m.Title,
+					isDefault:   isDef,
+				})
+			}
+		}
+	}
+
+	if len(updates) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin rematch tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, u := range updates {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE subtitle_files
+			SET media_file_id = ?, language = ?, title = ?, is_default = ?
+			WHERE id = ? AND media_file_id IS NULL AND manually_bound = 0`,
+			u.mediaFileID, u.language, u.title, u.isDefault, u.subID,
+		); err != nil {
+			return 0, fmt.Errorf("rematch update subtitle %s: %w", u.subID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit rematch tx: %w", err)
+	}
+	return len(updates), nil
 }
 
 func (s *Service) loadSource(ctx context.Context, sourceID string) (*sourceRecord, error) {
@@ -740,7 +990,7 @@ func (s *Service) loadExistingMedia(ctx context.Context, sourceID string) (map[s
 
 func (s *Service) loadExistingSubtitles(ctx context.Context, sourceID string) (map[string]existingSubtitleRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, relative_path, status
+		SELECT id, relative_path, media_file_id, manually_bound, status
 		FROM subtitle_files
 		WHERE source_id = ?`, sourceID)
 	if err != nil {
@@ -751,9 +1001,11 @@ func (s *Service) loadExistingSubtitles(ctx context.Context, sourceID string) (m
 	res := make(map[string]existingSubtitleRecord)
 	for rows.Next() {
 		var r existingSubtitleRecord
-		if err := rows.Scan(&r.id, &r.relativePath, &r.status); err != nil {
+		var manualInt int
+		if err := rows.Scan(&r.id, &r.relativePath, &r.mediaFileID, &manualInt, &r.status); err != nil {
 			return nil, fmt.Errorf("scan existing subtitle_file: %w", err)
 		}
+		r.manuallyBound = manualInt != 0
 		res[r.relativePath] = r
 	}
 	return res, rows.Err()

@@ -26,6 +26,9 @@ import (
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
 	"coursefin/internal/storage"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/unicode"
 )
 
 func openTestDB(t *testing.T) (*sql.DB, string) {
@@ -968,5 +971,73 @@ exec %q "$@"
 	<-doneCh
 	if rec1.Code != http.StatusConflict {
 		t.Fatalf("superseded segment 1 status = %d, want 409 Conflict (body: %s)", rec1.Code, rec1.Body.String())
+	}
+}
+
+func TestDecodeSubtitleToUTF8AndServeNonUTF8SRT(t *testing.T) {
+	sample := "1\n00:00:00,500 --> 00:00:02,000\n你好，课程字幕测试！\n"
+
+	// UTF-8 with BOM
+	utf8BOM := append([]byte{0xEF, 0xBB, 0xBF}, []byte(sample)...)
+	if got := media.DecodeSubtitleToUTF8(utf8BOM); got != sample {
+		t.Fatalf("UTF-8 BOM decode mismatch: got %q", got)
+	}
+
+	// UTF-16 LE with BOM
+	leBytes, err := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewEncoder().Bytes([]byte(sample))
+	if err != nil {
+		t.Fatalf("encode UTF-16LE: %v", err)
+	}
+	if got := media.DecodeSubtitleToUTF8(leBytes); got != sample {
+		t.Fatalf("UTF-16LE decode mismatch: got %q", got)
+	}
+
+	// UTF-16 BE with BOM
+	beBytes, err := unicode.UTF16(unicode.BigEndian, unicode.UseBOM).NewEncoder().Bytes([]byte(sample))
+	if err != nil {
+		t.Fatalf("encode UTF-16BE: %v", err)
+	}
+	if got := media.DecodeSubtitleToUTF8(beBytes); got != sample {
+		t.Fatalf("UTF-16BE decode mismatch: got %q", got)
+	}
+
+	// GB18030 / GBK encoded Chinese SRT
+	gbkBytes, err := simplifiedchinese.GB18030.NewEncoder().Bytes([]byte(sample))
+	if err != nil {
+		t.Fatalf("encode GB18030: %v", err)
+	}
+	if got := media.DecodeSubtitleToUTF8(gbkBytes); got != sample {
+		t.Fatalf("GB18030 decode mismatch: got %q", got)
+	}
+
+	// Serve GBK external SRT as VTT via Service.ServeSubtitle
+	conn, dataDir := openTestDB(t)
+	mediaRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(mediaRoot, "lesson.mp4"), []byte("dummy"), 0o644); err != nil {
+		t.Fatalf("write mp4: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaRoot, "lesson.zh.srt"), gbkBytes, 0o644); err != nil {
+		t.Fatalf("write gbk srt: %v", err)
+	}
+	sourceID, mediaID := seedSourceAndMedia(t, conn, "local", mediaRoot, "lesson.mp4", "mp4", "h264", "aac", 5000, `[{"index":0,"codec_type":"video","codec_name":"h264"}]`, "")
+	if _, err := conn.Exec(
+		`INSERT INTO subtitle_files (id, source_id, relative_path, media_file_id, language, title, format, is_default, status)
+		 VALUES (?, ?, 'lesson.zh.srt', ?, 'zh', '中文', 'srt', 1, 'active')`,
+		id.New(), sourceID, mediaID,
+	); err != nil {
+		t.Fatalf("insert subtitle: %v", err)
+	}
+
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), "")
+	defer svc.Close()
+
+	rec := httptest.NewRecorder()
+	svc.ServeSubtitle(rec, httptest.NewRequest(http.MethodGet, "/sub.vtt", nil), mediaID, 1, "vtt")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ServeSubtitle status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.HasPrefix(body, "WEBVTT") || !strings.Contains(body, "你好，课程字幕测试！") {
+		t.Fatalf("expected valid UTF-8 WebVTT output, got %q", body)
 	}
 }

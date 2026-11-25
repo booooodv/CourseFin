@@ -1,0 +1,1 @@
+ALTER TABLE subtitle_files ADD COLUMN manually_bound INTEGER NOT NULL DEFAULT 0;

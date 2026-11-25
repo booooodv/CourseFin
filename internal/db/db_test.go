@@ -130,3 +130,41 @@ func TestOpenCreatesSchemaAndSeedsDefaults(t *testing.T) {
 		t.Fatalf("expected 1 library after reopen, got %d", libCount)
 	}
 }
+
+func TestMigration002AddsManuallyBoundColumn(t *testing.T) {
+	dataDir := t.TempDir()
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.Query(`PRAGMA table_info(subtitle_files)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(subtitle_files): %v", err)
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan pragma row: %v", err)
+		}
+		if name == "manually_bound" {
+			found = true
+			if notNull != 1 {
+				t.Errorf("manually_bound notnull = %d, want 1", notNull)
+			}
+			if dfltStr, ok := dflt.(string); !ok || dfltStr != "0" {
+				t.Errorf("manually_bound default = %#v, want \"0\"", dflt)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected manually_bound column in subtitle_files")
+	}
+}

@@ -226,14 +226,21 @@ func (s *Service) serveExternalSubtitle(w http.ResponseWriter, r *http.Request, 
 		targetFormat = srcFmt
 	}
 
+	decodedText := DecodeSubtitleToUTF8(rawBytes)
+	utf8Bytes := []byte(decodedText)
+
 	var out []byte
 	switch {
 	case targetFormat == srcFmt:
-		out = rawBytes
+		if targetFormat == "vtt" {
+			out = []byte(ensureWebVTTHeader(decodedText))
+		} else {
+			out = utf8Bytes
+		}
 	case targetFormat == "vtt" && srcFmt == "srt":
-		out = []byte(ConvertSRTToVTT(string(rawBytes)))
+		out = []byte(ConvertSRTToVTT(decodedText))
 	case targetFormat == "vtt" && (srcFmt == "ass" || srcFmt == "ssa"):
-		converted, convErr := s.convertSubtitleBytesWithFFmpeg(r.Context(), rawBytes, srcFmt, "webvtt")
+		converted, convErr := s.convertSubtitleBytesWithFFmpeg(r.Context(), utf8Bytes, srcFmt, "webvtt")
 		if convErr != nil {
 			http.Error(w, convErr.Error(), http.StatusInternalServerError)
 			return
@@ -245,7 +252,7 @@ func (s *Service) serveExternalSubtitle(w http.ResponseWriter, r *http.Request, 
 			http.Error(w, fmt.Sprintf("unsupported subtitle target format %q", targetFormat), http.StatusUnsupportedMediaType)
 			return
 		}
-		converted, convErr := s.convertSubtitleBytesWithFFmpeg(r.Context(), rawBytes, srcFmt, ffmpegFmt)
+		converted, convErr := s.convertSubtitleBytesWithFFmpeg(r.Context(), utf8Bytes, srcFmt, ffmpegFmt)
 		if convErr != nil {
 			http.Error(w, convErr.Error(), http.StatusInternalServerError)
 			return
@@ -254,6 +261,17 @@ func (s *Service) serveExternalSubtitle(w http.ResponseWriter, r *http.Request, 
 	}
 
 	writeSubtitleResponse(w, r, targetFormat, out)
+}
+
+func ensureWebVTTHeader(text string) string {
+	clean := strings.TrimPrefix(text, "\xEF\xBB\xBF")
+	clean = strings.ReplaceAll(clean, "\r\n", "\n")
+	clean = strings.ReplaceAll(clean, "\r", "\n")
+	trimmed := strings.TrimLeft(clean, " \t\n")
+	if strings.HasPrefix(strings.ToUpper(trimmed), "WEBVTT") {
+		return trimmed
+	}
+	return "WEBVTT\n\n" + trimmed
 }
 
 func (s *Service) serveEmbeddedSubtitle(w http.ResponseWriter, r *http.Request, rec *mediaRecord, sub *StreamDescriptor, targetFormat string) {

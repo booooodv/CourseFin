@@ -27,7 +27,7 @@ func TestMatchSubtitlesByBasenameAndLanguage(t *testing.T) {
 		"course/01_intro.chs.ssa",
 		"course/01_intro.ja.srt",
 		"course/02_other.srt",
-		"course/sub/01_intro.srt",
+		"course/chapter2/01_intro.srt",
 		"course/01_intro.txt",
 	}
 
@@ -67,10 +67,178 @@ func TestMatchSubtitlesByBasenameAndLanguage(t *testing.T) {
 		}
 	}
 
-	for _, ignored := range []string{"course/02_other.srt", "course/sub/01_intro.srt", "course/01_intro.txt"} {
+	for _, ignored := range []string{"course/02_other.srt", "course/chapter2/01_intro.srt", "course/01_intro.txt"} {
 		if _, ok := got[ignored]; ok {
 			t.Fatalf("expected %q to be ignored", ignored)
 		}
+	}
+}
+
+func TestMatchSubtitlesRelaxedPatternsAndDirs(t *testing.T) {
+	candidates := []string{
+		"course/01_intro_简体中文.srt",
+		"course/01_intro-中英双语.srt",
+		"course/01_intro [English].vtt",
+		"course/01_intro.en-orig.vtt",
+		"course/01_intro.ai-zh.srt",
+		"course/01_intro (机翻校对).srt",
+		"course/Subs/01_intro.zh.srt",
+		"course/Subtitles/01_intro.srt",
+		"course/字幕/01_intro.srt",
+		"course/chapter2/01_intro.srt",
+	}
+
+	matches := scanner.MatchSubtitlesForVideo("course/01_intro.mp4", candidates)
+	got := make(map[string]scanner.SubtitleMatch, len(matches))
+	for _, m := range matches {
+		got[m.RelPath] = m
+	}
+
+	checks := []struct {
+		rel      string
+		wantLang string
+		wantTit  string
+	}{
+		{"course/01_intro_简体中文.srt", "zh", "简体中文"},
+		{"course/01_intro-中英双语.srt", "zh", "中英双语"},
+		{"course/01_intro [English].vtt", "en", "English"},
+		{"course/01_intro.en-orig.vtt", "en", ""},
+		{"course/01_intro.ai-zh.srt", "zh", ""},
+		{"course/01_intro (机翻校对).srt", "und", "机翻校对"},
+		{"course/Subs/01_intro.zh.srt", "zh", "中文"},
+		{"course/Subtitles/01_intro.srt", "und", ""},
+		{"course/字幕/01_intro.srt", "und", ""},
+	}
+
+	for _, tc := range checks {
+		m, ok := got[tc.rel]
+		if !ok {
+			t.Fatalf("expected %q to match course/01_intro.mp4 (got keys: %+v)", tc.rel, got)
+		}
+		if m.Language != tc.wantLang {
+			t.Errorf("%q language = %q, want %q", tc.rel, m.Language, tc.wantLang)
+		}
+		if tc.wantTit != "" && m.Title != tc.wantTit {
+			t.Errorf("%q title = %q, want %q", tc.rel, m.Title, tc.wantTit)
+		}
+	}
+
+	if _, ok := got["course/chapter2/01_intro.srt"]; ok {
+		t.Fatalf("expected non-subtitle subdir course/chapter2/01_intro.srt NOT to match")
+	}
+
+	// Quality tag stripping fallback: video has [1080p], subtitle does not.
+	if _, ok := scanner.MatchSubtitle("course/01_intro [1080p].mp4", "course/01_intro.srt"); !ok {
+		t.Fatalf("expected quality-tagged video to match clean subtitle stem")
+	}
+
+	// Unicode NFD vs NFC normalization (macOS APFS decomposed e + combining acute vs composed é).
+	nfdVideo := "course/cafe\u0301_01.mp4"
+	nfcSub := "course/caf\u00e9_01.zh.srt"
+	if _, ok := scanner.MatchSubtitle(nfdVideo, nfcSub); !ok {
+		t.Fatalf("expected NFD video filename to match NFC subtitle filename")
+	}
+
+	// Numeric-suffix false-positive guard: 01.mp4 must not match 01_2.srt or 01-02.srt.
+	for _, bad := range []string{"course/01_2.srt", "course/01-02.srt"} {
+		if _, ok := scanner.MatchSubtitle("course/01.mp4", bad); ok {
+			t.Fatalf("expected numeric suffix %q NOT to match course/01.mp4", bad)
+		}
+	}
+}
+
+func TestScanAndRematchRespectManualUnbindAndSiblingSubtitleDir(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	mediaRoot := t.TempDir()
+
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open failed: %v", err)
+	}
+	defer conn.Close()
+
+	sourceID := id.New()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := conn.Exec(
+		`INSERT INTO storage_sources (id, name, driver, root_path, config_json, enabled, created_at, updated_at)
+		 VALUES (?, 'SubTest', 'local', ?, '{}', 1, ?, ?)`,
+		sourceID, mediaRoot, now, now,
+	); err != nil {
+		t.Fatalf("insert source: %v", err)
+	}
+
+	vidPath := filepath.Join(mediaRoot, "Course", "Videos", "01_setup.mp4")
+	subPath := filepath.Join(mediaRoot, "Course", "Subtitles", "01_setup.zh.srt")
+	if err := os.MkdirAll(filepath.Dir(vidPath), 0o755); err != nil {
+		t.Fatalf("mkdir videos: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(subPath), 0o755); err != nil {
+		t.Fatalf("mkdir subtitles: %v", err)
+	}
+	if err := os.WriteFile(vidPath, []byte("vid"), 0o644); err != nil {
+		t.Fatalf("write vid: %v", err)
+	}
+	if err := os.WriteFile(subPath, []byte("1\n00:00:00,000 --> 00:00:01,000\n你好\n"), 0o644); err != nil {
+		t.Fatalf("write sub: %v", err)
+	}
+
+	svc := scanner.NewService(conn, dataDir, storage.NewRegistry(), &fakeProber{})
+	rep, err := svc.ScanSource(ctx, sourceID)
+	if err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	if rep.TotalSubtitles != 1 || rep.MatchedSubtitles != 1 {
+		t.Fatalf("ScanReport subtitles = total:%d matched:%d, want 1/1", rep.TotalSubtitles, rep.MatchedSubtitles)
+	}
+
+	var mfID string
+	var subID string
+	var linkedMF sql.NullString
+	if err := conn.QueryRow(`SELECT id FROM media_files WHERE source_id = ?`, sourceID).Scan(&mfID); err != nil {
+		t.Fatalf("query media_file: %v", err)
+	}
+	if err := conn.QueryRow(`SELECT id, media_file_id FROM subtitle_files WHERE source_id = ?`, sourceID).Scan(&subID, &linkedMF); err != nil {
+		t.Fatalf("query subtitle_file: %v", err)
+	}
+	if !linkedMF.Valid || linkedMF.String != mfID {
+		t.Fatalf("expected sibling subtitle matched to %q, got %+v", mfID, linkedMF)
+	}
+
+	// Simulate manual unbind (media_file_id = NULL, manually_bound = 1).
+	if _, err := conn.Exec(`UPDATE subtitle_files SET media_file_id = NULL, manually_bound = 1 WHERE id = ?`, subID); err != nil {
+		t.Fatalf("set manual unbind: %v", err)
+	}
+	if _, err := svc.ScanSource(ctx, sourceID); err != nil {
+		t.Fatalf("rescan after manual unbind: %v", err)
+	}
+	if _, err := svc.RematchUnboundSubtitles(ctx); err != nil {
+		t.Fatalf("RematchUnboundSubtitles after manual unbind: %v", err)
+	}
+	var manFlag int
+	if err := conn.QueryRow(`SELECT media_file_id, manually_bound FROM subtitle_files WHERE id = ?`, subID).Scan(&linkedMF, &manFlag); err != nil {
+		t.Fatalf("query after rescan: %v", err)
+	}
+	if linkedMF.Valid || manFlag != 1 {
+		t.Fatalf("manual unbind was clobbered: media_file_id=%+v manually_bound=%d", linkedMF, manFlag)
+	}
+
+	// Simulate pre-upgrade unbound subtitle (media_file_id = NULL, manually_bound = 0).
+	if _, err := conn.Exec(`UPDATE subtitle_files SET media_file_id = NULL, manually_bound = 0 WHERE id = ?`, subID); err != nil {
+		t.Fatalf("reset to auto unbound: %v", err)
+	}
+	matched, err := svc.RematchUnboundSubtitles(ctx)
+	if err != nil {
+		t.Fatalf("RematchUnboundSubtitles: %v", err)
+	}
+	if matched != 1 {
+		t.Fatalf("RematchUnboundSubtitles matched = %d, want 1", matched)
+	}
+	if err := conn.QueryRow(`SELECT media_file_id FROM subtitle_files WHERE id = ?`, subID).Scan(&linkedMF); err != nil {
+		t.Fatalf("query after rematch: %v", err)
+	}
+	if !linkedMF.Valid || linkedMF.String != mfID {
+		t.Fatalf("expected rematch to bind %q, got %+v", mfID, linkedMF)
 	}
 }
 
