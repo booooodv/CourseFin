@@ -1,10 +1,171 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import VideoPlayer from '../components/VideoPlayer';
+import VideoPlayer, {
+  SUBTITLE_PREF_STORAGE_KEY,
+  pickInitialSubtitle,
+} from '../components/VideoPlayer';
 import CourseDetailPage from '../pages/CourseDetailPage';
-import type { CourseDetail, LessonPlaybackInfo } from '../types/coursefin';
+import type { CourseDetail, LessonPlaybackInfo, PlaybackSubtitleItem } from '../types/coursefin';
+
+interface MockArtInstance {
+  option: Record<string, any>;
+  video: HTMLVideoElement;
+  isFocus: boolean;
+  isDestroy: boolean;
+  theme: string;
+  fullscreen: boolean;
+  fullscreenWeb: boolean;
+  subtitle: {
+    url: string;
+    show: boolean;
+    switch: ReturnType<typeof vi.fn>;
+    style: ReturnType<typeof vi.fn>;
+  };
+  setting: {
+    update: ReturnType<typeof vi.fn>;
+  };
+  controls: {
+    update: ReturnType<typeof vi.fn>;
+  };
+  on: ReturnType<typeof vi.fn>;
+  off: ReturnType<typeof vi.fn>;
+  emit: (name: string, ...args: unknown[]) => void;
+  destroy: ReturnType<typeof vi.fn>;
+  toggle: ReturnType<typeof vi.fn>;
+  play: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+  get playbackRate(): number;
+  set playbackRate(val: number);
+}
+
+const artMockInstances: MockArtInstance[] = [];
+
+vi.mock('artplayer', () => {
+  class MockArtplayer {
+    static SEEK_STEP = 5;
+    static PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 2];
+    static RECONNECT_TIME_MAX = 5;
+
+    option: Record<string, any>;
+    video: HTMLVideoElement;
+    isFocus = false;
+    isDestroy = false;
+    theme = '#1E88E5';
+    fullscreen = false;
+    fullscreenWeb = false;
+    private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+
+    subtitle: {
+      url: string;
+      show: boolean;
+      switch: ReturnType<typeof vi.fn>;
+      style: ReturnType<typeof vi.fn>;
+    };
+
+    setting = {
+      update: vi.fn(),
+    };
+
+    controls = {
+      update: vi.fn(),
+    };
+
+    on = vi.fn((name: string, fn: (...args: unknown[]) => void) => {
+      const list = this.listeners.get(name) ?? [];
+      list.push(fn);
+      this.listeners.set(name, list);
+      return this;
+    });
+
+    off = vi.fn((name: string, fn?: (...args: unknown[]) => void) => {
+      if (!fn) {
+        this.listeners.delete(name);
+      } else {
+        const list = this.listeners.get(name) ?? [];
+        this.listeners.set(
+          name,
+          list.filter((cb) => cb !== fn),
+        );
+      }
+      return this;
+    });
+
+    emit = (name: string, ...args: unknown[]) => {
+      const list = this.listeners.get(name) ?? [];
+      for (const fn of list) {
+        fn(...args);
+      }
+    };
+
+    play = vi.fn(() => this.video.play());
+    pause = vi.fn(() => this.video.pause());
+    toggle = vi.fn(() => {
+      if (this.video.paused) {
+        void this.video.play();
+      } else {
+        this.video.pause();
+      }
+    });
+
+    destroy = vi.fn((removeHtml?: boolean) => {
+      this.isDestroy = true;
+      if (removeHtml && this.option.container instanceof HTMLElement) {
+        this.option.container.innerHTML = '';
+      }
+    });
+
+    get playbackRate(): number {
+      return this.video.playbackRate;
+    }
+
+    set playbackRate(val: number) {
+      this.video.playbackRate = val;
+    }
+
+    constructor(option: Record<string, any>, readyCallback?: (art: MockArtplayer) => void) {
+      this.option = option;
+      this.theme = option.theme ?? '#1E88E5';
+
+      const container =
+        option.container instanceof HTMLElement
+          ? option.container
+          : (document.querySelector(option.container) as HTMLElement | null);
+
+      const video = document.createElement('video');
+      video.className = 'art-video';
+      if (container) {
+        container.innerHTML = '';
+        container.appendChild(video);
+      }
+      this.video = video;
+
+      this.subtitle = {
+        url: option.subtitle?.url ?? '',
+        show: Boolean(option.subtitle?.url),
+        switch: vi.fn(async (url: string) => {
+          this.subtitle.url = url;
+          return url;
+        }),
+        style: vi.fn(),
+      };
+
+      if (option.type === 'm3u8' && option.customType?.m3u8) {
+        option.customType.m3u8.call(this, this.video, option.url, this);
+      } else if (option.url) {
+        this.video.setAttribute('src', option.url);
+      }
+
+      artMockInstances.push(this as unknown as MockArtInstance);
+      if (readyCallback) {
+        readyCallback(this);
+      }
+    }
+  }
+
+  return { default: MockArtplayer };
+});
 
 const hlsMockInstances: Array<{
   config?: unknown;
@@ -53,6 +214,7 @@ function makePlayback(overrides: Partial<LessonPlaybackInfo> = {}): LessonPlayba
     media_file_id: 'mf1',
     play_session_id: 'sess-1',
     mode: 'direct',
+    transcoding: false,
     stream_url: '/Videos/l1/stream.mp4?Static=true&MediaSourceId=mf1',
     subtitles: [
       {
@@ -189,9 +351,78 @@ function makeCourse(): CourseDetail {
   };
 }
 
+describe('pickInitialSubtitle', () => {
+  const zhDefault: PlaybackSubtitleItem = {
+    index: 1,
+    language: 'zh',
+    title: '中文',
+    format: 'vtt',
+    is_default: true,
+    is_external: true,
+    is_text: true,
+    url: '/sub/1.vtt',
+  };
+  const enTrack: PlaybackSubtitleItem = {
+    index: 2,
+    language: 'en',
+    title: 'English',
+    format: 'vtt',
+    is_default: false,
+    is_external: true,
+    is_text: true,
+    url: '/sub/2.vtt',
+  };
+  const zhNonDefault: PlaybackSubtitleItem = {
+    index: 3,
+    language: 'zh-CN',
+    title: '简体中文',
+    format: 'vtt',
+    is_default: false,
+    is_external: true,
+    is_text: true,
+    url: '/sub/3.vtt',
+  };
+  const jaTrack: PlaybackSubtitleItem = {
+    index: 4,
+    language: 'ja',
+    title: '日本語',
+    format: 'vtt',
+    is_default: false,
+    is_external: true,
+    is_text: true,
+    url: '/sub/4.vtt',
+  };
+  const bitmapTrack: PlaybackSubtitleItem = {
+    index: 5,
+    language: 'zh',
+    title: 'PGS 中文',
+    format: 'pgssub',
+    is_default: true,
+    is_external: false,
+    is_text: false,
+    url: '',
+  };
+
+  it('respects savedPref === "off" and returns null', () => {
+    expect(pickInitialSubtitle([zhDefault, enTrack], 'off')).toBeNull();
+  });
+
+  it('matches savedPref === "en" over default Chinese track', () => {
+    expect(pickInitialSubtitle([zhDefault, enTrack], 'en')).toEqual(enTrack);
+  });
+
+  it('falls back to is_default -> Chinese -> first text track when no savedPref', () => {
+    expect(pickInitialSubtitle([enTrack, zhDefault], null)).toEqual(zhDefault);
+    expect(pickInitialSubtitle([enTrack, zhNonDefault], null)).toEqual(zhNonDefault);
+    expect(pickInitialSubtitle([bitmapTrack, enTrack, jaTrack], null)).toEqual(enTrack);
+    expect(pickInitialSubtitle([bitmapTrack], null)).toBeNull();
+  });
+});
+
 describe('VideoPlayer', () => {
   beforeEach(() => {
     localStorage.setItem('coursefin_token', 'test-token-123');
+    artMockInstances.length = 0;
     hlsMockInstances.length = 0;
     hlsIsSupportedMock.mockReturnValue(true);
   });
@@ -219,40 +450,97 @@ describe('VideoPlayer', () => {
     expect(screen.getByText('dts')).toBeInTheDocument();
     expect(screen.getByText('mkv')).toBeInTheDocument();
     expect(container.querySelector('video')).toBeNull();
+    expect(artMockInstances).toHaveLength(0);
     expect(container.innerHTML).not.toMatch(/\bbg-slate-900\b/);
     expect(container.innerHTML).not.toMatch(/\b(slate|indigo|rose|emerald)-/);
   });
 
-  it('changes playbackRate when user selects 1.5x speed and renders subtitle selector options', async () => {
+  it('mounts Artplayer with zh-cn options, auto-selected subtitle, subtitle switch/off persistence, and subtitle size control', async () => {
+    const playback = makePlayback();
+    render(<VideoPlayer playback={playback} />);
+
+    expect(artMockInstances).toHaveLength(1);
+    const art = artMockInstances[0];
+    expect(art.option.lang).toBe('zh-cn');
+    expect(art.option.fullscreenWeb).toBe(true);
+    expect(art.option.pip).toBe(true);
+    expect(art.option.miniProgressBar).toBe(true);
+    expect(art.option.screenshot).toBe(true);
+    expect(art.option.subtitleOffset).toBe(true);
+    expect(art.option.url).toBe(
+      '/Videos/l1/stream.mp4?Static=true&MediaSourceId=mf1&api_key=test-token-123',
+    );
+    expect(art.option.subtitle.url).toBe(
+      '/Videos/l1/mf1/Subtitles/2/Stream.vtt?api_key=test-token-123',
+    );
+    expect(art.option.subtitle.type).toBe('vtt');
+    expect(art.option.subtitle.escape).toBe(false);
+
+    // Control bar subtitle selector should have 关闭 + 中文 + English (excluding PGS bitmap)
+    const subtitleControl = (art.option.controls as Array<Record<string, any>>).find(
+      (c) => c.name === 'coursefin-subtitle',
+    );
+    expect(subtitleControl).toBeTruthy();
+    expect(subtitleControl!.selector.map((s: any) => s.html)).toEqual(['关闭', '中文', 'English']);
+
+    // Switch to English via control selector
+    const enItem = subtitleControl!.selector[2];
+    let controlLabel = '';
+    act(() => {
+      controlLabel = subtitleControl!.onSelect.call(art, enItem);
+    });
+    expect(controlLabel).toContain('English');
+    expect(art.subtitle.switch).toHaveBeenCalledWith(
+      '/Videos/l1/mf1/Subtitles/3/Stream.vtt?api_key=test-token-123',
+      expect.objectContaining({ name: 'English', type: 'vtt' }),
+    );
+    expect(art.subtitle.show).toBe(true);
+    expect(localStorage.getItem(SUBTITLE_PREF_STORAGE_KEY)).toBe('en');
+
+    // Turn off via setting selector
+    const subtitleSetting = (art.option.settings as Array<Record<string, any>>).find(
+      (s) => s.html === '字幕轨道',
+    );
+    expect(subtitleSetting).toBeTruthy();
+    const offItem = subtitleSetting!.selector[0];
+    let settingLabel = '';
+    act(() => {
+      settingLabel = subtitleSetting!.onSelect.call(art, offItem);
+    });
+    expect(settingLabel).toBe('关闭');
+    expect(art.subtitle.show).toBe(false);
+    expect(localStorage.getItem(SUBTITLE_PREF_STORAGE_KEY)).toBe('off');
+
+    // Change subtitle size via settings
+    const sizeSetting = (art.option.settings as Array<Record<string, any>>).find(
+      (s) => s.html === '字幕字号',
+    );
+    expect(sizeSetting).toBeTruthy();
+    const largeItem = sizeSetting!.selector.find((s: any) => String(s.html).includes('24px'));
+    expect(largeItem).toBeTruthy();
+    act(() => {
+      sizeSetting!.onSelect.call(art, largeItem);
+    });
+    expect(art.subtitle.style).toHaveBeenCalledWith({ fontSize: '24px' });
+  });
+
+  it('persists playbackRate to localStorage on ratechange and restores saved rate on loadedmetadata', () => {
+    localStorage.setItem('coursefin_playback_rate', '1.5');
     const playback = makePlayback();
     const { container } = render(<VideoPlayer playback={playback} />);
 
     const video = container.querySelector('video') as HTMLVideoElement;
     expect(video).toBeTruthy();
-    expect(video.getAttribute('src')).toBe(
-      '/Videos/l1/stream.mp4?Static=true&MediaSourceId=mf1&api_key=test-token-123',
-    );
 
-    const tracks = container.querySelectorAll('track');
-    expect(tracks).toHaveLength(2);
-    expect(tracks[0].getAttribute('src')).toBe(
-      '/Videos/l1/mf1/Subtitles/2/Stream.vtt?api_key=test-token-123',
-    );
-
-    const subtitleSelect = screen.getByLabelText('字幕选择') as HTMLSelectElement;
-    expect(subtitleSelect).toBeInTheDocument();
-    const options = Array.from(subtitleSelect.options).map((o) => o.textContent);
-    expect(options).toEqual(['关闭', '中文', 'English']);
-
-    const speedSelect = screen.getByLabelText('播放倍速') as HTMLSelectElement;
-    const user = userEvent.setup();
-    await user.selectOptions(speedSelect, '1.5');
-
+    fireEvent.loadedMetadata(video);
     expect(video.playbackRate).toBe(1.5);
-    expect(localStorage.getItem('coursefin_playback_rate')).toBe('1.5');
+
+    video.playbackRate = 1.75;
+    fireEvent.rateChange(video);
+    expect(localStorage.getItem('coursefin_playback_rate')).toBe('1.75');
   });
 
-  it('reports playback progress ticks to API on pause and ended and resumes from position_ticks', async () => {
+  it('reports playback progress ticks to API on pause and ended, resumes from position_ticks, and emits onTimeProgress', async () => {
     const progressCalls: Array<{ url: string; body: { position_ticks: number } }> = [];
     vi.stubGlobal(
       'fetch',
@@ -274,6 +562,7 @@ describe('VideoPlayer', () => {
     );
 
     const onEnded = vi.fn();
+    const onTimeProgress = vi.fn();
     const playback = makePlayback({
       progress: {
         position_ticks: 30 * 10_000_000,
@@ -282,7 +571,9 @@ describe('VideoPlayer', () => {
       },
     });
 
-    const { container } = render(<VideoPlayer playback={playback} onEnded={onEnded} />);
+    const { container } = render(
+      <VideoPlayer playback={playback} onEnded={onEnded} onTimeProgress={onTimeProgress} />,
+    );
     const video = container.querySelector('video') as HTMLVideoElement;
 
     Object.defineProperty(video, 'duration', { value: 120, configurable: true });
@@ -291,6 +582,9 @@ describe('VideoPlayer', () => {
     expect(video.currentTime).toBe(30);
 
     video.currentTime = 42.5;
+    fireEvent.timeUpdate(video);
+    expect(onTimeProgress).toHaveBeenCalledWith('l1', 42.5, 120);
+
     fireEvent.pause(video);
 
     await waitFor(() => {
@@ -308,7 +602,7 @@ describe('VideoPlayer', () => {
     expect(progressCalls[1].body.position_ticks).toBe(1_200_000_000);
   });
 
-  it('initializes hls.js for hls playback mode and cleans up ActiveEncodings with api_key without clearing token on 401', async () => {
+  it('initializes hls.js for hls playback mode, shows transcoding badge when transcoding, and cleans up ActiveEncodings without clearing token on 401', async () => {
     const deleteCalls: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -324,26 +618,74 @@ describe('VideoPlayer', () => {
 
     const playback = makePlayback({
       mode: 'hls',
+      transcoding: true,
       play_session_id: 'hls-sess-99',
-      stream_url: '/Videos/l1/master.m3u8?PlaySessionId=hls-sess-99&MediaSourceId=mf1',
+      stream_url: '/Videos/l1/master.m3u8?PlaySessionId=hls-sess-99&MediaSourceId=mf1&TranscodeVideo=1',
     });
 
     const { unmount } = render(<VideoPlayer playback={playback} />);
 
+    expect(screen.getByText('兼容转码播放')).toBeInTheDocument();
     expect(hlsMockInstances).toHaveLength(1);
     expect(hlsMockInstances[0].loadSource).toHaveBeenCalledWith(
-      '/Videos/l1/master.m3u8?PlaySessionId=hls-sess-99&MediaSourceId=mf1&api_key=test-token-123',
+      '/Videos/l1/master.m3u8?PlaySessionId=hls-sess-99&MediaSourceId=mf1&TranscodeVideo=1&api_key=test-token-123',
     );
     expect(hlsMockInstances[0].attachMedia).toHaveBeenCalled();
 
     unmount();
     expect(hlsMockInstances[0].destroy).toHaveBeenCalled();
+    expect(artMockInstances[0].destroy).toHaveBeenCalled();
     await waitFor(() => {
       expect(deleteCalls).toHaveLength(1);
     });
     expect(deleteCalls[0]).toContain('PlaySessionId=hls-sess-99');
     expect(deleteCalls[0]).toContain('api_key=test-token-123');
     expect(localStorage.getItem('coursefin_token')).toBe('test-token-123');
+  });
+
+  it('fires onRequestTranscodeFallback once on pre-play DirectPlay error, and not after playing or in HLS mode', () => {
+    const onFallback = vi.fn();
+    const { container, unmount } = render(
+      <VideoPlayer playback={makePlayback({ mode: 'direct' })} onRequestTranscodeFallback={onFallback} />,
+    );
+    const video = container.querySelector('video') as HTMLVideoElement;
+
+    fireEvent.error(video);
+    fireEvent.error(video);
+    expect(onFallback).toHaveBeenCalledTimes(1);
+    unmount();
+
+    // After playing started -> should NOT trigger fallback, shows error banner instead
+    const onFallbackAfterPlay = vi.fn();
+    const { container: c2, unmount: u2 } = render(
+      <VideoPlayer
+        playback={makePlayback({ mode: 'direct', play_session_id: 'sess-2' })}
+        onRequestTranscodeFallback={onFallbackAfterPlay}
+      />,
+    );
+    const v2 = c2.querySelector('video') as HTMLVideoElement;
+    fireEvent.playing(v2);
+    fireEvent.error(v2);
+    expect(onFallbackAfterPlay).not.toHaveBeenCalled();
+    expect(screen.getByText(/视频播放出错/)).toBeInTheDocument();
+    u2();
+
+    // In HLS mode -> should NOT trigger fallback
+    const onFallbackHls = vi.fn();
+    const { container: c3, unmount: u3 } = render(
+      <VideoPlayer
+        playback={makePlayback({
+          mode: 'hls',
+          play_session_id: 'sess-hls',
+          stream_url: '/Videos/l1/master.m3u8?PlaySessionId=sess-hls&MediaSourceId=mf1',
+        })}
+        onRequestTranscodeFallback={onFallbackHls}
+      />,
+    );
+    const v3 = c3.querySelector('video') as HTMLVideoElement;
+    fireEvent.error(v3);
+    expect(onFallbackHls).not.toHaveBeenCalled();
+    u3();
   });
 
   it('handles Space, ArrowLeft, and ArrowRight keyboard shortcuts', () => {
@@ -362,7 +704,6 @@ describe('VideoPlayer', () => {
     fireEvent.keyDown(window, { key: 'ArrowLeft', code: 'ArrowLeft' });
     expect(video.currentTime).toBe(25);
 
-    // jsdom video.paused defaults to true -> Space calls play()
     fireEvent.keyDown(window, { key: ' ', code: 'Space' });
     expect(playSpy).toHaveBeenCalledTimes(1);
 
@@ -426,7 +767,6 @@ describe('VideoPlayer', () => {
       }),
     );
 
-    // 1. Advancing time via timeupdate and unmounting without pausing flushes progress with keepalive
     const { container, unmount } = render(<VideoPlayer playback={makePlayback()} />);
     const video = container.querySelector('video') as HTMLVideoElement;
     video.currentTime = 53.2;
@@ -439,7 +779,6 @@ describe('VideoPlayer', () => {
     expect(progressCalls[0].body.position_ticks).toBe(532_000_000);
     expect(progressCalls[0].keepalive).toBe(true);
 
-    // 2. Pausing at same time then unmounting does not double-flush
     progressCalls.length = 0;
     const { container: c2, unmount: unmount2 } = render(<VideoPlayer playback={makePlayback()} />);
     const v2 = c2.querySelector('video') as HTMLVideoElement;
@@ -452,7 +791,6 @@ describe('VideoPlayer', () => {
     unmount2();
     expect(progressCalls).toHaveLength(1);
 
-    // 3. Ending video then unmounting does not overwrite completion
     progressCalls.length = 0;
     const { container: c3, unmount: unmount3 } = render(<VideoPlayer playback={makePlayback()} />);
     const v3 = c3.querySelector('video') as HTMLVideoElement;
@@ -471,6 +809,7 @@ describe('VideoPlayer', () => {
 describe('CourseDetailPage', () => {
   beforeEach(() => {
     localStorage.setItem('coursefin_token', 'test-token-123');
+    artMockInstances.length = 0;
     hlsMockInstances.length = 0;
   });
 
@@ -495,10 +834,10 @@ describe('CourseDetailPage', () => {
       if (url.endsWith('/api/v1/courses/c1')) {
         return jsonResponse(course);
       }
-      if (url.endsWith('/api/v1/lessons/l1/playback')) {
+      if (url.includes('/api/v1/lessons/l1/playback')) {
         return jsonResponse(playbackL1);
       }
-      if (url.endsWith('/api/v1/lessons/l2/playback')) {
+      if (url.includes('/api/v1/lessons/l2/playback')) {
         return jsonResponse(playbackL2);
       }
       if (url.endsWith('/api/v1/lessons/l1/played') && init?.method === 'POST') {
@@ -540,7 +879,6 @@ describe('CourseDetailPage', () => {
     const editLink = screen.getByRole('link', { name: /编辑课程/ });
     expect(editLink).toHaveAttribute('href', '/courses/c1/edit');
 
-    // Toggle manual played status
     const user = userEvent.setup();
     const markPlayedBtn = await screen.findByRole('button', { name: '标记已看' });
     await user.click(markPlayedBtn);
@@ -548,7 +886,6 @@ describe('CourseDetailPage', () => {
     expect(await screen.findByRole('button', { name: '标记未看' })).toBeInTheDocument();
     expect(screen.getByText(/已学 1 \/ 2 节/)).toBeInTheDocument();
 
-    // Wait for video element and simulate ended -> should auto-advance to l2
     const video = container.querySelector('video') as HTMLVideoElement;
     expect(video).toBeTruthy();
     Object.defineProperty(video, 'duration', { value: 120, configurable: true });
@@ -556,7 +893,7 @@ describe('CourseDetailPage', () => {
 
     await waitFor(() => {
       expect(
-        mockFetch.mock.calls.some(([u]) => String(u).endsWith('/api/v1/lessons/l2/playback')),
+        mockFetch.mock.calls.some(([u]) => String(u).includes('/api/v1/lessons/l2/playback')),
       ).toBe(true);
     });
   });
@@ -571,7 +908,7 @@ describe('CourseDetailPage', () => {
       if (url.endsWith('/api/v1/courses/c1')) {
         return jsonResponse(course);
       }
-      if (url.endsWith('/api/v1/lessons/l1/playback')) {
+      if (url.includes('/api/v1/lessons/l1/playback')) {
         playbackAttempts += 1;
         if (playbackAttempts === 1) {
           return jsonResponse({ error: 'playback unavailable' }, 500);
@@ -613,7 +950,7 @@ describe('CourseDetailPage', () => {
         if (url.endsWith('/api/v1/courses/c1')) {
           return jsonResponse(course);
         }
-        if (url.endsWith('/api/v1/lessons/l1/playback')) {
+        if (url.includes('/api/v1/lessons/l1/playback')) {
           return jsonResponse(playbackL1);
         }
         return jsonResponse({}, 404);
@@ -642,12 +979,10 @@ describe('CourseDetailPage', () => {
     const overviewEl = screen.getByText('从零设计并部署高并发 Go 微服务系统。');
     expect(overviewEl).toBeInTheDocument();
 
-    // Video must appear before the course overview section in DOM order
     expect(
       Boolean(video!.compareDocumentPosition(overviewEl) & Node.DOCUMENT_POSITION_FOLLOWING),
     ).toBe(true);
 
-    // Ensure no hardcoded legacy palette classes remain
     expect(container.innerHTML).not.toMatch(/\bbg-slate-900\b/);
     expect(container.innerHTML).not.toMatch(/\b(slate|indigo|rose|emerald)-/);
   });
