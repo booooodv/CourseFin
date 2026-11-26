@@ -313,3 +313,42 @@ func TestMigration004CreatesCourseCoversAndBackfillsLegacy(t *testing.T) {
 		t.Fatalf("expected 0 covers backfilled for empty cover_path, got %d", emptyCount)
 	}
 }
+
+func TestMigration005CreatesTranscriptChunksAndCascades(t *testing.T) {
+	dataDir := t.TempDir()
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer conn.Close()
+
+	var tblName string
+	if err := conn.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='media_transcript_chunks'`).Scan(&tblName); err != nil {
+		t.Fatalf("expected table media_transcript_chunks: %v", err)
+	}
+
+	now := "2026-11-26T00:00:00Z"
+	mustExec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := conn.Exec(q, args...); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	mustExec(`INSERT INTO storage_sources (id, name, driver, root_path, created_at, updated_at) VALUES ('s1','src','local','/tmp',?,?)`, now, now)
+	mustExec(`INSERT INTO media_files (id, source_id, relative_path, file_name, created_at, updated_at) VALUES ('m1','s1','a.mp4','a.mp4',?,?)`, now, now)
+	mustExec(`INSERT INTO media_transcript_chunks (media_file_id, chunk_index, chunk_total, segment_sec, media_fingerprint, offset_sec, duration_sec, language, model, cues_json, created_at, updated_at) VALUES ('m1',0,2,1200,'1024:now',0,1200,'zh','whisper-1','[]',?,?)`, now, now)
+	mustExec(`INSERT INTO media_transcript_chunks (media_file_id, chunk_index, chunk_total, segment_sec, media_fingerprint, offset_sec, duration_sec, language, model, cues_json, created_at, updated_at) VALUES ('m1',1,2,1200,'1024:now',1200,300,'zh','whisper-1','[]',?,?)`, now, now)
+
+	if _, err := conn.Exec(`INSERT INTO media_transcript_chunks (media_file_id, chunk_index, chunk_total, segment_sec, created_at, updated_at) VALUES ('m1',0,2,1200,?,?)`, now, now); err == nil {
+		t.Fatalf("expected primary key violation for duplicate (media_file_id, chunk_index)")
+	}
+
+	mustExec(`DELETE FROM media_files WHERE id = 'm1'`)
+	var cnt int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM media_transcript_chunks WHERE media_file_id = 'm1'`).Scan(&cnt); err != nil {
+		t.Fatalf("count media_transcript_chunks: %v", err)
+	}
+	if cnt != 0 {
+		t.Fatalf("after deleting media_file: chunks=%d want 0", cnt)
+	}
+}
