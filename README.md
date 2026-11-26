@@ -1,6 +1,6 @@
 # CourseFin
 
-![Version](https://img.shields.io/badge/version-v1.5.0-indigo)
+![Version](https://img.shields.io/badge/version-v1.6.0-indigo)
 ![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)
 ![React](https://img.shields.io/badge/Web-React%2019%20%2B%20TypeScript-61DAFB?logo=react&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-Single%20Container-2496ED?logo=docker&logoColor=white)
@@ -53,10 +53,10 @@ Jellyfin / Emby 的索引与刮削体系围绕电影和电视剧设计，管理�
 
 ## 核心功能
 
-- **AI 课程封面生成与统一风格模板（v1.5.0 新增）**：
+- **AI 课程封面生成、统一风格模板与多封面历史画廊（v1.5.0 / v1.6.0）**：
   - **6 套统一视觉风格与样图预览**：内置「现代书封」「暗夜科技」「柔和 3D 黏土」「温暖扁平插画」「极简蓝图」「质感影院」6 套双栏构图模板，悬停、聚焦或轻触预览图标即可直接查看对应参考样图；
-  - **多协议自填生图 API 与安全隔离**：支持 OpenAI 标准生图（`/images/generations`）、OpenAI 对话出图（`/chat/completions`）及 Google Gemini 原生接口（`:generateContent`），自动适配尺寸与参数降级、独立地址与 Gemini 模式绝不透传主 AI 密钥，并支持不写盘连通性测试；
-  - **单课预览应用与首页批量补齐**：课程编辑页支持自定义封面标题、副标题/讲师、节数角标与画面补充词，生成预览对比确认后再应用至 `/data/covers/` 并实时同步 Jellyfin 客户端；首页支持按媒体库或全部课程一键批量补齐缺失封面（或统一重绘），后台串行队列支持进度轮询、单课容错与随时取消。
+  - **多协议自填生图 API 与安全隔离**：支持 OpenAI 标准生图（`/images/generations`）、OpenAI 对话出图（`/chat/completions`）及 Google Gemini 原生接口（`:generateContent`），自动适配尺寸与精准错误回退（`240s` 超时与纯文生图无歧义 Prompt）、独立地址与 Gemini 模式绝不透传主 AI 密钥，并支持连通性测试；
+  - **多关联封面留存、快速切换与首页批量生成**：AI 单课/批量生成、本地上传、课时帧选取及目录导入均追加保存历史封面并默认将最新设为当前展示封面（绝不写入只读 `/media` 目录），在课程编辑页与 AI 封面弹窗内可随时浏览、一键切回历史封面或删除旧版本；首页支持按媒体库或全部课程一键批量补齐缺失封面或统一新增封面，后台串行队列支持进度轮询、单课容错与随时取消。
 - **每课 AI 总结与无字幕语音转写（v1.4.0 新增）**：
   - **两段式结构化总结**：每节课可生成 **AI 总结视频大纲**（核心一句话概览 + 结构化要点与跳转时间）与 **AI 总结视频内容（按时间顺序）**（起止时间区间、段落概括与核心知识点）；超长课程（> 24,000 字）自动按时间分块 Map-Reduce 汇总，避免截断丢失后半段内容；
   - **一键导入笔记与时间线联动**：播放页右侧栏提供 **「课程目录 / AI 总结」** 双 Tab，点击时间戳精准跳转播放、随播放进度高亮当前段落，点击 **「复制 Markdown」** 一键粘贴至 Obsidian / Notion 等笔记工具；
@@ -173,6 +173,8 @@ make docker-build
 - [docs/superpowers/specs/2026-11-24-player-subtitle-import-ux-design.md](docs/superpowers/specs/2026-11-24-player-subtitle-import-ux-design.md)
 - [docs/superpowers/specs/2026-11-25-lesson-ai-summary-design.md](docs/superpowers/specs/2026-11-25-lesson-ai-summary-design.md)
 - [docs/superpowers/specs/2026-11-26-ai-course-cover-design.md](docs/superpowers/specs/2026-11-26-ai-course-cover-design.md)
+- [docs/superpowers/specs/2026-11-26-ai-cover-prompt-timeout-fix-design.md](docs/superpowers/specs/2026-11-26-ai-cover-prompt-timeout-fix-design.md)
+- [docs/superpowers/specs/2026-11-26-course-multi-covers-design.md](docs/superpowers/specs/2026-11-26-course-multi-covers-design.md)
 
 ---
 

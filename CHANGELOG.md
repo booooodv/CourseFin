@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.6.0 (2026-11-26)
+
+新增「每门课程多关联封面与历史画廊」功能，并修复 AI 封面生图 Prompt 误判与超时重试问题：
+
+- **课程多关联封面与历史画廊**：
+  - 新增数据库迁移 `004_course_covers.sql`（创建 `course_covers` 表并将既有的 `courses.cover_path` 自动回填为 `legacy` 记录）与 `internal/catalog/covers.go`，AI 单课生成、AI 批量生成、本地上传、课时帧选取与目录导入均以唯一文件 `{courseID}_cover_{coverID}{ext}` 追加保存并自动设为当前封面（同步更新 `courses.cover_path` 与 `updated_at`，保持首页、详情页与 Jellyfin `ImageTags` 完全兼容）；删课及强制删库自动级联清理全部关联封面文件，删除当前封面自动回退至次新历史封面（删空后回退首节视频缩略图）；
+  - 新增受鉴权接口 `GET /api/v1/courses/{id}/covers`、`GET /api/v1/courses/{id}/covers/{coverId}/image`（复用 `internal/media.ServeCoverFile` 缩放缓存与 ETag）、`POST /api/v1/courses/{id}/covers/{coverId}/activate` 与 `DELETE /api/v1/courses/{id}/covers/{coverId}`；`POST /api/v1/courses/{id}/cover/generate` 改为直接落盘入库并设为当前封面，返回 `{ cover, course }`，移除临时预览缓存与 `/cover/previews/{previewId}`、`/courses/{id}/cover/apply` 接口；
+  - 前端新增通用组件 `CourseCoverGallery`，在课程编辑页封面区与 `AICoverModal` 同步展示全部关联封面，支持点击一键切回、AI Prompt 展开查看及内联二次确认删除，同时所有封面变更保留未保存的课程元数据草稿；`BatchCoverModal` 同步更新为非覆盖保留说明。
+- **AI 封面生图误判修复与超时重试优化**：
+  - 重构 `internal/cover/styles.go` 的模板字段拆解与 `BuildPrompt` 动态拼装逻辑，消除 `preserve`、`omit`、`on the image` 等编辑/参考图触发词，仅在存在角标或副标题时输出对应样式说明与文案条目，避免多模态生图上游误判为图像编辑任务返回 HTTP 400；
+  - 在 `internal/ai/image.go` 新增 `isLikelySizeError`，仅对尺寸/分辨率相关的 HTTP 400/422 执行候选尺寸回退（参考图或内容拒答错误立即透传）；统一 `TestConnection` 与正式生图的默认尺寸策略；将 `defaultImageHTTPTimeout` 与 `defaultCoverHTTP` 统一提升至 `240s`，并在请求异常中附带耗时、`model` 与 `size` 诊断上下文。
+
 ## v1.5.0 (2026-11-26)
 
 新增 AI 课程封面生成功能，内置统一风格模板与样图预览，支持单课预览应用与首页批量补齐：
