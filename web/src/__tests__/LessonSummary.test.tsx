@@ -806,12 +806,12 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
     expect(within(l1Button).getByLabelText('已生成 AI 总结')).toBeInTheDocument();
     expect(within(l2Button).queryByLabelText('已生成 AI 总结')).toBeNull();
 
-    // Click 批量总结
-    const batchBtn = within(sidebar).getByRole('button', { name: /批量总结/ });
+    // Click 继续总结 (l1 already summarized, so button shows 继续总结)
+    const batchBtn = within(sidebar).getByRole('button', { name: /继续总结/ });
     await user.click(batchBtn);
 
     expect(generateBatchBodies).toEqual([{ mode: 'missing_only' }]);
-    expect(await within(sidebar).findByText(/批量生成中 1\/2/)).toBeInTheDocument();
+    expect(await within(sidebar).findByText(/批量总结中 1\/2/)).toBeInTheDocument();
     expect(
       within(sidebar).getByText(/正在语音转写（分片 1\/2）.*1\.2 gRPC 实战与拦截器/),
     ).toBeInTheDocument();
@@ -821,7 +821,7 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
 
     await waitFor(() => {
       expect(cancelBatchCalled).toBe(true);
-      expect(within(sidebar).queryByText(/批量生成中/)).toBeNull();
+      expect(within(sidebar).queryByText(/批量总结中/)).toBeNull();
     });
     expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
   });
@@ -1268,7 +1268,7 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
     // User stays on 课程目录 (never clicks AI 总结 tab) and triggers batch summary
     const sidebar = screen.getByRole('complementary');
     await user.click(within(sidebar).getByRole('button', { name: /批量总结/ }));
-    expect(await within(sidebar).findByText(/批量生成中 0\/2/)).toBeInTheDocument();
+    expect(await within(sidebar).findByText(/批量总结中 0\/2/)).toBeInTheDocument();
 
     // First poll: l1 finishes with ASR subtitle while batch moves to l2
     await act(async () => {
@@ -1291,7 +1291,7 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
     });
 
     await waitFor(() => {
-      expect(within(sidebar).queryByText(/批量生成中/)).toBeNull();
+      expect(within(sidebar).queryByText(/批量总结中/)).toBeNull();
     });
     expect(playbackCalls).toBe(2);
     expect(screen.getAllByText(/已生成 AI 转写字幕，可在播放器字幕菜单开启/)).toHaveLength(1);
@@ -1394,14 +1394,14 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
 
     const sidebar = screen.getByRole('complementary');
     await user.click(within(sidebar).getByRole('button', { name: /批量总结/ }));
-    expect(await within(sidebar).findByText(/批量生成中 0\/2/)).toBeInTheDocument();
+    expect(await within(sidebar).findByText(/批量总结中 0\/2/)).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1600);
     });
 
     await waitFor(() => {
-      expect(within(sidebar).queryByText(/批量生成中/)).toBeNull();
+      expect(within(sidebar).queryByText(/批量总结中/)).toBeNull();
       expect(within(sidebar).getByText(/ASR 请求超时 504 \(run 1\)/)).toBeInTheDocument();
     });
 
@@ -1420,8 +1420,8 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
     expect(within(sidebar).queryByText(/ASR 请求超时 504/)).toBeNull();
 
     // Starting a new batch auto-clears dismissed state and shows new failure details on completion
-    await user.click(within(sidebar).getByRole('button', { name: /批量总结/ }));
-    expect(await within(sidebar).findByText(/批量生成中 0\/2/)).toBeInTheDocument();
+    await user.click(within(sidebar).getByRole('button', { name: /继续总结/ }));
+    expect(await within(sidebar).findByText(/批量总结中 0\/2/)).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1600);
@@ -1606,5 +1606,508 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
     expect(collapsedAside).not.toHaveAttribute('hidden');
     expect(screen.getByText('AI 总结视频大纲')).toBeInTheDocument();
     expect(screen.getByText('AI 语音转写')).toBeInTheDocument();
+  });
+
+  it('displays separate transcript/summary counts, per-lesson badges including partial chunks, and chapter-level triggers', async () => {
+    const user = userEvent.setup();
+    const baseCourse = makeCourse();
+    const course: CourseDetail = {
+      ...baseCourse,
+      chapter_count: 2,
+      lesson_count: 4,
+      unplayed_item_count: 4,
+      chapters: [
+        {
+          ...baseCourse.chapters[0],
+          id: 'ch1',
+          title: '第一章：有字幕与已转写',
+          lesson_count: 2,
+          lessons: [
+            baseCourse.chapters[0].lessons[0],
+            baseCourse.chapters[0].lessons[1],
+          ],
+        },
+        {
+          id: 'ch2',
+          course_id: 'c1',
+          title: '第二章：断点与未转写',
+          sort_order: 2,
+          overview: '',
+          lesson_count: 2,
+          played_count: 0,
+          unplayed_item_count: 2,
+          played_percentage: 0,
+          played: false,
+          created_at: '2026-11-20T00:00:00Z',
+          updated_at: '2026-11-20T00:00:00Z',
+          lessons: [
+            { ...baseCourse.chapters[0].lessons[0], id: 'l3', chapter_id: 'ch2', media_file_id: 'mf3', title: '2.1 长视频断点节' },
+            { ...baseCourse.chapters[0].lessons[1], id: 'l4', chapter_id: 'ch2', media_file_id: 'mf4', title: '2.2 空白未转写节' },
+          ],
+        },
+      ],
+    };
+
+    const transcriptCalls: unknown[] = [];
+    const summaryCalls: unknown[] = [];
+
+    const statusPayload: CourseSummariesStatusResponse = {
+      course_id: 'c1',
+      summary_lesson_ids: ['l1'],
+      transcript_lesson_ids: ['l1', 'l2'],
+      lessons: [
+        {
+          lesson_id: 'l1',
+          chapter_id: 'ch1',
+          has_subtitle: true,
+          has_cached_transcript: false,
+          transcript_status: 'external_subtitle',
+          transcript_ready: true,
+          has_summary: true,
+        },
+        {
+          lesson_id: 'l2',
+          chapter_id: 'ch1',
+          has_subtitle: false,
+          has_cached_transcript: true,
+          transcript_status: 'asr',
+          transcript_ready: true,
+          ai_subtitle_updated_at: '2026-11-26T00:00:00Z',
+          has_summary: false,
+        },
+        {
+          lesson_id: 'l3',
+          chapter_id: 'ch2',
+          has_subtitle: false,
+          has_cached_transcript: false,
+          transcript_status: 'partial',
+          transcript_ready: false,
+          transcribed_chunks: 2,
+          total_chunks: 4,
+          has_summary: false,
+        },
+        {
+          lesson_id: 'l4',
+          chapter_id: 'ch2',
+          has_subtitle: false,
+          has_cached_transcript: false,
+          transcript_status: 'none',
+          transcript_ready: false,
+          has_summary: false,
+        },
+      ],
+      counts: {
+        total_lessons: 4,
+        subtitle_lessons: 1,
+        transcribed_lessons: 1,
+        transcript_ready: 2,
+        partial_lessons: 1,
+        missing_transcript: 2,
+        summarized_lessons: 1,
+        ready_to_summarize: 1,
+      },
+      batch_job: null,
+      transcribe_batch_job: null,
+      summary_batch_job: null,
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) return jsonResponse(course);
+        if (url.includes('/api/v1/lessons/l1/playback')) return jsonResponse(makePlayback());
+        if (url.endsWith('/api/v1/courses/c1/summaries/status')) return jsonResponse(statusPayload);
+        if (url.endsWith('/api/v1/courses/c1/transcripts/generate') && init?.method === 'POST') {
+          transcriptCalls.push(JSON.parse(String(init.body ?? '{}')));
+          return jsonResponse({
+            course_id: 'c1',
+            kind: 'transcribe',
+            chapter_id: 'ch2',
+            chapter_title: '第二章：断点与未转写',
+            running: true,
+            total: 2,
+            completed: 0,
+            skipped: 0,
+            failed: 0,
+            current_lesson_id: 'l3',
+            current_lesson_title: '2.1 长视频断点节',
+            current_stage: 'transcribing',
+            chunk_index: 3,
+            chunk_total: 4,
+            errors: [],
+            started_at: '2026-11-26T00:00:00Z',
+          }, 202);
+        }
+        if (url.endsWith('/api/v1/courses/c1/summaries/generate') && init?.method === 'POST') {
+          summaryCalls.push(JSON.parse(String(init.body ?? '{}')));
+          return jsonResponse({
+            course_id: 'c1',
+            kind: 'summarize',
+            chapter_id: 'ch1',
+            chapter_title: '第一章：有字幕与已转写',
+            running: true,
+            total: 2,
+            completed: 0,
+            skipped: 1,
+            skipped_already_done: 1,
+            failed: 0,
+            current_lesson_id: 'l2',
+            current_lesson_title: '1.2 gRPC 实战与拦截器',
+            current_stage: 'summarizing',
+            chunk_index: 0,
+            chunk_total: 0,
+            errors: [],
+            started_at: '2026-11-26T00:00:00Z',
+          }, 202);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = renderCoursePage();
+    expect(await screen.findByRole('heading', { name: 'Go 微服务全栈实战' })).toBeInTheDocument();
+
+    const sidebar = screen.getByRole('complementary');
+    expect(await within(sidebar).findByText('已学 0/4 · 文稿 2/4 · 总结 1/4')).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: /继续转写/ })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: /继续总结/ })).toBeInTheDocument();
+
+    expect(within(sidebar).getByLabelText('已有字幕')).toBeInTheDocument();
+    expect(within(sidebar).getByLabelText('已完成转写')).toBeInTheDocument();
+    expect(within(sidebar).getByLabelText('转写中断（已完成 2/4 分片）')).toBeInTheDocument();
+    expect(within(sidebar).getByLabelText('已生成 AI 总结')).toBeInTheDocument();
+
+    // Trigger chapter 2 transcribe and chapter 1 summary concurrently without collapsing chapters
+    await user.click(within(sidebar).getByRole('button', { name: '转写本章：第二章：断点与未转写' }));
+    await user.click(within(sidebar).getByRole('button', { name: '总结本章：第一章：有字幕与已转写' }));
+
+    expect(transcriptCalls).toEqual([{ mode: 'missing_only', chapter_id: 'ch2' }]);
+    expect(summaryCalls).toEqual([{ mode: 'missing_only', chapter_id: 'ch1' }]);
+    expect(within(sidebar).getByText(/批量转写中 · 第二章：断点与未转写 0\/2/)).toBeInTheDocument();
+    expect(within(sidebar).getByText(/批量总结中 · 第一章：有字幕与已转写 1\/2/)).toBeInTheDocument();
+    expect(within(sidebar).getByText('2.1 长视频断点节')).toBeVisible();
+    expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
+  });
+
+  it('refreshes player subtitles via ai_subtitle_updated_at on batch transcribe and shows detailed skip toast on batch summary', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
+    const course = makeCourse();
+    const initialPlayback = makePlayback({ subtitles: [] });
+    const refreshedPlayback = makePlayback({
+      subtitles: [
+        {
+          index: 100,
+          language: 'zh',
+          title: 'AI 转写字幕',
+          format: 'vtt',
+          is_default: false,
+          is_external: true,
+          is_text: true,
+          url: '/Videos/l1/mf1/Subtitles/100/Stream.vtt',
+        },
+      ],
+    });
+
+    let playbackCalls = 0;
+    let transcribeActive = false;
+    let summaryActive = false;
+    let transcribeDone = false;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) return jsonResponse(course);
+        if (url.includes('/api/v1/lessons/l1/playback')) {
+          playbackCalls += 1;
+          return jsonResponse(transcribeDone ? refreshedPlayback : initialPlayback);
+        }
+        if (url.endsWith('/api/v1/courses/c1/summaries/status')) {
+          if (transcribeActive) {
+            transcribeActive = false;
+            transcribeDone = true;
+          }
+          let summaryBatch: CourseBatchSummaryJob | null = null;
+          if (summaryActive) {
+            summaryActive = false;
+            summaryBatch = {
+              course_id: 'c1',
+              kind: 'summarize',
+              running: false,
+              total: 3,
+              completed: 1,
+              skipped: 2,
+              skipped_already_done: 1,
+              skipped_no_transcript: 1,
+              failed: 0,
+              current_lesson_id: '',
+              current_lesson_title: '',
+              current_stage: 'completed',
+              chunk_index: 0,
+              chunk_total: 0,
+              errors: [],
+              started_at: '2026-11-26T00:00:00Z',
+              finished_at: '2026-11-26T00:01:00Z',
+            };
+          }
+          return jsonResponse({
+            course_id: 'c1',
+            summary_lesson_ids: [],
+            transcript_lesson_ids: transcribeDone ? ['l1'] : [],
+            lessons: [
+              {
+                lesson_id: 'l1',
+                chapter_id: 'ch1',
+                has_subtitle: false,
+                has_cached_transcript: transcribeDone,
+                transcript_status: transcribeDone ? 'asr' : 'none',
+                transcript_ready: transcribeDone,
+                ai_subtitle_updated_at: transcribeDone ? '2026-11-26T01:00:00Z' : '',
+                has_summary: false,
+              },
+              {
+                lesson_id: 'l2',
+                chapter_id: 'ch1',
+                has_subtitle: false,
+                has_cached_transcript: false,
+                transcript_status: 'none',
+                transcript_ready: false,
+                has_summary: false,
+              },
+            ],
+            counts: {
+              total_lessons: 2,
+              subtitle_lessons: 0,
+              transcribed_lessons: transcribeDone ? 1 : 0,
+              transcript_ready: transcribeDone ? 1 : 0,
+              partial_lessons: 0,
+              missing_transcript: transcribeDone ? 1 : 2,
+              summarized_lessons: 0,
+              ready_to_summarize: transcribeDone ? 1 : 0,
+            },
+            batch_job: summaryBatch,
+            summary_batch_job: summaryBatch,
+            transcribe_batch_job: transcribeDone
+              ? {
+                  course_id: 'c1',
+                  kind: 'transcribe',
+                  running: false,
+                  total: 2,
+                  completed: 1,
+                  skipped: 1,
+                  skipped_already_done: 1,
+                  failed: 0,
+                  current_lesson_id: '',
+                  current_lesson_title: '',
+                  current_stage: 'completed',
+                  chunk_index: 0,
+                  chunk_total: 0,
+                  errors: [],
+                  started_at: '2026-11-26T00:00:00Z',
+                  finished_at: '2026-11-26T00:00:30Z',
+                }
+              : null,
+          });
+        }
+        if (url.endsWith('/api/v1/courses/c1/transcripts/generate') && init?.method === 'POST') {
+          transcribeActive = true;
+          return jsonResponse({
+            course_id: 'c1',
+            kind: 'transcribe',
+            running: true,
+            total: 2,
+            completed: 0,
+            skipped: 0,
+            failed: 0,
+            current_lesson_id: 'l1',
+            current_lesson_title: '1.1 服务拆分原则',
+            current_stage: 'transcribing',
+            chunk_index: 1,
+            chunk_total: 1,
+            errors: [],
+            started_at: '2026-11-26T00:00:00Z',
+          }, 202);
+        }
+        if (url.endsWith('/api/v1/courses/c1/summaries/generate') && init?.method === 'POST') {
+          summaryActive = true;
+          return jsonResponse({
+            course_id: 'c1',
+            kind: 'summarize',
+            running: true,
+            total: 3,
+            completed: 0,
+            skipped: 2,
+            skipped_already_done: 1,
+            skipped_no_transcript: 1,
+            failed: 0,
+            current_lesson_id: 'l1',
+            current_lesson_title: '1.1 服务拆分原则',
+            current_stage: 'summarizing',
+            chunk_index: 0,
+            chunk_total: 0,
+            errors: [],
+            started_at: '2026-11-26T00:00:00Z',
+          }, 202);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    renderCoursePage();
+    await waitFor(() => expect(artMockInstances).toHaveLength(1));
+    const initialArt = artMockInstances[0];
+    const sidebar = screen.getByRole('complementary');
+
+    await user.click(within(sidebar).getByRole('button', { name: /批量转写/ }));
+    expect(await within(sidebar).findByText(/批量转写中 0\/2/)).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    await waitFor(() => expect(playbackCalls).toBe(2));
+    expect(initialArt.destroy).not.toHaveBeenCalled();
+    expect(screen.getByText(/已生成 AI 转写字幕，可在播放器字幕菜单开启/)).toBeInTheDocument();
+    expect(screen.getByText('批量转写完成：成功 1，跳过 1，失败 0')).toBeInTheDocument();
+
+    // Now run summary batch and verify detailed skip breakdown toast
+    await user.click(within(sidebar).getByRole('button', { name: /批量总结/ }));
+    expect(await within(sidebar).findByText(/批量总结中 2\/3/)).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('批量总结完成：成功 1，跳过 2（已总结 1，缺文稿 1），失败 0'),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('supports single-lesson transcribe-only with partial checkpoint, pure-ASR without AI, and no-summary retranscribe', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
+    const course = makeCourse();
+    const transcriptRequests: unknown[] = [];
+    let phase: 'partial_no_ai' | 'transcribing' | 'cached_with_ai' = 'partial_no_ai';
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) return jsonResponse(course);
+        if (url.includes('/api/v1/lessons/l1/playback')) return jsonResponse(makePlayback({ subtitles: [] }));
+        if (url.endsWith('/api/v1/courses/c1/summaries/status')) {
+          return jsonResponse({ course_id: 'c1', summary_lesson_ids: [], batch_job: null });
+        }
+        if (url.endsWith('/api/v1/lessons/l1/summary') && (!init?.method || init.method === 'GET')) {
+          if (phase === 'partial_no_ai') {
+            return jsonResponse({
+              lesson_id: 'l1',
+              summary: null,
+              job: null,
+              capabilities: {
+                has_subtitle: false,
+                has_cached_transcript: false,
+                transcript_source: '',
+                partial_transcript_chunks: 1,
+                partial_transcript_total: 3,
+                ai_configured: false,
+                asr_configured: true,
+                has_ffmpeg: true,
+              },
+            });
+          }
+          if (phase === 'transcribing') {
+            phase = 'cached_with_ai';
+            return jsonResponse({
+              lesson_id: 'l1',
+              summary: null,
+              job: {
+                lesson_id: 'l1',
+                course_id: 'c1',
+                action: 'transcribe',
+                running: false,
+                stage: 'completed',
+                message: '语音转文字完成',
+                chunk_index: 3,
+                chunk_total: 3,
+                source_type: 'asr',
+                started_at: '2026-11-26T00:00:00Z',
+                finished_at: '2026-11-26T00:01:00Z',
+              },
+              capabilities: {
+                has_subtitle: false,
+                has_cached_transcript: true,
+                transcript_source: 'asr',
+                ai_configured: true,
+                asr_configured: true,
+                has_ffmpeg: true,
+              },
+            });
+          }
+          return jsonResponse({
+            lesson_id: 'l1',
+            summary: null,
+            job: null,
+            capabilities: {
+              has_subtitle: false,
+              has_cached_transcript: true,
+              transcript_source: 'asr',
+              ai_configured: true,
+              asr_configured: true,
+              has_ffmpeg: true,
+            },
+          });
+        }
+        if (url.endsWith('/api/v1/lessons/l1/transcript/generate') && init?.method === 'POST') {
+          transcriptRequests.push(JSON.parse(String(init.body ?? '{}')));
+          phase = 'transcribing';
+          return jsonResponse({
+            lesson_id: 'l1',
+            course_id: 'c1',
+            action: 'transcribe',
+            running: true,
+            stage: 'transcribing',
+            message: '正在语音转写（分片 2/3）...',
+            chunk_index: 2,
+            chunk_total: 3,
+            source_type: 'asr',
+            started_at: '2026-11-26T00:00:00Z',
+          }, 202);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = renderCoursePage();
+    expect(await screen.findByRole('heading', { name: 'Go 微服务全栈实战' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: /AI 总结/ }));
+
+    expect(
+      await screen.findByText('检测到上次转写断点（已完成 1/3 分片），继续转写将自动跳过已完成分片'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('尚未配置 AI 接口')).toBeInTheDocument();
+
+    // Pure-ASR user (ai_configured: false) clicks 继续转写
+    await user.click(screen.getByRole('button', { name: '继续转写' }));
+    expect(await screen.findByText(/正在语音转写（分片 2\/3）/)).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    // After completion, cached transcript view offers both 生成 AI 总结 and transcribe-only 重新转写
+    expect(await screen.findByRole('button', { name: '生成 AI 总结' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重新转写' }));
+
+    expect(transcriptRequests).toEqual([{}, { force_retranscribe: true }]);
+    expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
   });
 });
