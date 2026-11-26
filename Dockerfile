@@ -22,7 +22,7 @@ COPY internal/ ./internal/
 RUN rm -rf internal/server/webdist/*
 COPY --from=web-builder /src/web/dist/ ./internal/server/webdist/
 
-ARG VERSION=1.6.1
+ARG VERSION=1.7.0
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/coursefin ./cmd/coursefin
 
 # Stage 3: Minimal runtime image with FFmpeg

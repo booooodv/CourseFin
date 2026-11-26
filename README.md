@@ -1,6 +1,6 @@
 # CourseFin
 
-![Version](https://img.shields.io/badge/version-v1.6.1-indigo)
+![Version](https://img.shields.io/badge/version-v1.7.0-indigo)
 ![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)
 ![React](https://img.shields.io/badge/Web-React%2019%20%2B%20TypeScript-61DAFB?logo=react&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-Single%20Container-2496ED?logo=docker&logoColor=white)
@@ -57,12 +57,12 @@ Jellyfin / Emby 的索引与刮削体系围绕电影和电视剧设计，管理�
   - **6 套统一视觉风格与样图预览**：内置「现代书封」「暗夜科技」「柔和 3D 黏土」「温暖扁平插画」「极简蓝图」「质感影院」6 套双栏构图模板，悬停、聚焦或轻触预览图标即可直接查看对应参考样图；
   - **多协议自填生图 API 与安全隔离**：支持 OpenAI 标准生图（`/images/generations`）、OpenAI 对话出图（`/chat/completions`）及 Google Gemini 原生接口（`:generateContent`），自动适配尺寸与精准错误回退（`240s` 超时与纯文生图无歧义 Prompt）、独立地址与 Gemini 模式绝不透传主 AI 密钥，并支持连通性测试；
   - **多关联封面留存、快速切换与首页批量生成**：AI 单课/批量生成、本地上传、课时帧选取及目录导入均追加保存历史封面并默认将最新设为当前展示封面（绝不写入只读 `/media` 目录），在课程编辑页与 AI 封面弹窗内可随时浏览、一键切回历史封面或删除旧版本；首页支持按媒体库或全部课程一键批量补齐缺失封面或统一新增封面，后台串行队列支持进度轮询、单课容错与随时取消。
-- **每课 AI 总结与无字幕语音转写（v1.4.0 新增）**：
+- **每课 AI 总结与无字幕语音转写（v1.4.0 / v1.7.0）**：
   - **两段式结构化总结**：每节课可生成 **AI 总结视频大纲**（核心一句话概览 + 结构化要点与跳转时间）与 **AI 总结视频内容（按时间顺序）**（起止时间区间、段落概括与核心知识点）；超长课程（> 24,000 字）自动按时间分块 Map-Reduce 汇总，避免截断丢失后半段内容；
   - **一键导入笔记与时间线联动**：播放页右侧栏提供 **「课程目录 / AI 总结」** 双 Tab，点击时间戳精准跳转播放、随播放进度高亮当前段落，点击 **「复制 Markdown」** 一键粘贴至 Obsidian / Notion 等笔记工具；
   - **无字幕视频全链路闭环**：按「外挂字幕 → 内嵌文本字幕 → 已缓存转写稿 → FFmpeg 自动抽取压缩音频分片并调用 OpenAI 兼容 `/audio/transcriptions` 接口（支持云端 Whisper/Groq/硅基流动及自托管本地 Faster-Whisper / Speaches 服务，跨域名密钥严格隔离）→ 手动粘贴文稿」自动流转；
   - **AI 转写字幕持久化复用**：ASR 生成的 WebVTT 存入 SQLite `media_transcripts`（不写入只读 `/media` 目录，不受定时扫描影响），自动作为 **「AI 转写字幕」** 轨道供 Web 播放器与 Jellyfin 客户端开启，重新总结时直接复用免重复转写；
-  - **单课优先 + 整门课批量队列**：后台串行队列支持整门课一键批量生成（查看阶段进度、单课失败容错隔离明细、随时取消），批量运行中手动触发当前课时自动插队优先处理。
+  - **两步解耦双队列、分片级断点续转与章节批量（v1.7.0 升级）**：批量语音转文字（ASR）与批量 AI 总结（LLM）拆分为双独立串行 Worker，目录与课时行分别统计并独立延续，支持整门课或按章节单独触发，批量总结仅消费已有字幕/转写稿绝不重复转写；长视频每片转写完即写入 SQLite 断点（`media_transcript_chunks`），中断重启后自动跳过已完成分片；支持仅配置 ASR 的单课/批量纯转写与原地刷新播放器 AI 字幕轨。
 - **Artplayer 嵌入式 Web 播放器与三层按需转码播放**：
   - 嵌入 `Artplayer` + `hls.js`，提供中文界面、倍速记忆（0.75x–2.0x）、字幕轨道偏好记忆、字幕字号与时间偏移调节、网页全屏/浏览器全屏、画中画、截图、迷你进度条与快捷键；
   - 后端支持浏览器直放（HTTP Range 206 + 保守 HEVC 探测）→ H.264 零视频转码 VOD HLS 封装 → 按需 FFmpeg `libx264` 兼容转码（覆盖 HEVC MKV、10-bit/4:4:4 录屏、奇数分辨率及 WMV/FLV/AVI 等老编码，并在直放解码失败时自动降级）。
@@ -175,6 +175,7 @@ make docker-build
 - [docs/superpowers/specs/2026-11-26-ai-course-cover-design.md](docs/superpowers/specs/2026-11-26-ai-course-cover-design.md)
 - [docs/superpowers/specs/2026-11-26-ai-cover-prompt-timeout-fix-design.md](docs/superpowers/specs/2026-11-26-ai-cover-prompt-timeout-fix-design.md)
 - [docs/superpowers/specs/2026-11-26-course-multi-covers-design.md](docs/superpowers/specs/2026-11-26-course-multi-covers-design.md)
+- [docs/superpowers/specs/2026-11-26-decoupled-batch-transcription-summary-design.md](docs/superpowers/specs/2026-11-26-decoupled-batch-transcription-summary-design.md)
 
 ---
 

@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.7.0 (2026-11-26)
+
+将「批量语音转文字（ASR）」与「批量生成 AI 总结（LLM）」彻底解耦，支持两步独立计算、独立进度展示、长视频分片级断点续转与按章节发起批量任务：
+
+- **长视频分片级断点续转（SQLite 持久化）**：
+  - 新增数据库迁移 `005_transcript_checkpoints.sql`（创建 `media_transcript_chunks` 表并外键级联绑定 `media_files`）及 `internal/summary/checkpoints.go`；
+  - 每个 20 分钟音频分片转写完成（含纯静音分片）后立即落库，并基于磁盘 `os.Stat` 文件大小、修改时间指纹及切片参数校验有效性；任务取消、异常中断或服务重启后再转时自动跳过已完成分片，全部分片完成后单事务合并写入 `media_transcripts` 并清理临时分片记录，避免重复消耗 ASR 额度。
+- **双独立串行 Worker 与零死锁跨队列碰撞保护**：
+  - 重构 `internal/summary/service.go`，将原单并发队列拆分为独立的 **ASR Worker**（`transcribeWorker`）与 **LLM Worker**（`summaryWorker`），双方独立排队、互不阻塞——正在批量转写后续课时时，已转写或已有字幕的课时可同时并行生成 AI 总结；
+  - 新增基于 `sync.Cond` 的同 `lesson_id` 跨队列碰撞等待门控，确保单课不会同时被两路 Worker 修改，并在取消或停机时立即唤醒退出；单课「重新转写并总结」（`force_retranscribe`）采用两阶段无缝接力（ASR 完成后交棒 LLM，并在存在物理字幕时优先消费刚产出的最新 ASR 转写稿）；同一课时重复触发同类任务返回 HTTP `409`（`lesson_job_conflict`）。
+- **两步分离状态统计与按章节批量 API**：
+  - 新增受鉴权接口 `POST /api/v1/lessons/{id}/transcript/generate`、`POST /api/v1/lessons/{id}/transcript/cancel`、`POST /api/v1/courses/{id}/transcripts/generate`（支持 `scope: "missing_only" | "all"` 与可选 `chapter_id`）及 `POST /api/v1/courses/{id}/transcripts/cancel`；
+  - 升级 `POST /api/v1/courses/{id}/summaries/generate` 支持可选 `chapter_id` 且严格仅对已有文字来源（外挂字幕 / 内嵌字幕 / AI 转写稿）的课时执行总结，绝不隐式触发 ASR；
+  - 升级 `GET /api/v1/courses/{id}/summaries/status` 返回纯 SQL 计算的课程/课时级两步状态（`lessons`、`counts`、`transcript_lesson_ids`、`ai_subtitle_updated_at`、`transcribe_batch`、`summary_batch`），并保留旧顶层字段向后兼容。
+- **Web 端两步分离面板、目录双微标与章节微触发器**：
+  - 播放页「课程目录」顶部新增「批量转写」与「批量总结」两路独立状态统计、独立续跑/补齐按钮与双进度横幅（已部分完成的课程自动显示「继续转写」/「继续总结」），无可用文字来源时禁用批量总结并提示先执行语音转文字；各章节标题行新增「转写本章」「总结本章」快捷按钮，课时行分别展示「转写」与「总结」独立状态微标（含分片续转进度提示）；
+  - 播放页「AI 总结」Tab 新增「仅语音转文字」与「仅重新转写」操作，支持未配置 LLM 但已配置 ASR 的纯转写场景，转写完成后自动原地刷新播放器 AI 字幕轨而不中断播放。
+
 ## v1.6.1 (2026-11-26)
 
 进一步修复多模态生图模型将课程封面 Prompt 误判为“参考图编辑”导致 HTTP 400 的问题：
