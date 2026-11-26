@@ -4,8 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        VERSION: "1.6.0"
-    image: coursefin:1.6.0
+        VERSION: "1.6.1"
+    image: coursefin:1.6.1
     container_name: coursefin
     restart: unless-stopped
     ports:

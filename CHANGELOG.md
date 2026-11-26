@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.6.1 (2026-11-26)
+
+进一步修复多模态生图模型将课程封面 Prompt 误判为“参考图编辑”导致 HTTP 400 的问题：
+
+- **单段式纯自然画面 Prompt 重构**：将 `internal/cover/styles.go` 中全部 6 套风格模板改写为紧凑的单段自然英文画面描述，移除分段设计规范清单头、项目符号以及原始课程简介/章节标题转储，避免 `gpt-image-2.6` 等多模态模型误判为参考图修改单；同步简化 `TestConnection` 测试提示词。
+- **参考图拒答自动极简兜底重试**：在 `internal/cover/service.go` 为单课生成与批量生成抽取共享 `generateCourseImage` 路径，遇到 `reference image`、`/images/edits`、`可供编辑` 等参考图拒答 400 时自动剥离课程主题词/标签/补充词并以 `BuildMinimalPrompt` 重试 1 次，并记录实际生效的 Prompt。
+
 ## v1.6.0 (2026-11-26)
 
 新增「每门课程多关联封面与历史画廊」功能，并修复 AI 封面生图 Prompt 误判与超时重试问题：
