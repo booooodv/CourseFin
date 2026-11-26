@@ -115,7 +115,7 @@ func NewHTTPImageGenerator(cfg ImageConfig, httpClient *http.Client) *HTTPImageG
 // TestConnection verifies endpoint reachability, authentication, and model image output.
 func (g *HTTPImageGenerator) TestConnection(ctx context.Context) error {
 	req := ImageGenerateRequest{
-		Prompt: "Create a brand-new standalone minimal solid cobalt blue geometric square icon on a light gray studio background, with no text.",
+		Prompt: "A minimal clean solid cobalt blue geometric square icon on a light gray studio background, no text.",
 		Size:   g.cfg.Size,
 	}
 	_, err := g.GenerateImage(ctx, req)

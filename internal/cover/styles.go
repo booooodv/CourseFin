@@ -3,14 +3,11 @@ package cover
 import (
 	"fmt"
 	"strings"
-	"unicode/utf8"
 )
 
 const (
-	DefaultStyleID = "editorial_modern"
-	maxOverviewRunes = 160
-	maxTagsInPrompt  = 6
-	maxChaptersHint  = 6
+	DefaultStyleID  = "editorial_modern"
+	maxTagsInPrompt = 4
 )
 
 // StylePalette holds preview color tokens used by frontend cards before or alongside sample image inspection.
@@ -24,21 +21,22 @@ type StylePalette struct {
 
 // StyleTemplate describes a built-in cohesive course cover art direction preset.
 type StyleTemplate struct {
-	ID                   string       `json:"id"`
-	Name                 string       `json:"name"`
-	Tagline              string       `json:"tagline"`
-	Description          string       `json:"description"`
-	RecommendedFor       string       `json:"recommended_for"`
-	PreviewImageURL      string       `json:"preview_image_url"`
-	Palette              StylePalette `json:"palette"`
-	styleHeading         string
-	backgroundSpec       string
-	leftColumnBackdrop   string
-	badgeStyleSpec       string
-	titleStyleSpec       string
-	subtitleStyleSpec    string
-	noSubtitleAccentSpec string
-	rightColumnSpec      string
+	ID               string       `json:"id"`
+	Name             string       `json:"name"`
+	Tagline          string       `json:"tagline"`
+	Description      string       `json:"description"`
+	RecommendedFor   string       `json:"recommended_for"`
+	PreviewImageURL  string       `json:"preview_image_url"`
+	Palette          StylePalette `json:"palette"`
+	openingScene     string
+	leftSidePrefix   string
+	badgeFormat      string
+	titleFormat      string
+	subtitleFormat   string
+	noSubtitleSuffix string
+	rightSideFormat  string
+	minimalRightSide string
+	closingStyle     string
 }
 
 // PromptInput carries course metadata and optional user overrides used to construct an image prompt.
@@ -67,14 +65,15 @@ var builtInStyles = []StyleTemplate{
 			Accent:     "#1E5EFF",
 			AccentSoft: "#F97316",
 		},
-		styleHeading:         `Style: "现代书封 (Editorial Modern)" Swiss grid fine book cover.`,
-		backgroundSpec:       `- Background: warm off-white matte fine paper (#F7F5F0) with ultra-subtle paper grain and generous outer safe margins (at least 12% padding on all edges).`,
-		leftColumnBackdrop:   `Left column (58% width): completely clean unobstructed paper behind typography.`,
-		badgeStyleSpec:       `Badge style: soft cobalt rounded pill (#E6EEFF) with cobalt text (#1E5EFF).`,
-		titleStyleSpec:       `Main title style: bold modern geometric sans-serif in deep charcoal (#181B26).`,
-		subtitleStyleSpec:    `Below the title: a short thin cobalt accent bar (#1E5EFF) and clean muted slate subtitle (#5A6475).`,
-		noSubtitleAccentSpec: `Below the title: a short thin cobalt accent bar (#1E5EFF).`,
-		rightColumnSpec:      `- Right column (38% width): crisp Swiss geometric vector emblem symbolizing the course topic, using interlocking cobalt blue (#1E5EFF), sky cyan (#38BDF8), and warm coral (#F97316) clean shapes and directional motifs. Flat refined print aesthetic.`,
+		openingScene:     `A flat horizontal 16:10 Editorial Modern Swiss-grid graphic poster with clean edge-to-edge artwork on warm off-white matte fine paper (#F7F5F0) with subtle paper grain and generous outer margins.`,
+		leftSidePrefix:   `On the clean open left side,`,
+		badgeFormat:      `a soft cobalt rounded pill badge (#E6EEFF) shows %q in cobalt blue (#1E5EFF) above `,
+		titleFormat:      `bold modern dark charcoal (#181B26) geometric sans-serif title text reading %q`,
+		subtitleFormat:   `, followed by a short thin cobalt blue accent bar (#1E5EFF) and muted slate (#5A6475) subtitle text reading %q.`,
+		noSubtitleSuffix: `, underlined by a short thin cobalt blue accent bar (#1E5EFF).`,
+		rightSideFormat:  `On the right side, a crisp flat Swiss geometric vector emblem in cobalt blue (#1E5EFF), sky cyan (#38BDF8), and warm coral (#F97316) symbolizes %s.`,
+		minimalRightSide: `On the right side, an abstract Swiss geometric vector emblem uses interlocking cobalt blue (#1E5EFF), sky cyan (#38BDF8), and warm coral (#F97316) shapes.`,
+		closingStyle:     `Clean modern print design, high text contrast, crisp legible lettering, no watermarks, and no extra text.`,
 	},
 	{
 		ID:              "dark_tech",
@@ -90,13 +89,15 @@ var builtInStyles = []StyleTemplate{
 			Accent:     "#38BDF8",
 			AccentSoft: "#1E40AF",
 		},
-		styleHeading:       `Style: "暗夜科技 (Dark Tech)" modern developer platform cover.`,
-		backgroundSpec:     `- Background: deep graphite midnight-navy gradient (#0B1220 to #131F36) with ultra-subtle architectural dot grid and a soft electric blue-cyan ambient glow localized on the right half. Generous outer safe margins (at least 12% padding on all edges).`,
-		leftColumnBackdrop: `Left column (58% width): dark and unobstructed for high-contrast legibility.`,
-		badgeStyleSpec:     `Badge style: sleek frosted dark-glass pill with subtle cyan border and light-cyan text.`,
-		titleStyleSpec:     `Main title style: bold crisp pure white (#F8FAFC) modern sans-serif.`,
-		subtitleStyleSpec:  `Subtitle style: cool silver-gray (#94A3B8).`,
-		rightColumnSpec:    `- Right column (38% width): sleek 3D frosted glassmorphism and neon-edged technical emblem representing the course subject, with luminous cyan and electric blue light conduits, dark translucent blocks, and orbiting nodes.`,
+		openingScene:     `A flat horizontal 16:10 Dark Tech modern developer graphic poster with clean edge-to-edge artwork on a deep graphite midnight-navy gradient (#0B1220 to #131F36) with a subtle architectural dot grid, soft electric cyan ambient glow on the right half, and generous outer margins.`,
+		leftSidePrefix:   `On the clean dark left side,`,
+		badgeFormat:      `a sleek frosted dark-glass pill badge with a thin cyan border shows %q in light cyan above `,
+		titleFormat:      `bold crisp pure white (#F8FAFC) modern sans-serif title text reading %q`,
+		subtitleFormat:   `, followed by cool silver-gray (#94A3B8) subtitle text reading %q.`,
+		noSubtitleSuffix: `.`,
+		rightSideFormat:  `On the right side, a sleek 3D frosted glassmorphism and neon-edged technical emblem with glowing cyan and electric blue light conduits, dark translucent blocks, and orbiting nodes symbolizes %s.`,
+		minimalRightSide: `On the right side, a sleek abstract 3D frosted glassmorphism geometric emblem features glowing cyan and electric blue light lines and translucent blocks.`,
+		closingStyle:     `Clean modern digital graphic, high text contrast, crisp legible lettering, no watermarks, and no extra text.`,
 	},
 	{
 		ID:              "clay_3d",
@@ -112,13 +113,15 @@ var builtInStyles = []StyleTemplate{
 			Accent:     "#4F46E5",
 			AccentSoft: "#FB923C",
 		},
-		styleHeading:       `Style: "柔和 3D 黏土 (Soft 3D Clay)" tactile studio course cover.`,
-		backgroundSpec:     `- Background: soft clean pastel lavender-to-mist-blue gradient (#EEF2FF to #E0F2FE) with gentle studio illumination and generous outer safe margins (at least 12% padding on all edges).`,
-		leftColumnBackdrop: `Left column (55% width): clean unobstructed pastel backdrop behind typography.`,
-		badgeStyleSpec:     `Badge style: soft rounded white-frosted pill with deep indigo text (#3730A3).`,
-		titleStyleSpec:     `Main title style: bold friendly rounded sans-serif in deep navy (#1E293B).`,
-		subtitleStyleSpec:  `Subtitle style: muted slate-blue (#475569).`,
-		rightColumnSpec:    `- Right column (42% width): charming high-craft matte 3D clay and frosted acrylic miniature sculpture symbolizing the course topic, featuring smooth rounded pastel cobalt, mint, and soft coral objects with gentle studio shadows.`,
+		openingScene:     `A flat horizontal 16:10 Soft 3D Clay studio graphic poster with clean edge-to-edge artwork on a pastel lavender-to-mist-blue gradient (#EEF2FF to #E0F2FE) with gentle studio lighting and generous outer margins.`,
+		leftSidePrefix:   `On the clean pastel left side,`,
+		badgeFormat:      `a soft rounded white-frosted pill badge shows %q in deep indigo (#3730A3) above `,
+		titleFormat:      `bold friendly rounded deep navy (#1E293B) sans-serif title text reading %q`,
+		subtitleFormat:   `, followed by muted slate-blue (#475569) subtitle text reading %q.`,
+		noSubtitleSuffix: `.`,
+		rightSideFormat:  `On the right side, a matte 3D clay and frosted acrylic miniature sculpture in pastel cobalt, mint, and soft coral with gentle studio shadows symbolizes %s.`,
+		minimalRightSide: `On the right side, an abstract matte 3D clay and frosted acrylic geometric sculpture uses smooth rounded pastel cobalt, mint, and soft coral shapes with soft studio shadows.`,
+		closingStyle:     `Tactile modern graphic design, high text contrast, crisp legible lettering, no watermarks, and no extra text.`,
 	},
 	{
 		ID:              "warm_illustration",
@@ -134,14 +137,15 @@ var builtInStyles = []StyleTemplate{
 			Accent:     "#EA580C",
 			AccentSoft: "#2563EB",
 		},
-		styleHeading:         `Style: "温暖扁平插画 (Warm Editorial Illustration)" independent bookshop series cover.`,
-		backgroundSpec:       `- Background: warm cream apricot textured art paper (#FBF3E4) with subtle risograph print grain and generous outer safe margins (at least 12% padding on all edges).`,
-		leftColumnBackdrop:   `Left column (56% width): clean paper backdrop behind typography.`,
-		badgeStyleSpec:       `Badge style: warm soft terracotta pill tag with deep terracotta text (#C2410C).`,
-		titleStyleSpec:       `Main title style: bold expressive modern sans-serif in deep espresso charcoal (#231F20).`,
-		subtitleStyleSpec:    `Subtitle style: warm muted brown (#6B5B4D) with a short warm-terracotta accent bar underneath.`,
-		noSubtitleAccentSpec: `Below the title: a short warm-terracotta accent bar.`,
-		rightColumnSpec:      `- Right column (40% width): modern editorial risograph-textured flat illustration in warm terracotta orange, muted cobalt blue, sage green, and mustard yellow portraying an imaginative visual metaphor for the course subject.`,
+		openingScene:     `A flat horizontal 16:10 Warm Editorial Illustration graphic poster with clean edge-to-edge artwork on warm cream apricot textured art paper (#FBF3E4) with subtle risograph print grain and generous outer margins.`,
+		leftSidePrefix:   `On the clean warm paper left side,`,
+		badgeFormat:      `a soft terracotta pill badge shows %q in deep terracotta (#C2410C) above `,
+		titleFormat:      `bold expressive deep espresso (#231F20) sans-serif title text reading %q`,
+		subtitleFormat:   `, followed by warm muted brown (#6B5B4D) subtitle text reading %q and a short terracotta accent bar underneath.`,
+		noSubtitleSuffix: `, underlined by a short warm terracotta accent bar.`,
+		rightSideFormat:  `On the right side, a risograph-textured flat illustration in warm terracotta orange, muted cobalt blue, sage green, and mustard yellow portrays a visual metaphor for %s.`,
+		minimalRightSide: `On the right side, a risograph-textured flat abstract illustration arranges geometric organic shapes in warm terracotta orange, muted cobalt blue, sage green, and mustard yellow.`,
+		closingStyle:     `Independent bookshop poster aesthetic, high text contrast, crisp legible lettering, no watermarks, and no extra text.`,
 	},
 	{
 		ID:              "blueprint_grid",
@@ -157,13 +161,15 @@ var builtInStyles = []StyleTemplate{
 			Accent:     "#BAE6FD",
 			AccentSoft: "#38BDF8",
 		},
-		styleHeading:       `Style: "极简蓝图 (Minimalist Blueprint)" engineering handbook cover.`,
-		backgroundSpec:     `- Background: deep Prussian architectural blueprint blue (#0F3566) with crisp faint cyan-white millimeter engineering grid lines and subtle minimal corner crosshair marks. Generous outer safe margins (at least 12% padding on all edges).`,
-		leftColumnBackdrop: `Left column (56% width): clean grid behind crisp typography.`,
-		badgeStyleSpec:     `Badge style: sharp-cornered outlined engineering tag in white hairline border with pure white text.`,
-		titleStyleSpec:     `Main title style: bold razor-sharp geometric sans-serif in pure white (#FFFFFF), followed by a thin white horizontal rule.`,
-		subtitleStyleSpec:  `Subtitle style: light-cyan (#BAE6FD) below the horizontal rule.`,
-		rightColumnSpec:    `- Right column (40% width): ultra-clean architectural white-line isometric wireframe schematic illustrating the course subject using crisp geometric lines, directional flow arrows, and technical tick marks (NO tiny pseudo-labels or unreadable text inside the diagram).`,
+		openingScene:     `A flat horizontal 16:10 Minimalist Blueprint engineering handbook poster with clean edge-to-edge artwork on deep Prussian blueprint blue (#0F3566) with faint cyan-white millimeter grid lines, subtle corner crosshair marks, and generous outer margins.`,
+		leftSidePrefix:   `On the clean blueprint left side,`,
+		badgeFormat:      `a sharp-cornered white hairline outlined tag shows %q in pure white above `,
+		titleFormat:      `bold razor-sharp pure white (#FFFFFF) geometric sans-serif title text reading %q, followed by a thin white horizontal line`,
+		subtitleFormat:   ` and light-cyan (#BAE6FD) subtitle text reading %q.`,
+		noSubtitleSuffix: `.`,
+		rightSideFormat:  `On the right side, a crisp white-line isometric wireframe vector schematic with geometric lines, directional flow arrows, and technical tick marks (with no tiny labels inside) symbolizes %s.`,
+		minimalRightSide: `On the right side, a crisp white-line abstract isometric wireframe geometric diagram uses clean technical lines, arrows, and tick marks with no labels inside.`,
+		closingStyle:     `Clean technical handbook design, high text contrast, crisp legible lettering, no watermarks, and no extra text.`,
 	},
 	{
 		ID:              "cinematic_studio",
@@ -179,13 +185,15 @@ var builtInStyles = []StyleTemplate{
 			Accent:     "#D4AF6A",
 			AccentSoft: "#A8A29E",
 		},
-		styleHeading:       `Style: "质感影院 (Cinematic Studio)" prestige documentary / MasterClass series cover.`,
-		backgroundSpec:     `- Background: moody low-key obsidian studio backdrop (#121318) with subtle directional warm amber-gold and cool slate rim lighting, deep smooth dark vignette on the left for immaculate text contrast, and generous outer safe margins (at least 12% padding on all edges).`,
-		leftColumnBackdrop: `Left column (58% width): refined dark backdrop behind typography.`,
-		badgeStyleSpec:     `Badge style: muted champagne-gold hairline outlined pill (#D4AF6A).`,
-		titleStyleSpec:     `Main title style: bold authoritative modern sans-serif in crisp warm-white (#F8F6F0), followed by a delicate champagne-gold horizontal rule.`,
-		subtitleStyleSpec:  `Subtitle style: warm-gray (#A8A29E) below the horizontal rule.`,
-		rightColumnSpec:    `- Right column (42% width): prestige macro studio still-life photography with cinematic shallow depth of field depicting symbolic physical objects, dark anodized metal, glass prisms, and warm golden-amber light trails inspired by the course topic.`,
+		openingScene:     `A flat horizontal 16:10 Cinematic Studio documentary graphic poster with clean edge-to-edge artwork on a low-key obsidian studio backdrop (#121318) with subtle warm amber-gold and cool slate rim lighting, a smooth dark vignette on the left, and generous outer margins.`,
+		leftSidePrefix:   `On the dark uncluttered left side,`,
+		badgeFormat:      `a muted champagne-gold hairline outlined pill badge (#D4AF6A) shows %q above `,
+		titleFormat:      `bold authoritative warm-white (#F8F6F0) modern sans-serif title text reading %q, followed by a delicate champagne-gold horizontal line`,
+		subtitleFormat:   ` and warm-gray (#A8A29E) subtitle text reading %q.`,
+		noSubtitleSuffix: `.`,
+		rightSideFormat:  `On the right side, macro studio still-life lighting with shallow depth of field depicts dark anodized metal, glass prisms, and warm golden-amber light trails symbolizing %s.`,
+		minimalRightSide: `On the right side, macro studio lighting with shallow depth of field showcases dark anodized geometric metal forms, glass prisms, and warm golden-amber light trails.`,
+		closingStyle:     `Prestige MasterClass poster aesthetic, high text contrast, crisp legible lettering, no watermarks, and no extra text.`,
 	},
 }
 
@@ -207,16 +215,25 @@ func GetStyle(styleID string) (StyleTemplate, bool) {
 	return StyleTemplate{}, false
 }
 
-// BuildPrompt renders a cohesive end-to-end course cover prompt combining the selected
-// template's locked art direction with the specific course's text and thematic cues.
+// BuildPrompt renders a concise, single-paragraph cover prompt combining the selected
+// template's locked art direction with the course title, optional badge/subtitle, tags, and extra cue.
 func BuildPrompt(style StyleTemplate, input PromptInput) string {
+	return buildSingleParagraphPrompt(style, input, false)
+}
+
+// BuildMinimalPrompt renders a stripped-down fallback cover prompt using only the style's
+// abstract visual motif and the exact left-column typography, omitting topic cues, tags, and extra prompts.
+func BuildMinimalPrompt(style StyleTemplate, input PromptInput) string {
+	return buildSingleParagraphPrompt(style, input, true)
+}
+
+func buildSingleParagraphPrompt(style StyleTemplate, input PromptInput, minimal bool) string {
 	title := strings.TrimSpace(input.Title)
 	if title == "" {
 		title = "精选课程"
 	}
 	subtitle := strings.TrimSpace(input.Subtitle)
 	badge := strings.TrimSpace(input.Badge)
-	overview := truncateRunes(strings.TrimSpace(input.Overview), maxOverviewRunes)
 	extra := strings.TrimSpace(input.ExtraPrompt)
 
 	var tags []string
@@ -229,79 +246,37 @@ func BuildPrompt(style StyleTemplate, input PromptInput) string {
 		}
 	}
 
-	var chapters []string
-	for _, ch := range input.ChapterTitles {
-		if trimmed := strings.TrimSpace(ch); trimmed != "" {
-			chapters = append(chapters, trimmed)
-			if len(chapters) >= maxChaptersHint {
-				break
-			}
+	var left strings.Builder
+	left.WriteString(style.leftSidePrefix)
+	left.WriteByte(' ')
+	if badge != "" && style.badgeFormat != "" {
+		left.WriteString(fmt.Sprintf(style.badgeFormat, badge))
+	}
+	left.WriteString(fmt.Sprintf(style.titleFormat, title))
+	if subtitle != "" && style.subtitleFormat != "" {
+		left.WriteString(fmt.Sprintf(style.subtitleFormat, subtitle))
+	} else {
+		left.WriteString(style.noSubtitleSuffix)
+	}
+
+	var right string
+	if minimal {
+		right = style.minimalRightSide
+	} else {
+		topicCue := fmt.Sprintf("the course topic %q", title)
+		if len(tags) > 0 {
+			topicCue += fmt.Sprintf(" (%s)", strings.Join(tags, ", "))
 		}
-	}
-
-	var b strings.Builder
-	b.WriteString("Create a brand-new standalone horizontal 16:10 digital course cover illustration from scratch (flat edge-to-edge graphic poster, no physical book mockup, no outer frame, no border shadows).\n\n")
-	b.WriteString(style.styleHeading)
-	b.WriteByte('\n')
-	b.WriteString(style.backgroundSpec)
-	b.WriteString("\n- ")
-	b.WriteString(style.leftColumnBackdrop)
-	if badge != "" && style.badgeStyleSpec != "" {
-		b.WriteByte(' ')
-		b.WriteString(style.badgeStyleSpec)
-	}
-	b.WriteByte(' ')
-	b.WriteString(style.titleStyleSpec)
-	if subtitle != "" && style.subtitleStyleSpec != "" {
-		b.WriteByte(' ')
-		b.WriteString(style.subtitleStyleSpec)
-	} else if style.noSubtitleAccentSpec != "" {
-		b.WriteByte(' ')
-		b.WriteString(style.noSubtitleAccentSpec)
-	}
-	b.WriteByte('\n')
-	b.WriteString(style.rightColumnSpec)
-	b.WriteString("\n\nExact Text to Render in the Left Column (render ONLY these exact strings crisply, with zero typos and no extra words, badges, subtitles, or labels anywhere in the poster):\n")
-	if badge != "" {
-		b.WriteString(fmt.Sprintf("- Top badge pill: %q\n", badge))
-	}
-	b.WriteString(fmt.Sprintf("- Main title (large bold headline, wrapped cleanly across 1-3 lines): %q\n", title))
-	if subtitle != "" {
-		b.WriteString(fmt.Sprintf("- Subtitle below divider: %q\n", subtitle))
-	}
-
-	b.WriteString("\nRight-Side Visual Theme (illustrate a symbolic emblem on the right inspired by these subjects; draw purely visual shapes and motifs, never write these keywords as text):\n")
-	b.WriteString(fmt.Sprintf("- Subject: %s\n", title))
-	if len(tags) > 0 {
-		b.WriteString(fmt.Sprintf("- Domain tags: %s\n", strings.Join(tags, ", ")))
-	}
-	if len(chapters) > 0 {
-		b.WriteString(fmt.Sprintf("- Key module themes: %s\n", strings.Join(chapters, "; ")))
-	}
-	if overview != "" {
-		b.WriteString(fmt.Sprintf("- Course focus: %s\n", overview))
-	}
-	if extra != "" {
-		b.WriteString(fmt.Sprintf("- Extra visual elements: %s\n", extra))
-	}
-
-	b.WriteString("\nVisual Quality: high legibility with strong contrast and an uncluttered backdrop behind the left-column typography; no watermarks, no frames, and no random decorative English/Chinese gibberish text.")
-	return b.String()
-}
-
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 || s == "" {
-		return ""
-	}
-	if utf8.RuneCountInString(s) <= maxRunes {
-		return s
-	}
-	count := 0
-	for idx := range s {
-		if count == maxRunes {
-			return s[:idx] + "…"
+		if extra != "" {
+			topicCue += fmt.Sprintf(", featuring %s", extra)
 		}
-		count++
+		right = fmt.Sprintf(style.rightSideFormat, topicCue)
 	}
-	return s
+
+	return strings.Join([]string{
+		style.openingScene,
+		left.String(),
+		right,
+		style.closingStyle,
+	}, " ")
 }

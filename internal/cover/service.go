@@ -218,12 +218,8 @@ func (s *Service) GenerateCourseCover(ctx context.Context, courseID string, inpu
 		return nil, fmt.Errorf("%w: unknown cover style %q", ErrInvalidInput, styleID)
 	}
 
-	prompt := buildCoursePrompt(course, style, input)
 	gen := s.newGenerator(cfg.Image)
-	img, err := gen.GenerateImage(ctx, ai.ImageGenerateRequest{
-		Prompt: prompt,
-		Size:   cfg.Image.Size,
-	})
+	img, prompt, err := s.generateCourseImage(ctx, gen, course, style, input, cfg.Image.Size)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUpstream, err)
 	}
@@ -428,17 +424,12 @@ func (s *Service) runBatch(
 			continue
 		}
 
-		prompt := buildCoursePrompt(course, style, GenerateCoverInput{
+		img, prompt, err := s.generateCourseImage(ctx, gen, course, style, GenerateCoverInput{
 			StyleID:      style.ID,
 			Title:        course.Title,
 			IncludeBadge: includeBadge,
 			ExtraPrompt:  extraPrompt,
-		})
-
-		img, err := gen.GenerateImage(ctx, ai.ImageGenerateRequest{
-			Prompt: prompt,
-			Size:   cfg.Image.Size,
-		})
+		}, cfg.Image.Size)
 		if err != nil {
 			if ctx.Err() != nil || s.isJobCancelled(jobID) {
 				s.finishBatchCancelled(jobID)
@@ -528,7 +519,61 @@ func (s *Service) recordBatchFailure(jobID string, target batchCourseTarget, err
 	})
 }
 
-func buildCoursePrompt(course *catalog.CourseDetail, style StyleTemplate, input GenerateCoverInput) string {
+func (s *Service) generateCourseImage(
+	ctx context.Context,
+	gen ai.ImageGenerator,
+	course *catalog.CourseDetail,
+	style StyleTemplate,
+	input GenerateCoverInput,
+	size string,
+) (*ai.GeneratedImage, string, error) {
+	promptInput := buildCoursePromptInput(course, input)
+	prompt := BuildPrompt(style, promptInput)
+	img, err := gen.GenerateImage(ctx, ai.ImageGenerateRequest{
+		Prompt: prompt,
+		Size:   size,
+	})
+	if err == nil {
+		return img, prompt, nil
+	}
+	if ctx.Err() == nil && isReferenceImagePromptError(err) {
+		minimalPrompt := BuildMinimalPrompt(style, promptInput)
+		if minimalPrompt != prompt {
+			img2, err2 := gen.GenerateImage(ctx, ai.ImageGenerateRequest{
+				Prompt: minimalPrompt,
+				Size:   size,
+			})
+			if err2 == nil {
+				return img2, minimalPrompt, nil
+			}
+			return nil, "", err2
+		}
+	}
+	return nil, "", err
+}
+
+func isReferenceImagePromptError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, kw := range []string{
+		"reference image",
+		"/images/edits",
+		"images/edits",
+		"attach the image",
+		"可供编辑",
+		"原始图片",
+		"需要编辑的图片",
+	} {
+		if strings.Contains(msg, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildCoursePromptInput(course *catalog.CourseDetail, input GenerateCoverInput) PromptInput {
 	title := strings.TrimSpace(input.Title)
 	if title == "" {
 		title = strings.TrimSpace(course.Title)
@@ -561,7 +606,7 @@ func buildCoursePrompt(course *catalog.CourseDetail, style StyleTemplate, input 
 		}
 	}
 
-	return BuildPrompt(style, PromptInput{
+	return PromptInput{
 		Title:         title,
 		Subtitle:      subtitle,
 		Badge:         badge,
@@ -569,7 +614,7 @@ func buildCoursePrompt(course *catalog.CourseDetail, style StyleTemplate, input 
 		Tags:          course.Tags,
 		ChapterTitles: chapters,
 		ExtraPrompt:   input.ExtraPrompt,
-	})
+	}
 }
 
 func cloneBatchStatus(st BatchCoverStatus) BatchCoverStatus {

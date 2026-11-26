@@ -176,6 +176,15 @@ func TestBuildPrompt_NoEditOrReferenceTriggers(t *testing.T) {
 		regexp.MustCompile(`(?i)\bremove\b`),
 		regexp.MustCompile(`(?i)\boriginal\b`),
 		regexp.MustCompile(`(?i)on the image`),
+		regexp.MustCompile(`(?i)from scratch`),
+		regexp.MustCompile(`(?i)inspired by`),
+	}
+	bannedSpecMarkers := []string{
+		"Style:",
+		"Subject:",
+		"Exact Text",
+		"Right-Side Visual Theme",
+		"Visual Quality:",
 	}
 
 	cases := []struct {
@@ -189,9 +198,9 @@ func TestBuildPrompt_NoEditOrReferenceTriggers(t *testing.T) {
 				Title:         "ICT 2022 交易带教课（中文系列）",
 				Subtitle:      "讲师 · ICT",
 				Badge:         "24 节 · 4 章",
-				Overview:      "系统讲解流动性与市场结构",
+				Overview:      "包含参考图片 screenshot reference 不应进入提示词",
 				Tags:          []string{"交易", "价格行为"},
-				ChapterTitles: []string{"市场结构", "流动性扫荡"},
+				ChapterTitles: []string{"参考截图 chapter reference"},
 				ExtraPrompt:   "简约金融线条",
 			},
 			empty: false,
@@ -207,24 +216,55 @@ func TestBuildPrompt_NoEditOrReferenceTriggers(t *testing.T) {
 
 	for _, st := range cover.ListStyles() {
 		for _, tc := range cases {
-			t.Run(st.ID+"/"+tc.name, func(t *testing.T) {
-				prompt := cover.BuildPrompt(st, tc.input)
-				if !strings.HasPrefix(prompt, "Create a brand-new standalone") {
-					t.Fatalf("prompt does not start with standalone text-to-image instruction:\n%s", prompt)
+			for _, minimal := range []bool{false, true} {
+				mode := "standard"
+				if minimal {
+					mode = "minimal"
 				}
-				for _, re := range forbiddenPatterns {
-					if re.MatchString(prompt) {
-						t.Fatalf("prompt matched forbidden trigger %q:\n%s", re.String(), prompt)
+				t.Run(st.ID+"/"+tc.name+"/"+mode, func(t *testing.T) {
+					var prompt string
+					if minimal {
+						prompt = cover.BuildMinimalPrompt(st, tc.input)
+					} else {
+						prompt = cover.BuildPrompt(st, tc.input)
 					}
-				}
-				if tc.empty {
-					for _, banned := range []string{"Badge style:", "Subtitle style:", "Top badge pill:", "Subtitle below divider:"} {
-						if strings.Contains(prompt, banned) {
-							t.Fatalf("empty badge/subtitle prompt unexpectedly contains %q:\n%s", banned, prompt)
+					if !strings.HasPrefix(prompt, "A flat horizontal 16:10 ") {
+						t.Fatalf("prompt does not start with flat horizontal 16:10 visual description:\n%s", prompt)
+					}
+					if strings.Contains(prompt, "\n") {
+						t.Fatalf("expected single-paragraph prompt without newlines:\n%s", prompt)
+					}
+					for _, marker := range bannedSpecMarkers {
+						if strings.Contains(prompt, marker) {
+							t.Fatalf("prompt unexpectedly contains spec-sheet marker %q:\n%s", marker, prompt)
 						}
 					}
-				}
-			})
+					for _, re := range forbiddenPatterns {
+						if re.MatchString(prompt) {
+							t.Fatalf("prompt matched forbidden trigger %q:\n%s", re.String(), prompt)
+						}
+					}
+					for _, leaked := range []string{"参考图片", "screenshot", "参考截图"} {
+						if strings.Contains(prompt, leaked) {
+							t.Fatalf("prompt leaked raw overview/chapter text %q:\n%s", leaked, prompt)
+						}
+					}
+					if tc.empty {
+						for _, banned := range []string{"pill badge", "outlined tag", "subtitle text"} {
+							if strings.Contains(prompt, banned) {
+								t.Fatalf("empty badge/subtitle prompt unexpectedly contains %q:\n%s", banned, prompt)
+							}
+						}
+					}
+					if minimal && !tc.empty {
+						for _, extraOnly := range []string{"简约金融线条", "价格行为"} {
+							if strings.Contains(prompt, extraOnly) {
+								t.Fatalf("minimal prompt unexpectedly contains %q:\n%s", extraOnly, prompt)
+							}
+						}
+					}
+				})
+			}
 		}
 	}
 }
@@ -494,4 +534,146 @@ func TestService_BatchGenerateAndCancel(t *testing.T) {
 		t.Fatalf("expected cancelled status, got %+v", cancelled)
 	}
 	svcBlock.Wait()
+}
+
+func TestService_ReferenceImageRefusalFallsBackToMinimalPrompt(t *testing.T) {
+	dataDir, cat, lib1, lib2 := setupCoverTestEnv(t)
+	ctx := context.Background()
+
+	cSingle, err := cat.CreateCourse(ctx, catalog.CreateCourseInput{
+		LibraryID:  lib1.ID,
+		Title:      "ICT 2022 交易带教课（中文系列）",
+		Instructor: "ICT",
+		Tags:       []string{"价格行为"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCourse cSingle: %v", err)
+	}
+	cBatch, err := cat.CreateCourse(ctx, catalog.CreateCourseInput{
+		LibraryID: lib1.ID,
+		Title:     "Fabio",
+		Tags:      []string{"OrderFlow"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCourse cBatch: %v", err)
+	}
+	cOtherErr, err := cat.CreateCourse(ctx, catalog.CreateCourseInput{
+		LibraryID: lib2.ID,
+		Title:     "NonRefErrorCourse",
+		Tags:      []string{"TagX"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCourse cOtherErr: %v", err)
+	}
+
+	pngData := makePNG(t, 64)
+	refErr := errors.New("ai: image upstream returned HTTP 400: aixoras.com: 400 Bad Request: The prompt refers to a reference image, but the request did not include one. Attach the image (for example via /v1/images/edits) or remove the reference, then try again.")
+	gen := &fakeImageGen{
+		fn: func(ctx context.Context, req ai.ImageGenerateRequest) (*ai.GeneratedImage, error) {
+			if strings.Contains(req.Prompt, "简约金融图表") || strings.Contains(req.Prompt, "OrderFlow") {
+				return nil, refErr
+			}
+			return &ai.GeneratedImage{
+				Data:        pngData,
+				ContentType: "image/png",
+				Ext:         ".png",
+				Width:       1536,
+				Height:      1024,
+			}, nil
+		},
+	}
+
+	svc := cover.NewService(cover.Options{
+		DataDir: dataDir,
+		Catalog: cat,
+		ConfigLoader: func(ctx context.Context) (cover.EffectiveImageSettings, error) {
+			return cover.EffectiveImageSettings{
+				Configured:     true,
+				DefaultStyleID: "editorial_modern",
+				Image:          ai.ImageConfig{Protocol: ai.ImageProtocolOpenAIImages, BaseURL: "https://api.example.com/v1", Model: "gpt-image-2.6-sunburst"},
+			}, nil
+		},
+		GeneratorFactory: func(cfg ai.ImageConfig) ai.ImageGenerator { return gen },
+	})
+	t.Cleanup(svc.Wait)
+
+	// 1. Single-course cover generation falls back once to BuildMinimalPrompt
+	singleRes, err := svc.GenerateCourseCover(ctx, cSingle.ID, cover.GenerateCoverInput{
+		StyleID:     "editorial_modern",
+		ExtraPrompt: "简约金融图表",
+	})
+	if err != nil {
+		t.Fatalf("GenerateCourseCover fallback failed: %v", err)
+	}
+	gen.mu.Lock()
+	singlePrompts := append([]string(nil), gen.prompts...)
+	gen.prompts = nil
+	gen.mu.Unlock()
+	if len(singlePrompts) != 2 {
+		t.Fatalf("expected 2 attempts for single course, got %d: %v", len(singlePrompts), singlePrompts)
+	}
+	if !strings.Contains(singlePrompts[0], "简约金融图表") || strings.Contains(singlePrompts[1], "简约金融图表") {
+		t.Fatalf("unexpected single fallback prompts: %+v", singlePrompts)
+	}
+	if singleRes.Cover.Prompt != singlePrompts[1] {
+		t.Fatalf("expected saved cover prompt to match minimal fallback prompt")
+	}
+
+	// 2. Batch generation (cSingle already has cover so skipped; cBatch triggers fallback)
+	if _, err := svc.StartBatch(ctx, cover.BatchCoverInput{
+		LibraryID: lib1.ID,
+		Mode:      "missing_only",
+		StyleID:   "editorial_modern",
+	}); err != nil {
+		t.Fatalf("StartBatch: %v", err)
+	}
+	svc.Wait()
+
+	st := svc.GetBatchStatus()
+	if st.Running || st.State != "completed" || st.Completed != 1 || st.Failed != 0 || st.Skipped != 1 {
+		t.Fatalf("unexpected batch status after fallback: %+v", st)
+	}
+	gen.mu.Lock()
+	batchPrompts := append([]string(nil), gen.prompts...)
+	gen.mu.Unlock()
+	if len(batchPrompts) != 2 {
+		t.Fatalf("expected 2 attempts for batch course, got %d: %v", len(batchPrompts), batchPrompts)
+	}
+	if !strings.Contains(batchPrompts[0], "OrderFlow") || strings.Contains(batchPrompts[1], "OrderFlow") {
+		t.Fatalf("unexpected batch fallback prompts: %+v", batchPrompts)
+	}
+	batchCourse, err := cat.GetCourseDetail(ctx, cBatch.ID)
+	if err != nil || len(batchCourse.Covers) != 1 || batchCourse.Covers[0].Prompt != batchPrompts[1] {
+		t.Fatalf("expected batch saved cover prompt to match minimal fallback prompt, course=%+v err=%v", batchCourse, err)
+	}
+
+	// 3. Non-reference error fails immediately without retrying
+	errGen := &fakeImageGen{
+		fn: func(ctx context.Context, req ai.ImageGenerateRequest) (*ai.GeneratedImage, error) {
+			return nil, errors.New("simulated 500 error")
+		},
+	}
+	errSvc := cover.NewService(cover.Options{
+		DataDir: dataDir,
+		Catalog: cat,
+		ConfigLoader: func(ctx context.Context) (cover.EffectiveImageSettings, error) {
+			return cover.EffectiveImageSettings{
+				Configured:     true,
+				DefaultStyleID: "editorial_modern",
+				Image:          ai.ImageConfig{Protocol: ai.ImageProtocolOpenAIImages, BaseURL: "https://api.example.com/v1", Model: "gpt-image-2.6-sunburst"},
+			}, nil
+		},
+		GeneratorFactory: func(cfg ai.ImageConfig) ai.ImageGenerator { return errGen },
+	})
+	t.Cleanup(errSvc.Wait)
+
+	if _, err := errSvc.GenerateCourseCover(ctx, cOtherErr.ID, cover.GenerateCoverInput{StyleID: "editorial_modern"}); err == nil {
+		t.Fatal("expected non-reference error to fail")
+	}
+	errGen.mu.Lock()
+	errCalls := len(errGen.prompts)
+	errGen.mu.Unlock()
+	if errCalls != 1 {
+		t.Fatalf("expected 1 attempt for non-reference error, got %d", errCalls)
+	}
 }
