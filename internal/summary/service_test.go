@@ -143,6 +143,13 @@ func seedTestCourse(t *testing.T, conn *sql.DB, courseTitle string, lessons []le
 			}
 		}
 
+		fileSize := int64(1024)
+		modTimeStr := now
+		if st, statErr := os.Stat(absMedia); statErr == nil {
+			fileSize = st.Size()
+			modTimeStr = st.ModTime().UTC().Format(time.RFC3339Nano)
+		}
+
 		streamsJSON := opts.StreamsJSON
 		if streamsJSON == "" {
 			streamsJSON = `[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"}]`
@@ -162,8 +169,8 @@ func seedTestCourse(t *testing.T, conn *sql.DB, courseTitle string, lessons []le
 				id, source_id, relative_path, file_name, file_size, mod_time, status,
 				duration_ms, container, video_codec, audio_codec, width, height, bitrate,
 				streams_json, thumbnail_path, probed_at, created_at, updated_at
-			) VALUES (?, ?, ?, ?, 1024, ?, 'active', ?, 'mp4', ?, ?, 1920, 1080, 1000000, ?, '', ?, ?, ?)`,
-			mediaID, sourceID, relPath, filepath.Base(relPath), now,
+			) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'mp4', ?, ?, 1920, 1080, 1000000, ?, '', ?, ?, ?)`,
+			mediaID, sourceID, relPath, filepath.Base(relPath), fileSize, modTimeStr,
 			durationMs, videoCodec, audioCodec, streamsJSON, now, now, now,
 		); err != nil {
 			t.Fatalf("insert media_file: %v", err)
@@ -1509,6 +1516,437 @@ func TestCourseBatchMissingOnlyCancelDuringSkipCheck(t *testing.T) {
 			t.Fatalf("iter %d CurrentStage = %q after CancelCourseBatch returned %q, want %q",
 				iter, st.BatchJob.CurrentStage, cancelRes.CurrentStage, summary.StageCancelled)
 		}
+	}
+}
+
+func TestASRChunkCheckpointResumeAndAtomicCleanup(t *testing.T) {
+	conn, dataDir, catSvc, mediaSvc := openTestEnv(t)
+	setAppSettings(t, conn, map[string]string{
+		"ai_base_url":     "https://mock-llm.local/v1",
+		"ai_api_key":      "sk-llm",
+		"ai_model":        "gpt-4o-mini",
+		"ai_asr_base_url": "http://asr.local/v1",
+		"ai_asr_model":    "whisper-1",
+	})
+
+	courseID, lessonIDs, mediaIDs := seedTestCourse(t, conn, "分片断点续转课程", []lessonSeedOpts{
+		{RelPath: "long_resume.mp4", DurationMs: 3600_000},
+	})
+	lessonID, mediaID := lessonIDs[0], mediaIDs[0]
+
+	extractor := &fakeAudioExtractor{
+		dataDir: dataDir,
+		chunks: []summary.AudioChunk{
+			{OffsetSec: 0, DurationSec: 1200},
+			{OffsetSec: 1200, DurationSec: 1200},
+			{OffsetSec: 2400, DurationSec: 1200},
+		},
+	}
+
+	var mu sync.Mutex
+	var asrCalls, llmCalls int
+	failSecondChunk := true
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasSuffix(req.URL.Path, "/audio/transcriptions") {
+			asrCalls++
+			raw, _ := io.ReadAll(req.Body)
+			bodyStr := string(raw)
+			switch {
+			case strings.Contains(bodyStr, "fake-mp3-0"):
+				return jsonResponse(http.StatusOK, map[string]any{
+					"language": "zh",
+					"segments": []map[string]any{{"start": 1.0, "end": 4.0, "text": "第一片内容"}},
+				}), nil
+			case strings.Contains(bodyStr, "fake-mp3-1"):
+				if failSecondChunk {
+					failSecondChunk = false
+					return jsonResponse(http.StatusInternalServerError, map[string]any{
+						"error": map[string]any{"message": "asr chunk 2 transient error"},
+					}), nil
+				}
+				return jsonResponse(http.StatusOK, map[string]any{
+					"language": "zh",
+					"segments": []map[string]any{{"start": 2.0, "end": 5.0, "text": "第二片内容"}},
+				}), nil
+			default:
+				return jsonResponse(http.StatusOK, map[string]any{
+					"language": "zh",
+					"segments": []map[string]any{{"start": 3.0, "end": 6.0, "text": "第三片内容"}},
+				}), nil
+			}
+		}
+		if strings.HasSuffix(req.URL.Path, "/chat/completions") {
+			llmCalls++
+			return jsonResponse(http.StatusOK, map[string]any{
+				"choices": []map[string]any{{
+					"message": map[string]any{
+						"role": "assistant",
+						"content": `{
+							"overview": "断点续转后的完整总结",
+							"outline": [{"title": "全节", "summary": "概览", "start_sec": 1}],
+							"timeline": [{"start_sec": 1, "end_sec": 2406, "title": "完整分段", "summary": "内容", "key_points": ["要点"]}]
+						}`,
+					},
+				}},
+			}), nil
+		}
+		return jsonResponse(http.StatusNotFound, nil), nil
+	})
+
+	svc, _ := newTestService(t, conn, dataDir, catSvc, mediaSvc, rt, func(o *summary.Options) {
+		o.AudioExtractor = extractor
+	})
+
+	// Run 1: chunk 0 succeeds, chunk 1 fails -> 1 checkpoint saved, 0 LLM calls.
+	if _, err := svc.StartLessonSummary(context.Background(), lessonID, summary.GenerateLessonOptions{}); err != nil {
+		t.Fatalf("StartLessonSummary run 1 failed: %v", err)
+	}
+	svc.Wait()
+
+	if asrCalls != 2 || llmCalls != 0 {
+		t.Fatalf("after run 1: asrCalls=%d want 2, llmCalls=%d want 0", asrCalls, llmCalls)
+	}
+
+	var savedChunkCount int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM media_transcript_chunks WHERE media_file_id = ?`, mediaID).Scan(&savedChunkCount); err != nil {
+		t.Fatalf("query checkpoints: %v", err)
+	}
+	if savedChunkCount != 1 {
+		t.Fatalf("savedChunkCount = %d, want 1", savedChunkCount)
+	}
+
+	st1, err := svc.GetLessonSummaryState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("GetLessonSummaryState failed: %v", err)
+	}
+	if st1.Capabilities.PartialTranscriptChunks != 1 || st1.Capabilities.PartialTranscriptTotal != 3 {
+		t.Fatalf("unexpected partial capabilities: %+v", st1.Capabilities)
+	}
+
+	cs1, err := svc.GetCourseSummaryStatus(context.Background(), courseID)
+	if err != nil {
+		t.Fatalf("GetCourseSummaryStatus failed: %v", err)
+	}
+	if cs1.Counts.PartialLessons != 1 || cs1.Counts.MissingTranscript != 1 || cs1.Counts.TranscriptReady != 0 {
+		t.Fatalf("unexpected course counts during partial checkpoint: %+v", cs1.Counts)
+	}
+	if len(cs1.Lessons) != 1 || cs1.Lessons[0].TranscriptStatus != "partial" || cs1.Lessons[0].TranscribedChunks != 1 || cs1.Lessons[0].TotalChunks != 3 {
+		t.Fatalf("unexpected lesson pipeline status: %+v", cs1.Lessons)
+	}
+
+	// Run 2: skips chunk 0, only calls ASR for chunk 1 and chunk 2 -> total ASR calls = 4.
+	if _, err := svc.StartLessonSummary(context.Background(), lessonID, summary.GenerateLessonOptions{}); err != nil {
+		t.Fatalf("StartLessonSummary run 2 failed: %v", err)
+	}
+	svc.Wait()
+
+	if asrCalls != 4 || llmCalls != 1 {
+		t.Fatalf("after run 2: asrCalls=%d want 4 (resumed), llmCalls=%d want 1", asrCalls, llmCalls)
+	}
+
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM media_transcript_chunks WHERE media_file_id = ?`, mediaID).Scan(&savedChunkCount); err != nil {
+		t.Fatalf("query checkpoints after completion: %v", err)
+	}
+	if savedChunkCount != 0 {
+		t.Fatalf("expected checkpoints cleaned up after finalization, got %d", savedChunkCount)
+	}
+
+	var vtt string
+	if err := conn.QueryRow(`SELECT content_vtt FROM media_transcripts WHERE media_file_id = ?`, mediaID).Scan(&vtt); err != nil {
+		t.Fatalf("query finalized transcript: %v", err)
+	}
+	cues := ai.ParseSubtitleCues(vtt)
+	if len(cues) != 3 || cues[0].Text != "第一片内容" || cues[1].StartSec != 1202 || cues[2].StartSec != 2403 {
+		t.Fatalf("unexpected merged cues after resume: %+v (vtt=%q)", cues, vtt)
+	}
+}
+
+func TestASRSilentChunkPersistedAndAllEmptyCleansUp(t *testing.T) {
+	conn, dataDir, catSvc, mediaSvc := openTestEnv(t)
+	setAppSettings(t, conn, map[string]string{
+		"ai_base_url":     "https://mock-llm.local/v1",
+		"ai_api_key":      "sk-llm",
+		"ai_model":        "gpt-4o-mini",
+		"ai_asr_base_url": "http://asr.local/v1",
+		"ai_asr_model":    "whisper-1",
+	})
+
+	_, lessonIDs, mediaIDs := seedTestCourse(t, conn, "静音分片测试", []lessonSeedOpts{
+		{RelPath: "silent_then_speech.mp4", DurationMs: 2400_000},
+		{RelPath: "all_silent.mp4", DurationMs: 1200_000},
+	})
+
+	// Case 1: chunk 0 is silent (empty text/cues), chunk 1 fails once then succeeds on retry.
+	ext1 := &fakeAudioExtractor{
+		dataDir: dataDir,
+		chunks: []summary.AudioChunk{
+			{OffsetSec: 0, DurationSec: 1200},
+			{OffsetSec: 1200, DurationSec: 1200},
+		},
+	}
+	var mu sync.Mutex
+	var asrCalls1 int
+	failOnce := true
+	rt1 := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasSuffix(req.URL.Path, "/audio/transcriptions") {
+			asrCalls1++
+			raw, _ := io.ReadAll(req.Body)
+			if strings.Contains(string(raw), "fake-mp3-0") {
+				return jsonResponse(http.StatusOK, map[string]any{"language": "zh", "text": "", "segments": []any{}}), nil
+			}
+			if failOnce {
+				failOnce = false
+				return jsonResponse(http.StatusBadGateway, map[string]any{"error": map[string]any{"message": "temp err"}}), nil
+			}
+			return jsonResponse(http.StatusOK, map[string]any{
+				"language": "zh",
+				"segments": []map[string]any{{"start": 5.0, "end": 10.0, "text": "第二片人声"}},
+			}), nil
+		}
+		return jsonResponse(http.StatusOK, map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": `{"overview":"总结","outline":[{"title":"段落","summary":"描述","start_sec":1205}],"timeline":[{"start_sec":1205,"end_sec":1210,"title":"人声段","summary":"内容","key_points":["要点"]}]}`,
+				},
+			}},
+		}), nil
+	})
+	svc1, _ := newTestService(t, conn, dataDir, catSvc, mediaSvc, rt1, func(o *summary.Options) {
+		o.AudioExtractor = ext1
+	})
+	if _, err := svc1.StartLessonSummary(context.Background(), lessonIDs[0], summary.GenerateLessonOptions{}); err != nil {
+		t.Fatalf("run 1 failed: %v", err)
+	}
+	svc1.Wait()
+	if asrCalls1 != 2 {
+		t.Fatalf("asrCalls1 after fail = %d, want 2", asrCalls1)
+	}
+	var cpCues string
+	if err := conn.QueryRow(`SELECT cues_json FROM media_transcript_chunks WHERE media_file_id = ? AND chunk_index = 0`, mediaIDs[0]).Scan(&cpCues); err != nil {
+		t.Fatalf("expected silent chunk 0 checkpoint persisted: %v", err)
+	}
+	if _, err := svc1.StartLessonSummary(context.Background(), lessonIDs[0], summary.GenerateLessonOptions{}); err != nil {
+		t.Fatalf("run 2 failed: %v", err)
+	}
+	svc1.Wait()
+	if asrCalls1 != 3 {
+		t.Fatalf("expected silent chunk 0 skipped on retry (total asrCalls1 = %d, want 3)", asrCalls1)
+	}
+
+	// Case 2: all chunks return empty -> fails with empty_transcript AND cleans up checkpoints.
+	ext2 := &fakeAudioExtractor{
+		dataDir: dataDir,
+		chunks:  []summary.AudioChunk{{OffsetSec: 0, DurationSec: 1200}},
+	}
+	rt2 := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, map[string]any{"language": "zh", "text": "", "segments": []any{}}), nil
+	})
+	svc2, _ := newTestService(t, conn, dataDir, catSvc, mediaSvc, rt2, func(o *summary.Options) {
+		o.AudioExtractor = ext2
+	})
+	if _, err := svc2.StartLessonSummary(context.Background(), lessonIDs[1], summary.GenerateLessonOptions{}); err != nil {
+		t.Fatalf("all-empty start failed: %v", err)
+	}
+	svc2.Wait()
+	st2, _ := svc2.GetLessonSummaryState(context.Background(), lessonIDs[1])
+	if st2.Job == nil || st2.Job.Stage != summary.StageFailed || st2.Job.ErrorCode != "empty_transcript" {
+		t.Fatalf("expected empty_transcript failure, got %+v", st2.Job)
+	}
+	var leftover int
+	_ = conn.QueryRow(`SELECT COUNT(*) FROM media_transcript_chunks WHERE media_file_id = ?`, mediaIDs[1]).Scan(&leftover)
+	if leftover != 0 {
+		t.Fatalf("expected 0 checkpoint rows after empty_transcript, got %d", leftover)
+	}
+}
+
+func TestASRCheckpointInvalidatedOnDiskFileReplacementAndForceRetranscribe(t *testing.T) {
+	conn, dataDir, catSvc, mediaSvc := openTestEnv(t)
+	setAppSettings(t, conn, map[string]string{
+		"ai_base_url":     "https://mock-llm.local/v1",
+		"ai_api_key":      "sk-llm",
+		"ai_model":        "gpt-4o-mini",
+		"ai_asr_base_url": "http://asr.local/v1",
+		"ai_asr_model":    "whisper-1",
+	})
+
+	_, lessonIDs, mediaIDs := seedTestCourse(t, conn, "文件替换失效断点", []lessonSeedOpts{
+		{RelPath: "replaceable.mp4", DurationMs: 2400_000},
+	})
+	lessonID, mediaID := lessonIDs[0], mediaIDs[0]
+
+	var rootPath string
+	if err := conn.QueryRow(`SELECT ss.root_path FROM media_files mf JOIN storage_sources ss ON ss.id = mf.source_id WHERE mf.id = ?`, mediaID).Scan(&rootPath); err != nil {
+		t.Fatalf("query root_path: %v", err)
+	}
+	absMedia := filepath.Join(rootPath, "replaceable.mp4")
+
+	ext := &fakeAudioExtractor{
+		dataDir: dataDir,
+		chunks: []summary.AudioChunk{
+			{OffsetSec: 0, DurationSec: 1200},
+			{OffsetSec: 1200, DurationSec: 1200},
+		},
+	}
+
+	var mu sync.Mutex
+	var asrCalls int
+	failSecond := true
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasSuffix(req.URL.Path, "/audio/transcriptions") {
+			asrCalls++
+			raw, _ := io.ReadAll(req.Body)
+			if strings.Contains(string(raw), "fake-mp3-1") && failSecond {
+				failSecond = false
+				return jsonResponse(http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "fail chunk 1"}}), nil
+			}
+			return jsonResponse(http.StatusOK, map[string]any{
+				"language": "zh",
+				"segments": []map[string]any{{"start": 0.0, "end": 5.0, "text": fmt.Sprintf("语音-%d", asrCalls)}},
+			}), nil
+		}
+		return jsonResponse(http.StatusOK, map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": `{"overview":"总结","outline":[{"title":"一","summary":"描述","start_sec":0}],"timeline":[{"start_sec":0,"end_sec":1205,"title":"段","summary":"内容","key_points":["点"]}]}`,
+				},
+			}},
+		}), nil
+	})
+	svc, _ := newTestService(t, conn, dataDir, catSvc, mediaSvc, rt, func(o *summary.Options) {
+		o.AudioExtractor = ext
+	})
+
+	// Run 1: saves chunk 0 checkpoint, fails chunk 1.
+	if _, err := svc.StartLessonSummary(context.Background(), lessonID, summary.GenerateLessonOptions{}); err != nil {
+		t.Fatalf("run 1 failed: %v", err)
+	}
+	svc.Wait()
+	if asrCalls != 2 {
+		t.Fatalf("asrCalls after run 1 = %d, want 2", asrCalls)
+	}
+
+	// Replace video file on disk WITHOUT rescanning DB -> os.Stat fingerprint changes immediately!
+	if err := os.WriteFile(absMedia, []byte("brand-new-replaced-video-content-longer"), 0o644); err != nil {
+		t.Fatalf("overwrite media file: %v", err)
+	}
+
+	// Run 2: stale chunk 0 checkpoint must be invalidated, so both chunks 0 and 1 run again (asrCalls += 2 -> 4).
+	if _, err := svc.StartLessonSummary(context.Background(), lessonID, summary.GenerateLessonOptions{}); err != nil {
+		t.Fatalf("run 2 failed: %v", err)
+	}
+	svc.Wait()
+	if asrCalls != 4 {
+		t.Fatalf("expected stale checkpoint invalidated on un-rescanned file replacement (asrCalls=%d, want 4)", asrCalls)
+	}
+
+	// Seed a leftover checkpoint then test ForceRetranscribe clears it and re-transcribes all chunks.
+	if _, err := svc.StartLessonSummary(context.Background(), lessonID, summary.GenerateLessonOptions{Force: true, ForceRetranscribe: true}); err != nil {
+		t.Fatalf("run 3 ForceRetranscribe failed: %v", err)
+	}
+	svc.Wait()
+	if asrCalls != 6 {
+		t.Fatalf("expected ForceRetranscribe to transcribe all 2 chunks (asrCalls=%d, want 6)", asrCalls)
+	}
+}
+
+func TestCourseSummaryStatusPipelineCountsAndStatuses(t *testing.T) {
+	conn, dataDir, catSvc, mediaSvc := openTestEnv(t)
+	courseID, lessonIDs, mediaIDs := seedTestCourse(t, conn, "状态统计课程", []lessonSeedOpts{
+		{RelPath: "l1_ext.mp4", SubtitleRel: "l1_ext.srt", SubtitleBody: "1\n00:00:01,000 --> 00:00:02,000\n外挂\n"},
+		{RelPath: "l2_emb.mp4", StreamsJSON: `[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"},{"index":2,"codec_type":"subtitle","codec_name":"subrip"}]`},
+		{RelPath: "l3_asr.mp4"},
+		{RelPath: "l4_manual.mp4"},
+		{RelPath: "l5_partial.mp4"},
+		{RelPath: "l6_none.mp4", StreamsJSON: `[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle"}]`},
+	})
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// l3 has ASR transcript
+	if _, err := conn.Exec(
+		`INSERT INTO media_transcripts (media_file_id, source, language, model, content_vtt, plain_text, created_at, updated_at)
+		 VALUES (?, 'asr', 'zh', 'whisper-1', 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi\n', 'hi', ?, ?)`,
+		mediaIDs[2], now, now,
+	); err != nil {
+		t.Fatalf("insert l3 asr transcript: %v", err)
+	}
+	// l4 has manual transcript
+	if _, err := conn.Exec(
+		`INSERT INTO media_transcripts (media_file_id, source, language, model, content_vtt, plain_text, created_at, updated_at)
+		 VALUES (?, 'manual', 'und', '', '', '手动内容', ?, ?)`,
+		mediaIDs[3], now, now,
+	); err != nil {
+		t.Fatalf("insert l4 manual transcript: %v", err)
+	}
+	// l5 has 2 of 4 partial chunks
+	for idx := 0; idx < 2; idx++ {
+		if _, err := conn.Exec(
+			`INSERT INTO media_transcript_chunks (media_file_id, chunk_index, chunk_total, segment_sec, media_fingerprint, offset_sec, duration_sec, language, model, cues_json, created_at, updated_at)
+			 VALUES (?, ?, 4, 1200, '', ?, 1200, 'zh', 'whisper-1', '[]', ?, ?)`,
+			mediaIDs[4], idx, float64(idx*1200), now, now,
+		); err != nil {
+			t.Fatalf("insert l5 chunk %d: %v", idx, err)
+		}
+	}
+	// l1 and l3 have summaries
+	for _, lid := range []string{lessonIDs[0], lessonIDs[2]} {
+		if _, err := conn.Exec(
+			`INSERT INTO lesson_summaries (lesson_id, media_file_id, source_type, source_label, has_timestamps, model, overview, outline_json, timeline_json, created_at, updated_at)
+			 VALUES (?, '', 'asr', 'AI 语音转写', 1, 'gpt-4o-mini', 'ov', '[]', '[]', ?, ?)`,
+			lid, now, now,
+		); err != nil {
+			t.Fatalf("insert summary for %s: %v", lid, err)
+		}
+	}
+
+	svc, _ := newTestService(t, conn, dataDir, catSvc, mediaSvc, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, nil), nil
+	}), nil)
+
+	st, err := svc.GetCourseSummaryStatus(context.Background(), courseID)
+	if err != nil {
+		t.Fatalf("GetCourseSummaryStatus failed: %v", err)
+	}
+	if len(st.SummaryLessonIDs) != 2 {
+		t.Fatalf("SummaryLessonIDs = %v, want 2", st.SummaryLessonIDs)
+	}
+	if len(st.TranscriptLessonIDs) != 4 {
+		t.Fatalf("TranscriptLessonIDs = %v, want 4 (l1..l4)", st.TranscriptLessonIDs)
+	}
+	wantCounts := summary.CoursePipelineCounts{
+		TotalLessons:       6,
+		SubtitleLessons:    2,
+		TranscribedLessons: 2,
+		TranscriptReady:    4,
+		PartialLessons:     1,
+		MissingTranscript:  2,
+		SummarizedLessons:  2,
+		ReadyToSummarize:   2,
+	}
+	if st.Counts != wantCounts {
+		t.Fatalf("Counts = %+v, want %+v", st.Counts, wantCounts)
+	}
+	wantStatuses := []string{"external_subtitle", "embedded_subtitle", "asr", "manual", "partial", "none"}
+	if len(st.Lessons) != 6 {
+		t.Fatalf("Lessons len = %d, want 6", len(st.Lessons))
+	}
+	for i, want := range wantStatuses {
+		if st.Lessons[i].TranscriptStatus != want {
+			t.Fatalf("lesson[%d] TranscriptStatus = %q, want %q", i, st.Lessons[i].TranscriptStatus, want)
+		}
+	}
+	if st.Lessons[2].AISubtitleUpdatedAt != now {
+		t.Fatalf("lesson[2] AISubtitleUpdatedAt = %q, want %q", st.Lessons[2].AISubtitleUpdatedAt, now)
+	}
+	if st.Lessons[4].TranscribedChunks != 2 || st.Lessons[4].TotalChunks != 4 {
+		t.Fatalf("lesson[4] partial counts = %d/%d, want 2/4", st.Lessons[4].TranscribedChunks, st.Lessons[4].TotalChunks)
 	}
 }
 

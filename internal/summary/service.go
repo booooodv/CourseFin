@@ -123,28 +123,40 @@ type LessonSummary struct {
 
 // LessonCapabilities describes available transcript sources and configured AI/ASR/FFmpeg capabilities.
 type LessonCapabilities struct {
-	HasSubtitle         bool   `json:"has_subtitle"`
-	HasCachedTranscript bool   `json:"has_cached_transcript"`
-	TranscriptSource    string `json:"transcript_source"`
-	AIConfigured        bool   `json:"ai_configured"`
-	ASRConfigured       bool   `json:"asr_configured"`
-	HasFFmpeg           bool   `json:"has_ffmpeg"`
+	HasSubtitle             bool   `json:"has_subtitle"`
+	HasCachedTranscript     bool   `json:"has_cached_transcript"`
+	TranscriptSource        string `json:"transcript_source"`
+	PartialTranscriptChunks int    `json:"partial_transcript_chunks"`
+	PartialTranscriptTotal  int    `json:"partial_transcript_total"`
+	AIConfigured            bool   `json:"ai_configured"`
+	ASRConfigured           bool   `json:"asr_configured"`
+	HasFFmpeg               bool   `json:"has_ffmpeg"`
 }
 
-// LessonJobStatus describes the live or most recent background summary job for one lesson.
+// LessonJobAction identifies whether a lesson job runs transcription only, summarization only, or both.
+type LessonJobAction string
+
+const (
+	ActionTranscribe             LessonJobAction = "transcribe"
+	ActionSummarize              LessonJobAction = "summarize"
+	ActionTranscribeAndSummarize LessonJobAction = "transcribe_and_summarize"
+)
+
+// LessonJobStatus describes the live or most recent background summary/transcription job for one lesson.
 type LessonJobStatus struct {
-	LessonID   string   `json:"lesson_id"`
-	CourseID   string   `json:"course_id"`
-	Running    bool     `json:"running"`
-	Stage      JobStage `json:"stage"`
-	Message    string   `json:"message"`
-	ChunkIndex int      `json:"chunk_index"`
-	ChunkTotal int      `json:"chunk_total"`
-	SourceType string   `json:"source_type"`
-	Error      string   `json:"error,omitempty"`
-	ErrorCode  string   `json:"error_code,omitempty"`
-	StartedAt  string   `json:"started_at"`
-	FinishedAt string   `json:"finished_at,omitempty"`
+	LessonID   string          `json:"lesson_id"`
+	CourseID   string          `json:"course_id"`
+	Action     LessonJobAction `json:"action,omitempty"`
+	Running    bool            `json:"running"`
+	Stage      JobStage        `json:"stage"`
+	Message    string          `json:"message"`
+	ChunkIndex int             `json:"chunk_index"`
+	ChunkTotal int             `json:"chunk_total"`
+	SourceType string          `json:"source_type"`
+	Error      string          `json:"error,omitempty"`
+	ErrorCode  string          `json:"error_code,omitempty"`
+	StartedAt  string          `json:"started_at"`
+	FinishedAt string          `json:"finished_at,omitempty"`
 }
 
 // BatchLessonError captures an individual lesson failure inside a course batch run.
@@ -155,22 +167,35 @@ type BatchLessonError struct {
 	ErrorCode   string `json:"error_code,omitempty"`
 }
 
-// CourseBatchStatus describes the live or most recent batch summary job for a course.
+// BatchKind distinguishes batch transcription jobs from batch summary jobs.
+type BatchKind string
+
+const (
+	BatchKindTranscribe BatchKind = "transcribe"
+	BatchKindSummarize  BatchKind = "summarize"
+)
+
+// CourseBatchStatus describes the live or most recent batch transcription or summary job for a course.
 type CourseBatchStatus struct {
-	CourseID           string             `json:"course_id"`
-	Running            bool               `json:"running"`
-	Total              int                `json:"total"`
-	Completed          int                `json:"completed"`
-	Skipped            int                `json:"skipped"`
-	Failed             int                `json:"failed"`
-	CurrentLessonID    string             `json:"current_lesson_id"`
-	CurrentLessonTitle string             `json:"current_lesson_title"`
-	CurrentStage       JobStage           `json:"current_stage"`
-	ChunkIndex         int                `json:"chunk_index"`
-	ChunkTotal         int                `json:"chunk_total"`
-	Errors             []BatchLessonError `json:"errors"`
-	StartedAt          string             `json:"started_at"`
-	FinishedAt         string             `json:"finished_at,omitempty"`
+	CourseID            string             `json:"course_id"`
+	Kind                BatchKind          `json:"kind,omitempty"`
+	ChapterID           string             `json:"chapter_id,omitempty"`
+	ChapterTitle        string             `json:"chapter_title,omitempty"`
+	Running             bool               `json:"running"`
+	Total               int                `json:"total"`
+	Completed           int                `json:"completed"`
+	Skipped             int                `json:"skipped"`
+	SkippedAlreadyDone  int                `json:"skipped_already_done"`
+	SkippedNoTranscript int                `json:"skipped_no_transcript"`
+	Failed              int                `json:"failed"`
+	CurrentLessonID     string             `json:"current_lesson_id"`
+	CurrentLessonTitle  string             `json:"current_lesson_title"`
+	CurrentStage        JobStage           `json:"current_stage"`
+	ChunkIndex          int                `json:"chunk_index"`
+	ChunkTotal          int                `json:"chunk_total"`
+	Errors              []BatchLessonError `json:"errors"`
+	StartedAt           string             `json:"started_at"`
+	FinishedAt          string             `json:"finished_at,omitempty"`
 }
 
 // LessonSummaryState aggregates saved summary, active/recent job status, and lesson capabilities.
@@ -181,11 +206,42 @@ type LessonSummaryState struct {
 	Capabilities LessonCapabilities `json:"capabilities"`
 }
 
-// CourseSummariesStatus returns the summarized lesson IDs and batch job status for a course.
+// LessonPipelineStatus summarizes transcript readiness, chunk checkpoints, and summary status for one lesson.
+type LessonPipelineStatus struct {
+	LessonID            string `json:"lesson_id"`
+	ChapterID           string `json:"chapter_id"`
+	HasSubtitle         bool   `json:"has_subtitle"`
+	HasCachedTranscript bool   `json:"has_cached_transcript"`
+	TranscriptStatus    string `json:"transcript_status"`
+	TranscriptReady     bool   `json:"transcript_ready"`
+	TranscribedChunks   int    `json:"transcribed_chunks,omitempty"`
+	TotalChunks         int    `json:"total_chunks,omitempty"`
+	AISubtitleUpdatedAt string `json:"ai_subtitle_updated_at,omitempty"`
+	HasSummary          bool   `json:"has_summary"`
+}
+
+// CoursePipelineCounts aggregates lesson-level transcript and summary counts for a course.
+type CoursePipelineCounts struct {
+	TotalLessons       int `json:"total_lessons"`
+	SubtitleLessons    int `json:"subtitle_lessons"`
+	TranscribedLessons int `json:"transcribed_lessons"`
+	TranscriptReady    int `json:"transcript_ready"`
+	PartialLessons     int `json:"partial_lessons"`
+	MissingTranscript  int `json:"missing_transcript"`
+	SummarizedLessons  int `json:"summarized_lessons"`
+	ReadyToSummarize   int `json:"ready_to_summarize"`
+}
+
+// CourseSummariesStatus returns the per-lesson pipeline statuses, aggregate counts, and batch job states for a course.
 type CourseSummariesStatus struct {
-	CourseID         string             `json:"course_id"`
-	SummaryLessonIDs []string           `json:"summary_lesson_ids"`
-	BatchJob         *CourseBatchStatus `json:"batch_job"`
+	CourseID            string                 `json:"course_id"`
+	SummaryLessonIDs    []string               `json:"summary_lesson_ids"`
+	TranscriptLessonIDs []string               `json:"transcript_lesson_ids"`
+	Lessons             []LessonPipelineStatus `json:"lessons"`
+	Counts              CoursePipelineCounts   `json:"counts"`
+	BatchJob            *CourseBatchStatus     `json:"batch_job"`
+	TranscribeBatchJob  *CourseBatchStatus     `json:"transcribe_batch_job"`
+	SummaryBatchJob     *CourseBatchStatus     `json:"summary_batch_job"`
 }
 
 // GenerateLessonOptions configures single-lesson summary generation.
@@ -197,18 +253,19 @@ type GenerateLessonOptions struct {
 
 // Options configures a summary Service instance.
 type Options struct {
-	DB                 *sql.DB
-	DataDir            string
-	Catalog            *catalog.Service
-	Media              *media.Service
-	LifecycleCtx       context.Context
-	HTTPClient         *http.Client
-	ConfigLoader       ConfigLoader
-	AudioExtractor     AudioExtractor
-	SinglePassMaxRunes int
-	MapChunkMaxRunes   int
-	CompactWindowSec   float64
-	CompactMaxRunes    int
+	DB                  *sql.DB
+	DataDir             string
+	Catalog             *catalog.Service
+	Media               *media.Service
+	LifecycleCtx        context.Context
+	HTTPClient          *http.Client
+	ConfigLoader        ConfigLoader
+	AudioExtractor      AudioExtractor
+	AudioSegmentSeconds int
+	SinglePassMaxRunes  int
+	MapChunkMaxRunes    int
+	CompactWindowSec    float64
+	CompactMaxRunes     int
 }
 
 type lessonJobEntry struct {
@@ -264,6 +321,7 @@ type Service struct {
 	configLoader       ConfigLoader
 	audioExtractor     AudioExtractor
 	hasCustomExtractor bool
+	audioSegmentSec    int
 	singlePassMaxRunes int
 	mapChunkMaxRunes   int
 	compactWindowSec   float64
@@ -302,6 +360,11 @@ func NewService(opts Options) *Service {
 		compactMax = DefaultCompactMaxRunes
 	}
 
+	segSec := opts.AudioSegmentSeconds
+	if segSec <= 0 {
+		segSec = DefaultAudioSegmentSeconds
+	}
+
 	var extractor AudioExtractor
 	hasCustomExtractor := opts.AudioExtractor != nil
 	if hasCustomExtractor {
@@ -311,7 +374,7 @@ func NewService(opts Options) *Service {
 			opts.DataDir,
 			opts.Media.FFmpegBin(),
 			opts.Media.FFprobeBin(),
-			DefaultAudioSegmentSeconds,
+			segSec,
 		)
 	}
 
@@ -326,6 +389,7 @@ func NewService(opts Options) *Service {
 		configLoader:       opts.ConfigLoader,
 		audioExtractor:     extractor,
 		hasCustomExtractor: hasCustomExtractor,
+		audioSegmentSec:    segSec,
 		singlePassMaxRunes: singlePassMax,
 		mapChunkMaxRunes:   mapChunkMax,
 		compactWindowSec:   compactWin,
@@ -578,11 +642,14 @@ func (s *Service) DeleteLessonSummary(ctx context.Context, lessonID string, dele
 		if _, err := tx.ExecContext(ctx, `DELETE FROM media_transcripts WHERE media_file_id = ?`, lesson.MediaFileID); err != nil {
 			return fmt.Errorf("delete media_transcripts: %w", err)
 		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM media_transcript_chunks WHERE media_file_id = ?`, lesson.MediaFileID); err != nil {
+			return fmt.Errorf("delete media_transcript_chunks: %w", err)
+		}
 	}
 	return tx.Commit()
 }
 
-// GetCourseSummaryStatus returns summarized lesson IDs and the latest/active batch job for courseID.
+// GetCourseSummaryStatus returns per-lesson pipeline statuses, aggregate counts, and batch job status for courseID.
 func (s *Service) GetCourseSummaryStatus(ctx context.Context, courseID string) (*CourseSummariesStatus, error) {
 	courseID = normalizeOrRaw(courseID)
 	if courseID == "" {
@@ -598,26 +665,8 @@ func (s *Service) GetCourseSummaryStatus(ctx context.Context, courseID string) (
 		return nil, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT ls.lesson_id
-		FROM lesson_summaries ls
-		JOIN lessons l ON l.id = ls.lesson_id
-		WHERE l.course_id = ?
-		ORDER BY l.sort_order ASC, ls.lesson_id ASC`, courseID)
+	snap, err := s.computeCourseLessonsPipelineStatus(ctx, courseID)
 	if err != nil {
-		return nil, fmt.Errorf("query course summaries: %w", err)
-	}
-	defer rows.Close()
-
-	lessonIDs := []string{}
-	for rows.Next() {
-		var lid string
-		if err := rows.Scan(&lid); err != nil {
-			return nil, fmt.Errorf("scan course summary lesson_id: %w", err)
-		}
-		lessonIDs = append(lessonIDs, lid)
-	}
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -630,9 +679,13 @@ func (s *Service) GetCourseSummaryStatus(ctx context.Context, courseID string) (
 	s.mu.Unlock()
 
 	return &CourseSummariesStatus{
-		CourseID:         courseID,
-		SummaryLessonIDs: lessonIDs,
-		BatchJob:         batchCopy,
+		CourseID:            courseID,
+		SummaryLessonIDs:    snap.summaryLessonIDs,
+		TranscriptLessonIDs: snap.transcriptLessonIDs,
+		Lessons:             snap.lessons,
+		Counts:              snap.counts,
+		BatchJob:            batchCopy,
+		SummaryBatchJob:     batchCopy,
 	}, nil
 }
 
@@ -1300,7 +1353,7 @@ func (s *Service) resolveLessonTranscript(
 		}
 	}
 
-	vtt, lang, asrErr := s.runASRPipeline(ctx, mediaFileID, cfg, report)
+	vtt, lang, asrErr := s.runASRPipeline(ctx, mediaFileID, opts.ForceRetranscribe, cfg, report)
 	if asrErr != nil {
 		return resolvedTranscript{sourceType: "asr"}, asrErr
 	}
@@ -1455,7 +1508,7 @@ func (s *Service) summarizeResolvedTranscript(
 	return candidate, nil
 }
 
-func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, cfg AIConfigSnapshot, report progressFunc) (vttText string, language string, err error) {
+func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, forceRetranscribe bool, cfg AIConfigSnapshot, report progressFunc) (vttText string, language string, err error) {
 	if !cfg.ASRConfigured {
 		return "", "", &pipelineError{code: "asr_not_configured", err: ErrASRNotConfigured}
 	}
@@ -1477,6 +1530,12 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, cfg AI
 		return "", "", &pipelineError{code: "no_audio_track", err: errors.New("media file has no audio track")}
 	}
 
+	if forceRetranscribe {
+		if delErr := s.deleteChunkCheckpoints(ctx, mediaFileID); delErr != nil {
+			return "", "", delErr
+		}
+	}
+
 	report(StageExtractingAudio, "正在提取视频音频...", 0, 0, "asr")
 
 	jobID := id.New()
@@ -1494,6 +1553,19 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, cfg AI
 		return "", "", &pipelineError{code: "audio_extract_failed", err: errors.New("no audio chunks extracted")}
 	}
 
+	fingerprint := s.computeMediaFingerprint(ctx, mediaFileID, info.AbsPath)
+	var savedByIndex map[int]chunkCheckpoint
+	if !forceRetranscribe {
+		existingCPs, loadErr := s.loadChunkCheckpoints(ctx, mediaFileID)
+		if loadErr != nil {
+			_ = s.deleteChunkCheckpoints(ctx, mediaFileID)
+		} else if validMap, ok := validateChunkCheckpoints(existingCPs, len(chunks), s.audioSegmentSec, fingerprint); ok {
+			savedByIndex = validMap
+		} else if len(existingCPs) > 0 {
+			_ = s.deleteChunkCheckpoints(ctx, mediaFileID)
+		}
+	}
+
 	transcriber := ai.NewOpenAICompatibleTranscriber(cfg.ASR, s.asrHTTPClient())
 
 	var (
@@ -1504,6 +1576,16 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, cfg AI
 		if err := ctx.Err(); err != nil {
 			return "", "", err
 		}
+
+		if saved, ok := savedByIndex[i]; ok {
+			report(StageTranscribing, fmt.Sprintf("复用已转写分片（%d/%d）...", i+1, len(chunks)), i+1, len(chunks), "asr")
+			if detectedLang == "" && strings.TrimSpace(saved.language) != "" {
+				detectedLang = strings.TrimSpace(saved.language)
+			}
+			allCues = append(allCues, saved.cues...)
+			continue
+		}
+
 		report(StageTranscribing, fmt.Sprintf("正在语音转写（分片 %d/%d）...", i+1, len(chunks)), i+1, len(chunks), "asr")
 
 		res, txErr := transcribeChunkFile(ctx, transcriber, chunk.Path)
@@ -1514,13 +1596,16 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, cfg AI
 			return "", "", &pipelineError{code: "asr_failed", err: txErr}
 		}
 
-		if detectedLang == "" && strings.TrimSpace(res.Language) != "" {
-			detectedLang = strings.TrimSpace(res.Language)
+		chunkLang := strings.TrimSpace(res.Language)
+		if detectedLang == "" && chunkLang != "" {
+			detectedLang = chunkLang
 		}
 
+		var chunkCues []ai.TranscriptCue
 		if len(res.Cues) > 0 {
+			chunkCues = make([]ai.TranscriptCue, 0, len(res.Cues))
 			for _, cue := range res.Cues {
-				allCues = append(allCues, ai.TranscriptCue{
+				chunkCues = append(chunkCues, ai.TranscriptCue{
 					StartSec: chunk.OffsetSec + cue.StartSec,
 					EndSec:   chunk.OffsetSec + cue.EndSec,
 					Text:     cue.Text,
@@ -1529,17 +1614,35 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, cfg AI
 		} else if trimmed := strings.TrimSpace(res.Text); trimmed != "" {
 			dur := chunk.DurationSec
 			if dur <= 0 {
-				dur = float64(DefaultAudioSegmentSeconds)
+				dur = float64(s.audioSegmentSec)
 			}
-			allCues = append(allCues, ai.TranscriptCue{
+			chunkCues = []ai.TranscriptCue{{
 				StartSec: chunk.OffsetSec,
 				EndSec:   chunk.OffsetSec + dur,
 				Text:     trimmed,
-			})
+			}}
 		}
+
+		if persistErr := s.persistChunkCheckpoint(ctx, chunkCheckpoint{
+			mediaFileID:      mediaFileID,
+			chunkIndex:       i,
+			chunkTotal:       len(chunks),
+			segmentSec:       s.audioSegmentSec,
+			mediaFingerprint: fingerprint,
+			offsetSec:        chunk.OffsetSec,
+			durationSec:      chunk.DurationSec,
+			language:         chunkLang,
+			model:            cfg.ASR.Model,
+			cues:             chunkCues,
+		}); persistErr != nil {
+			return "", "", persistErr
+		}
+
+		allCues = append(allCues, chunkCues...)
 	}
 
 	if len(allCues) == 0 {
+		_ = s.deleteChunkCheckpoints(context.WithoutCancel(ctx), mediaFileID)
 		return "", "", &pipelineError{code: "empty_transcript", err: errors.New("asr returned empty transcript")}
 	}
 
@@ -1562,7 +1665,7 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, cfg AI
 	if err := ctx.Err(); err != nil {
 		return "", "", err
 	}
-	if err := s.upsertMediaTranscript(ctx, mediaFileID, "asr", detectedLang, cfg.ASR.Model, vtt, plain); err != nil {
+	if err := s.finalizeASRTranscriptTx(ctx, mediaFileID, detectedLang, cfg.ASR.Model, vtt, plain); err != nil {
 		return "", "", err
 	}
 
@@ -1746,6 +1849,13 @@ func (s *Service) computeLessonCapabilities(ctx context.Context, lesson *catalog
 		if found {
 			caps.HasCachedTranscript = true
 			caps.TranscriptSource = cached.source
+		} else if !caps.HasSubtitle {
+			done, total, pErr := s.loadPartialCheckpointProgress(ctx, lesson.MediaFileID)
+			if pErr != nil {
+				return LessonCapabilities{}, pErr
+			}
+			caps.PartialTranscriptChunks = done
+			caps.PartialTranscriptTotal = total
 		}
 	}
 
