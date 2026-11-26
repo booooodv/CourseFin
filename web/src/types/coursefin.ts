@@ -411,6 +411,32 @@ export interface CommitImportInput {
   chapters: CommitImportChapter[];
 }
 
+export type AIImageProtocol = 'openai_images' | 'openai_chat' | 'gemini';
+
+export interface CoverStylePalette {
+  background: string;
+  surface: string;
+  text: string;
+  accent: string;
+  accent_soft: string;
+}
+
+export interface CoverStyleTemplate {
+  id: string;
+  name: string;
+  tagline: string;
+  description: string;
+  recommended_for: string;
+  preview_image_url: string;
+  palette: CoverStylePalette;
+}
+
+export interface CoverStylesResponse {
+  styles: CoverStyleTemplate[];
+  default_style_id: string;
+  ai_image_configured: boolean;
+}
+
 export interface SettingsPayload {
   server_name: string;
   scan_interval_minutes: number;
@@ -428,6 +454,14 @@ export interface SettingsPayload {
   ai_asr_language?: string;
   ai_configured?: boolean;
   ai_asr_configured?: boolean;
+  ai_image_protocol?: AIImageProtocol;
+  ai_image_base_url?: string;
+  ai_image_api_key?: string;
+  ai_image_api_key_set?: boolean;
+  ai_image_model?: string;
+  ai_image_size?: string;
+  ai_image_configured?: boolean;
+  ai_cover_default_style?: string;
 }
 
 export interface UpdateSettingsInput {
@@ -443,6 +477,86 @@ export interface UpdateSettingsInput {
   clear_ai_asr_api_key?: boolean;
   ai_asr_model?: string;
   ai_asr_language?: string;
+  ai_image_protocol?: AIImageProtocol;
+  ai_image_base_url?: string;
+  ai_image_api_key?: string;
+  clear_ai_image_api_key?: boolean;
+  ai_image_model?: string;
+  ai_image_size?: string;
+  ai_cover_default_style?: string;
+}
+
+export interface TestAIImageOverrides {
+  image_protocol?: string;
+  ai_image_protocol?: string;
+  image_base_url?: string;
+  ai_image_base_url?: string;
+  image_api_key?: string;
+  ai_image_api_key?: string;
+  clear_ai_image_api_key?: boolean;
+  clear_image_api_key?: boolean;
+  image_model?: string;
+  ai_image_model?: string;
+  image_size?: string;
+  ai_image_size?: string;
+  base_url?: string;
+  ai_base_url?: string;
+  api_key?: string;
+  ai_api_key?: string;
+  clear_ai_api_key?: boolean;
+  clear_api_key?: boolean;
+}
+
+export interface GenerateCourseCoverInput {
+  style_id?: string;
+  title?: string;
+  subtitle?: string;
+  badge?: string;
+  include_badge?: boolean;
+  extra_prompt?: string;
+}
+
+export interface CoverPreview {
+  preview_id: string;
+  course_id: string;
+  style_id: string;
+  style_name: string;
+  preview_url: string;
+  prompt: string;
+  width: number;
+  height: number;
+  created_at: string;
+}
+
+export interface BatchCourseCoverError {
+  course_id: string;
+  course_title: string;
+  error: string;
+}
+
+export interface BatchCoverJob {
+  running: boolean;
+  mode: string;
+  library_id?: string;
+  style_id: string;
+  state: 'idle' | 'running' | 'completed' | 'cancelled';
+  total: number;
+  completed: number;
+  skipped: number;
+  failed: number;
+  current_course_id: string;
+  current_course_title: string;
+  errors: BatchCourseCoverError[];
+  started_at?: string;
+  finished_at?: string;
+}
+
+export interface StartBatchCoverInput {
+  library_id?: string;
+  mode?: 'missing_only' | 'all';
+  style_id?: string;
+  include_badge?: boolean;
+  extra_prompt?: string;
 }
 
 export interface TestASROverrides {

@@ -4,6 +4,7 @@ import { useLocation } from 'react-router-dom';
 import {
   Check,
   Copy,
+  ImagePlus,
   KeyRound,
   Laptop,
   Loader2,
@@ -16,13 +17,17 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../api/client';
+import CoverStylePicker, { FALLBACK_COVER_STYLES } from '../components/CoverStylePicker';
 import SystemUpdateSection from '../components/SystemUpdateSection';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import { copyTextToClipboard } from '../utils/clipboard';
 import type {
+  AIImageProtocol,
+  CoverStyleTemplate,
   Session,
   SettingsPayload,
+  TestAIImageOverrides,
   TestASROverrides,
   UpdateSettingsInput,
 } from '../types/coursefin';
@@ -57,12 +62,24 @@ export default function SettingsPage() {
   const [aiAsrModel, setAiAsrModel] = useState('');
   const [aiAsrLanguage, setAiAsrLanguage] = useState('');
 
+  // AI cover image generation settings form
+  const [coverStyles, setCoverStyles] = useState<CoverStyleTemplate[]>(FALLBACK_COVER_STYLES);
+  const [aiImageProtocol, setAiImageProtocol] = useState<AIImageProtocol>('openai_images');
+  const [aiImageBaseUrl, setAiImageBaseUrl] = useState('');
+  const [aiImageApiKey, setAiImageApiKey] = useState('');
+  const [clearAiImageKey, setClearAiImageKey] = useState(false);
+  const [aiImageModel, setAiImageModel] = useState('');
+  const [aiImageSize, setAiImageSize] = useState('');
+  const [aiCoverDefaultStyle, setAiCoverDefaultStyle] = useState('editorial_modern');
+
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState<string | null>(null);
   const [testingAI, setTestingAI] = useState(false);
   const [aiTestMessage, setAiTestMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [testingASR, setTestingASR] = useState(false);
   const [asrTestMessage, setAsrTestMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [testingImage, setTestingImage] = useState(false);
+  const [imageTestMessage, setImageTestMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Copy button feedback states
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -100,17 +117,28 @@ export default function SettingsPage() {
     setClearAiAsrKey(false);
     setAiAsrModel(data.ai_asr_model || '');
     setAiAsrLanguage(data.ai_asr_language || '');
+    setAiImageProtocol(data.ai_image_protocol || 'openai_images');
+    setAiImageBaseUrl(data.ai_image_base_url || '');
+    setAiImageApiKey('');
+    setClearAiImageKey(false);
+    setAiImageModel(data.ai_image_model || '');
+    setAiImageSize(data.ai_image_size || '');
+    setAiCoverDefaultStyle(data.ai_cover_default_style || 'editorial_modern');
   }, []);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [settingsData, sessionsData, meData] = await Promise.all([
+      const [settingsData, sessionsData, meData, stylesData] = await Promise.all([
         api.getSettings(),
         api.listSessions(),
         api.getMe().catch(() => null),
+        api.listCoverStyles().catch(() => null),
       ]);
+      if (stylesData?.styles && stylesData.styles.length > 0) {
+        setCoverStyles(stylesData.styles);
+      }
       applySettingsPayload(settingsData);
       setSessions(sessionsData.sessions ?? []);
       if (meData?.session?.token) {
@@ -190,6 +218,11 @@ export default function SettingsPage() {
       ai_asr_base_url: aiAsrBaseUrl.trim(),
       ai_asr_model: aiAsrModel.trim(),
       ai_asr_language: aiAsrLanguage.trim(),
+      ai_image_protocol: aiImageProtocol,
+      ai_image_base_url: aiImageBaseUrl.trim(),
+      ai_image_model: aiImageModel.trim(),
+      ai_image_size: aiImageSize.trim(),
+      ai_cover_default_style: aiCoverDefaultStyle,
     };
 
     if (clearAiKey) {
@@ -207,6 +240,15 @@ export default function SettingsPage() {
       const trimmedAsrKey = aiAsrApiKey.trim();
       if (trimmedAsrKey !== '' && trimmedAsrKey !== MASKED_KEY_PLACEHOLDER) {
         payload.ai_asr_api_key = trimmedAsrKey;
+      }
+    }
+
+    if (clearAiImageKey) {
+      payload.clear_ai_image_api_key = true;
+    } else {
+      const trimmedImgKey = aiImageApiKey.trim();
+      if (trimmedImgKey !== '' && trimmedImgKey !== MASKED_KEY_PLACEHOLDER) {
+        payload.ai_image_api_key = trimmedImgKey;
       }
     }
 
@@ -304,6 +346,53 @@ export default function SettingsPage() {
       toast.error(msg);
     } finally {
       setTestingASR(false);
+    }
+  }
+
+  async function handleTestImage() {
+    if (testingImage) return;
+    setTestingImage(true);
+    setImageTestMessage(null);
+
+    const overrides: TestAIImageOverrides = {
+      image_protocol: aiImageProtocol,
+      image_base_url: aiImageBaseUrl.trim(),
+      image_model: aiImageModel.trim(),
+      image_size: aiImageSize.trim(),
+      ai_base_url: aiBaseUrl.trim(),
+    };
+
+    if (clearAiImageKey) {
+      overrides.clear_ai_image_api_key = true;
+    } else {
+      const trimmedImgKey = aiImageApiKey.trim();
+      if (trimmedImgKey !== '' && trimmedImgKey !== MASKED_KEY_PLACEHOLDER) {
+        overrides.image_api_key = trimmedImgKey;
+      }
+    }
+
+    if (clearAiKey) {
+      overrides.clear_ai_api_key = true;
+    } else {
+      const trimmedAiKey = aiApiKey.trim();
+      if (trimmedAiKey !== '' && trimmedAiKey !== MASKED_KEY_PLACEHOLDER) {
+        overrides.ai_api_key = trimmedAiKey;
+      }
+    }
+
+    try {
+      await api.testAIImage(overrides);
+      setImageTestMessage({ ok: true, text: 'AI 封面生图接口测试成功！' });
+      toast.success('AI 封面生图接口测试成功');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'AI 封面生图接口测试失败';
+      setImageTestMessage({
+        ok: false,
+        text: msg,
+      });
+      toast.error(msg);
+    } finally {
+      setTestingImage(false);
     }
   }
 
@@ -722,6 +811,165 @@ export default function SettingsPage() {
               })}
             </div>
           </div>
+
+          <div className="space-y-1.5 sm:col-span-2 pt-3 border-t border-subtle">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-accent-ink">
+              <ImagePlus className="h-3.5 w-3.5" />
+              <span>AI 封面生图接口（用于为课程统一生成风格化封面）</span>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="settings-image-protocol" className="block text-xs font-medium text-ink-secondary">
+              生图接口协议
+            </label>
+            <select
+              id="settings-image-protocol"
+              value={aiImageProtocol}
+              onChange={(e) => setAiImageProtocol(e.target.value as AIImageProtocol)}
+              className={FIELD_INPUT_CLASS}
+            >
+              <option value="openai_images">OpenAI 标准生图 (/images/generations)</option>
+              <option value="openai_chat">OpenAI 对话出图 (/chat/completions)</option>
+              <option value="gemini">Google Gemini 原生 (:generateContent)</option>
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="settings-image-model" className="block text-xs font-medium text-ink-secondary">
+              生图模型名称
+            </label>
+            <input
+              id="settings-image-model"
+              type="text"
+              value={aiImageModel}
+              onChange={(e) => setAiImageModel(e.target.value)}
+              placeholder={
+                aiImageProtocol === 'gemini'
+                  ? 'gemini-2.5-flash-image（留空表示关闭 AI 生图）'
+                  : aiImageProtocol === 'openai_chat'
+                    ? 'google/gemini-2.5-flash-image 或 gpt-4o-image'
+                    : 'gpt-image-1（留空表示关闭 AI 生图）'
+              }
+              className={FIELD_INPUT_CLASS}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="settings-image-base-url" className="block text-xs font-medium text-ink-secondary">
+              生图 Base URL
+            </label>
+            <input
+              id="settings-image-base-url"
+              type="url"
+              value={aiImageBaseUrl}
+              onChange={(e) => setAiImageBaseUrl(e.target.value)}
+              placeholder={
+                aiImageProtocol === 'gemini'
+                  ? '留空默认 https://generativelanguage.googleapis.com/v1beta'
+                  : '留空默认复用上方 AI Base URL'
+              }
+              className={FIELD_INPUT_CLASS}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label htmlFor="settings-image-key" className="block text-xs font-medium text-ink-secondary">
+                生图 API Key
+              </label>
+              {settings?.ai_image_api_key_set && (
+                <label className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted cursor-pointer">
+                  <input
+                    id="settings-image-clear-key"
+                    type="checkbox"
+                    checked={clearAiImageKey}
+                    onChange={(e) => setClearAiImageKey(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-default bg-card text-status-danger focus:ring-2 focus:ring-accent-ring"
+                  />
+                  <span>清除已存 Key</span>
+                </label>
+              )}
+            </div>
+            <input
+              id="settings-image-key"
+              type="password"
+              value={aiImageApiKey}
+              disabled={clearAiImageKey}
+              onChange={(e) => setAiImageApiKey(e.target.value)}
+              placeholder={
+                settings?.ai_image_api_key_set
+                  ? '已配置（留空则保留当前密钥）'
+                  : aiImageProtocol === 'gemini'
+                    ? '填写 Google AI Studio API Key'
+                    : aiImageBaseUrl.trim() === ''
+                      ? '留空默认复用上方主 AI API Key'
+                      : '输入该生图服务 API Key'
+              }
+              autoComplete="off"
+              className={FIELD_INPUT_CLASS}
+            />
+            <p className="text-[11px] text-ink-muted">
+              {settings?.ai_image_api_key_set && !clearAiImageKey
+                ? '已保存独立生图密钥，留空将保留当前密钥；勾选上方「清除已存 Key」可清空'
+                : aiImageProtocol === 'gemini' || aiImageBaseUrl.trim() !== ''
+                  ? '独立地址或 Gemini 原生模式不会透传主 AI 密钥，请按需单独填写'
+                  : '留空默认复用上方主 AI API Key'}
+            </p>
+          </div>
+
+          <div className="space-y-1.5 sm:col-span-2">
+            <label htmlFor="settings-image-size" className="block text-xs font-medium text-ink-secondary">
+              默认出图尺寸 / 画幅
+            </label>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              <input
+                id="settings-image-size"
+                type="text"
+                value={aiImageSize}
+                onChange={(e) => setAiImageSize(e.target.value)}
+                placeholder="留空为自动适配横向 16:10 / 3:2（支持 1536x1024、1792x1024 等）"
+                className={FIELD_INPUT_CLASS}
+              />
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0 text-[11px]">
+                {[
+                  { label: '自动适配', value: '' },
+                  { label: '1536x1024', value: '1536x1024' },
+                  { label: '1792x1024', value: '1792x1024' },
+                  { label: '1024x1024', value: '1024x1024' },
+                ].map((preset) => {
+                  const active = aiImageSize.trim() === preset.value;
+                  return (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => setAiImageSize(preset.value)}
+                      className={`rounded-lg border px-2 py-1 transition-colors cursor-pointer ${
+                        active
+                          ? 'border-accent/40 bg-accent-soft text-accent-ink font-medium'
+                          : 'border-default bg-subtle text-ink-secondary hover:bg-muted hover:text-ink-primary'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2 sm:col-span-2">
+            <span className="block text-xs font-medium text-ink-secondary">
+              全局默认封面风格（用于单课与批量生图默认选中）
+            </span>
+            <CoverStylePicker
+              styles={coverStyles}
+              value={aiCoverDefaultStyle}
+              onChange={setAiCoverDefaultStyle}
+              defaultStyleId={aiCoverDefaultStyle}
+              ariaLabel="全局默认封面风格"
+            />
+          </div>
         </div>
 
         {aiTestMessage && (
@@ -745,6 +993,18 @@ export default function SettingsPage() {
             }`}
           >
             {asrTestMessage.text}
+          </div>
+        )}
+
+        {imageTestMessage && (
+          <div
+            className={`rounded-2xl border px-3.5 py-2.5 text-xs font-medium ${
+              imageTestMessage.ok
+                ? 'border-status-success/30 bg-status-success-soft text-status-success-ink'
+                : 'border-status-danger/30 bg-status-danger-soft text-status-danger-ink'
+            }`}
+          >
+            {imageTestMessage.text}
           </div>
         )}
 
@@ -777,6 +1037,18 @@ export default function SettingsPage() {
               >
                 {testingASR ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mic className="h-3.5 w-3.5" />}
                 <span>{testingASR ? '转写测试中...' : '测试语音转文字'}</span>
+              </button>
+            </Tooltip>
+
+            <Tooltip content="请求当前填写的生图接口验证能否正常返回图片">
+              <button
+                type="button"
+                disabled={testingImage}
+                onClick={() => void handleTestImage()}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-default bg-subtle px-3.5 py-2 text-xs font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                {testingImage ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImagePlus className="h-3.5 w-3.5" />}
+                <span>{testingImage ? '生图测试中...' : '测试生图接口'}</span>
               </button>
             </Tooltip>
           </div>

@@ -11,6 +11,7 @@ import (
 
 	"coursefin/internal/auth"
 	"coursefin/internal/catalog"
+	"coursefin/internal/cover"
 	"coursefin/internal/id"
 	"coursefin/internal/media"
 	"coursefin/internal/scanner"
@@ -44,6 +45,7 @@ type Deps struct {
 	Catalog      *catalog.Service
 	Media        *media.Service
 	Summary      *summary.Service
+	Cover        *cover.Service
 	Updater      *updater.Service
 	AIHTTPClient *http.Client
 	LifecycleCtx context.Context
@@ -59,6 +61,7 @@ type handler struct {
 	cat          *catalog.Service
 	media        *media.Service
 	summary      *summary.Service
+	cover        *cover.Service
 	updater      *updater.Service
 	aiHTTPClient *http.Client
 	lifecycleCtx context.Context
@@ -85,6 +88,16 @@ func NewHandler(deps Deps) http.Handler {
 			LifecycleCtx: lctx,
 		})
 	}
+	coverSvc := deps.Cover
+	if coverSvc == nil && deps.DB != nil && deps.Catalog != nil {
+		coverSvc = cover.NewService(cover.Options{
+			DB:           deps.DB,
+			DataDir:      deps.DataDir,
+			Catalog:      deps.Catalog,
+			HTTPClient:   deps.AIHTTPClient,
+			LifecycleCtx: lctx,
+		})
+	}
 	h := &handler{
 		db:           deps.DB,
 		dataDir:      deps.DataDir,
@@ -95,6 +108,7 @@ func NewHandler(deps Deps) http.Handler {
 		cat:          deps.Catalog,
 		media:        deps.Media,
 		summary:      sumSvc,
+		cover:        coverSvc,
 		updater:      deps.Updater,
 		aiHTTPClient: deps.AIHTTPClient,
 		lifecycleCtx: lctx,
@@ -141,10 +155,15 @@ func NewHandler(deps Deps) http.Handler {
 			// Courses & structure
 			pr.Get("/courses", h.handleListCourses)
 			pr.Post("/courses", h.handleCreateCourse)
+			pr.Get("/courses/covers/batch/status", h.handleGetBatchCoverStatus)
+			pr.Post("/courses/covers/batch/generate", h.handleStartBatchCover)
+			pr.Post("/courses/covers/batch/cancel", h.handleCancelBatchCover)
 			pr.Get("/courses/{id}", h.handleGetCourse)
 			pr.Put("/courses/{id}", h.handleUpdateCourse)
 			pr.Delete("/courses/{id}", h.handleDeleteCourse)
 			pr.Post("/courses/{id}/cover", h.handleUploadCourseCover)
+			pr.Post("/courses/{id}/cover/generate", h.handleGenerateCourseCover)
+			pr.Post("/courses/{id}/cover/apply", h.handleApplyCourseCover)
 			pr.Post("/courses/{id}/backdrop", h.handleUploadCourseBackdrop)
 			pr.Get("/courses/{id}/new-files", h.handleGetCourseNewFiles)
 			pr.Post("/courses/{id}/new-files", h.handleAppendCourseNewFiles)
@@ -171,6 +190,9 @@ func NewHandler(deps Deps) http.Handler {
 			pr.Put("/settings", h.handleUpdateSettings)
 			pr.Post("/settings/ai/test", h.handleTestAI)
 			pr.Post("/settings/ai/asr/test", h.handleTestASR)
+			pr.Post("/settings/ai/image/test", h.handleTestAIImage)
+			pr.Get("/cover/styles", h.handleListCoverStyles)
+			pr.Get("/cover/previews/{previewId}", h.handleGetCoverPreview)
 			pr.Post("/courses/{id}/ai/organize", h.handleAIOrganize)
 			pr.Post("/courses/{id}/ai/apply", h.handleAIApply)
 			pr.Post("/import/ai/organize", h.handleImportAIOrganize)

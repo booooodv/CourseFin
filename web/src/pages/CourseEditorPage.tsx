@@ -43,6 +43,7 @@ import {
   itemBackdropImageUrl,
   itemPrimaryImageUrl,
 } from '../api/client';
+import AICoverModal from '../components/AICoverModal';
 import AIOrganizeModal from '../components/AIOrganizeModal';
 import SubtitleBindModal from '../components/SubtitleBindModal';
 import { useToast } from '../components/Toast';
@@ -714,8 +715,9 @@ export default function CourseEditorPage() {
   const [confirmDeleteCourse, setConfirmDeleteCourse] = useState(false);
   const [deletingCourse, setDeletingCourse] = useState(false);
 
-  // AI Organize Modal
+  // AI Organize & AI Cover Modals
   const [showAIModal, setShowAIModal] = useState(false);
+  const [showAICoverModal, setShowAICoverModal] = useState(false);
 
   // Manual Subtitle Bind Modal
   const [subtitleLessonId, setSubtitleLessonId] = useState<string | null>(null);
@@ -1626,6 +1628,18 @@ export default function CourseEditorPage() {
                   <span>从课时帧选取封面</span>
                 </button>
               </Tooltip>
+
+              <Tooltip content="按统一风格模板使用 AI 生成课程封面并预览应用">
+                <button
+                  type="button"
+                  disabled={uploadingCover}
+                  onClick={() => setShowAICoverModal(true)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-accent-ring bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent-ink hover:bg-accent hover:text-ink-inverse disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>AI 生成封面</span>
+                </button>
+              </Tooltip>
             </div>
 
             {showFramePicker && (
@@ -1859,6 +1873,17 @@ export default function CourseEditorPage() {
         onApplied={(updated) => {
           syncFormFromCourse(updated);
           showNotice('已应用 AI 整理结果');
+        }}
+      />
+
+      {/* AI Cover Modal */}
+      <AICoverModal
+        course={course}
+        isOpen={showAICoverModal}
+        onClose={() => setShowAICoverModal(false)}
+        onApplied={(updated) => {
+          syncFormFromCourse(updated);
+          showNotice('已应用 AI 生成封面');
         }}
       />
 

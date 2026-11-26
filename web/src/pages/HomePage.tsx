@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Clock,
   FolderInput,
+  ImagePlus,
   Loader2,
   Moon,
   Pencil,
@@ -22,11 +23,13 @@ import {
   X,
 } from 'lucide-react';
 import { api, itemPrimaryImageUrl } from '../api/client';
+import BatchCoverModal from '../components/BatchCoverModal';
 import DeleteLibraryModal, { type DeleteLibraryMode } from '../components/DeleteLibraryModal';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import { useLibrary } from '../contexts/LibraryContext';
 import type {
+  BatchCoverJob,
   CourseSummary,
   HomeResponse,
   LessonWithContext,
@@ -530,6 +533,14 @@ export default function HomePage(): JSX.Element {
   const [creatingCourse, setCreatingCourse] = useState(false);
   const [createCourseError, setCreateCourseError] = useState<string | null>(null);
 
+  // Batch AI cover generation state
+  const [showBatchCoverModal, setShowBatchCoverModal] = useState(false);
+  const [batchCoverJob, setBatchCoverJob] = useState<BatchCoverJob | null>(null);
+  const [batchBannerDismissed, setBatchBannerDismissed] = useState(false);
+  const [cancellingBatchCover, setCancellingBatchCover] = useState(false);
+  const prevBatchRunningRef = useRef(false);
+  const prevBatchCompletedRef = useRef(0);
+
   const hasLoadedOnceRef = useRef(false);
   const fetchSeqRef = useRef(0);
 
@@ -582,6 +593,98 @@ export default function HomePage(): JSX.Element {
   useEffect(() => {
     void loadData(hasLoadedOnceRef.current);
   }, [loadData, libCtx.catalogVersion]);
+
+  const applyBatchJobUpdate = useCallback(
+    (next: BatchCoverJob) => {
+      const wasRunning = prevBatchRunningRef.current;
+      const prevCompleted = prevBatchCompletedRef.current;
+      prevBatchRunningRef.current = next.running;
+      prevBatchCompletedRef.current = next.completed;
+
+      if (!wasRunning && next.running) {
+        setBatchBannerDismissed(false);
+      }
+      setBatchCoverJob(next);
+
+      if (next.completed > prevCompleted || (wasRunning && !next.running && next.completed > 0)) {
+        void loadData(true);
+      }
+
+      if (wasRunning && !next.running) {
+        if (next.state === 'completed') {
+          const msg = `批量封面完成：生成 ${next.completed} 门，跳过 ${next.skipped} 门，失败 ${next.failed} 门`;
+          if (next.failed > 0) {
+            toast.error(msg);
+          } else {
+            toast.success(msg);
+          }
+        }
+      }
+    },
+    [loadData, toast],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getBatchCoverStatus()
+      .then((status) => {
+        if (!cancelled && status) {
+          prevBatchRunningRef.current = Boolean(status.running);
+          prevBatchCompletedRef.current = status.completed ?? 0;
+          setBatchCoverJob(status);
+        }
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const isBatchCoverRunning = Boolean(batchCoverJob?.running);
+  useEffect(() => {
+    if (!isBatchCoverRunning) return;
+
+    const poll = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      api
+        .getBatchCoverStatus()
+        .then((status) => applyBatchJobUpdate(status))
+        .catch(() => null);
+    };
+
+    const intervalId = window.setInterval(poll, 2000);
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'hidden') {
+        poll();
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+    return () => {
+      window.clearInterval(intervalId);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
+  }, [isBatchCoverRunning, applyBatchJobUpdate]);
+
+  async function handleCancelBatchCover() {
+    if (cancellingBatchCover || !batchCoverJob?.running) return;
+    setCancellingBatchCover(true);
+    try {
+      const updated = await api.cancelBatchCovers();
+      applyBatchJobUpdate(updated);
+      toast.info('已停止批量封面生成');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '取消批量任务失败');
+    } finally {
+      setCancellingBatchCover(false);
+    }
+  }
 
   const libraries = libCtx.isProvided ? libCtx.libraries : localLibraries;
   const urlLibraryParam = libCtx.isProvided ? (searchParams.get('library')?.trim() ?? '') : '';
@@ -921,6 +1024,32 @@ export default function HomePage(): JSX.Element {
             )}
           </div>
 
+          {scopedCourses.length > 0 && (
+            <Tooltip content="按统一风格为缺失封面的课程批量生成 AI 封面">
+              <button
+                type="button"
+                onClick={() => setShowBatchCoverModal(true)}
+                className="inline-flex self-start sm:self-auto shrink-0 items-center gap-1.5 rounded-full border border-default bg-card px-4 py-2.5 text-sm font-medium text-ink-secondary shadow-card hover:bg-subtle hover:text-ink-primary transition-all cursor-pointer"
+              >
+                {batchCoverJob?.running ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin text-accent" />
+                    <span className="tabular-nums">
+                      批量封面{' '}
+                      {batchCoverJob.completed + batchCoverJob.failed + batchCoverJob.skipped}/
+                      {batchCoverJob.total}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <ImagePlus className="h-4 w-4 text-accent-ink" />
+                    <span>AI 批量封面</span>
+                  </>
+                )}
+              </button>
+            </Tooltip>
+          )}
+
           {libraries.length > 0 && (
             <Tooltip content="手动创建空白课程并进入编辑页编排视频">
               <button
@@ -1171,6 +1300,64 @@ export default function HomePage(): JSX.Element {
         onSelectIdx={setActiveResumeIdx}
       />
 
+      {/* Batch Cover Generation Compact Status Banner */}
+      {batchCoverJob &&
+        (batchCoverJob.running ||
+          (!batchBannerDismissed &&
+            batchCoverJob.state !== 'idle' &&
+            (batchCoverJob.completed > 0 || batchCoverJob.failed > 0))) && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-accent-ring bg-card px-4 py-3 text-xs shadow-card">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {batchCoverJob.running ? (
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-accent" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-status-success-ink" />
+              )}
+              <div className="min-w-0">
+                <p className="font-semibold text-ink-primary truncate">
+                  {batchCoverJob.running
+                    ? `AI 正在批量生成封面：${batchCoverJob.current_course_title || '处理中...'}`
+                    : batchCoverJob.state === 'cancelled'
+                      ? '批量封面生成已取消'
+                      : '批量封面生成已完成'}
+                </p>
+                <p className="text-ink-muted tabular-nums">
+                  已完成 {batchCoverJob.completed} · 跳过 {batchCoverJob.skipped} · 失败{' '}
+                  {batchCoverJob.failed} / 共 {batchCoverJob.total}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowBatchCoverModal(true)}
+                className="rounded-xl border border-default bg-subtle px-3 py-1.5 font-medium text-ink-secondary hover:bg-muted hover:text-ink-primary transition-colors cursor-pointer"
+              >
+                查看详情
+              </button>
+              {batchCoverJob.running ? (
+                <button
+                  type="button"
+                  disabled={cancellingBatchCover}
+                  onClick={() => void handleCancelBatchCover()}
+                  className="rounded-xl border border-status-danger/35 bg-status-danger-soft px-3 py-1.5 font-semibold text-status-danger-ink hover:opacity-90 disabled:opacity-50 transition-opacity cursor-pointer"
+                >
+                  {cancellingBatchCover ? '取消中...' : '取消'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  aria-label="关闭批量封面提示"
+                  onClick={() => setBatchBannerDismissed(true)}
+                  className="rounded-lg p-1 text-ink-muted hover:bg-subtle hover:text-ink-primary transition-colors cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
       {/* Course Library Section: Tag Filter, Sort Strip & Poster Grid */}
       <section aria-labelledby="course-library-heading" className="space-y-6">
         {(scopedTags.length > 0 || scopedCourses.length > 0) && (
@@ -1299,6 +1486,15 @@ export default function HomePage(): JSX.Element {
           onDeleted={handleLibraryDeleted}
         />
       )}
+
+      <BatchCoverModal
+        isOpen={showBatchCoverModal}
+        onClose={() => setShowBatchCoverModal(false)}
+        courses={scopedCourses}
+        activeLibrary={activeLibrary}
+        batchJob={batchCoverJob}
+        onJobUpdated={applyBatchJobUpdate}
+      />
     </div>
   );
 }

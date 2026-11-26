@@ -1,6 +1,7 @@
 import type {
   ApplyAIProposalInput,
   AuthMeResponse,
+  BatchCoverJob,
   BindSubtitleInput,
   ChapterDetail,
   CommitImportInput,
@@ -10,9 +11,12 @@ import type {
   CourseOrganizeProposal,
   CourseSummariesStatusResponse,
   CourseSummary,
+  CoverPreview,
+  CoverStylesResponse,
   CreateCourseInput,
   DeleteLibraryOptions,
   FsBrowseResponse,
+  GenerateCourseCoverInput,
   GenerateLessonSummaryInput,
   HealthStatus,
   HomeResponse,
@@ -38,8 +42,10 @@ import type {
   SetupRequest,
   SetupResponse,
   SetupStatusResponse,
+  StartBatchCoverInput,
   StorageSource,
   Tag,
+  TestAIImageOverrides,
   TestASROverrides,
   UpdateConfigInput,
   UpdateCourseInput,
@@ -532,6 +538,50 @@ export const api = {
     return request<{ ok: boolean }>('/api/v1/settings/ai/asr/test', {
       method: 'POST',
       body: JSON.stringify(overrides),
+    });
+  },
+  testAIImage(overrides: TestAIImageOverrides = {}): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>('/api/v1/settings/ai/image/test', {
+      method: 'POST',
+      body: JSON.stringify(overrides),
+    });
+  },
+  listCoverStyles(): Promise<CoverStylesResponse> {
+    return request<CoverStylesResponse>('/api/v1/cover/styles');
+  },
+  generateCourseCover(
+    courseId: string,
+    input: GenerateCourseCoverInput = {},
+  ): Promise<CoverPreview> {
+    return request<CoverPreview>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/cover/generate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    );
+  },
+  applyCourseCover(courseId: string, previewId: string): Promise<CourseDetail> {
+    return request<CourseDetail>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/cover/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ preview_id: previewId }),
+      },
+    );
+  },
+  getBatchCoverStatus(): Promise<BatchCoverJob> {
+    return request<BatchCoverJob>('/api/v1/courses/covers/batch/status');
+  },
+  startBatchCovers(input: StartBatchCoverInput = {}): Promise<BatchCoverJob> {
+    return request<BatchCoverJob>('/api/v1/courses/covers/batch/generate', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+  cancelBatchCovers(): Promise<BatchCoverJob> {
+    return request<BatchCoverJob>('/api/v1/courses/covers/batch/cancel', {
+      method: 'POST',
     });
   },
   aiOrganizeCourse(courseId: string): Promise<CourseOrganizeProposal> {

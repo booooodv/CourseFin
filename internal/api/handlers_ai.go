@@ -14,6 +14,7 @@ import (
 
 	"coursefin/internal/ai"
 	"coursefin/internal/catalog"
+	"coursefin/internal/cover"
 	"coursefin/internal/id"
 	"coursefin/internal/media"
 	"coursefin/internal/summary"
@@ -44,6 +45,14 @@ type settingsPayload struct {
 	AIASRLanguage       string `json:"ai_asr_language"`
 	AIConfigured        bool   `json:"ai_configured"`
 	AIASRConfigured     bool   `json:"ai_asr_configured"`
+	AIImageProtocol     string `json:"ai_image_protocol"`
+	AIImageBaseURL      string `json:"ai_image_base_url"`
+	AIImageAPIKey       string `json:"ai_image_api_key"`
+	AIImageAPIKeySet    bool   `json:"ai_image_api_key_set"`
+	AIImageModel        string `json:"ai_image_model"`
+	AIImageSize         string `json:"ai_image_size"`
+	AIImageConfigured   bool   `json:"ai_image_configured"`
+	AICoverDefaultStyle string `json:"ai_cover_default_style"`
 }
 
 func (h *handler) loadSettingsMap(ctx context.Context) (map[string]string, error) {
@@ -83,6 +92,7 @@ func (h *handler) buildSettingsResponse(ctx context.Context) (*settingsPayload, 
 	}
 
 	resolved := summary.ResolveEffectiveSettings(m)
+	resolvedImg := cover.ResolveEffectiveImageSettings(m)
 
 	maskedKey := ""
 	if resolved.AI.APIKey != "" {
@@ -93,6 +103,11 @@ func (h *handler) buildSettingsResponse(ctx context.Context) (*settingsPayload, 
 	maskedASRKey := ""
 	if rawASRKey != "" {
 		maskedASRKey = maskedAPIKeyPlaceholder
+	}
+
+	maskedImgKey := ""
+	if resolvedImg.RawAPIKeySet {
+		maskedImgKey = maskedAPIKeyPlaceholder
 	}
 
 	jfUsername := ""
@@ -117,6 +132,14 @@ func (h *handler) buildSettingsResponse(ctx context.Context) (*settingsPayload, 
 		AIASRLanguage:       resolved.ASR.Language,
 		AIConfigured:        resolved.AIConfigured,
 		AIASRConfigured:     resolved.ASRConfigured,
+		AIImageProtocol:     resolvedImg.Image.Protocol,
+		AIImageBaseURL:      resolvedImg.RawBaseURL,
+		AIImageAPIKey:       maskedImgKey,
+		AIImageAPIKeySet:    resolvedImg.RawAPIKeySet,
+		AIImageModel:        resolvedImg.Image.Model,
+		AIImageSize:         resolvedImg.Image.Size,
+		AIImageConfigured:   resolvedImg.Configured,
+		AICoverDefaultStyle: resolvedImg.DefaultStyleID,
 	}, nil
 }
 
@@ -151,6 +174,13 @@ func (h *handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		ClearAIASRAPIKey    bool    `json:"clear_ai_asr_api_key"`
 		AIASRModel          *string `json:"ai_asr_model"`
 		AIASRLanguage       *string `json:"ai_asr_language"`
+		AIImageProtocol     *string `json:"ai_image_protocol"`
+		AIImageBaseURL      *string `json:"ai_image_base_url"`
+		AIImageAPIKey       *string `json:"ai_image_api_key"`
+		ClearAIImageAPIKey  bool    `json:"clear_ai_image_api_key"`
+		AIImageModel        *string `json:"ai_image_model"`
+		AIImageSize         *string `json:"ai_image_size"`
+		AICoverDefaultStyle *string `json:"ai_cover_default_style"`
 	}
 	if err := decodeJSON(r, &req, false); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -196,6 +226,35 @@ func (h *handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AIASRLanguage != nil {
 		updates["ai_asr_language"] = strings.TrimSpace(*req.AIASRLanguage)
+	}
+	if req.AIImageProtocol != nil {
+		proto, err := ai.ValidateImageProtocol(*req.AIImageProtocol)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		updates["ai_image_protocol"] = proto
+	}
+	if req.AIImageBaseURL != nil {
+		updates["ai_image_base_url"] = strings.TrimSpace(*req.AIImageBaseURL)
+	}
+	applyOptionalAPIKeyUpdate(updates, "ai_image_api_key", req.AIImageAPIKey, req.ClearAIImageAPIKey)
+	if req.AIImageModel != nil {
+		updates["ai_image_model"] = strings.TrimSpace(*req.AIImageModel)
+	}
+	if req.AIImageSize != nil {
+		updates["ai_image_size"] = strings.TrimSpace(*req.AIImageSize)
+	}
+	if req.AICoverDefaultStyle != nil {
+		rawStyle := strings.TrimSpace(*req.AICoverDefaultStyle)
+		if rawStyle == "" {
+			updates["ai_cover_default_style"] = cover.DefaultStyleID
+		} else if st, ok := cover.GetStyle(rawStyle); ok {
+			updates["ai_cover_default_style"] = st.ID
+		} else {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown cover style %q", rawStyle))
+			return
+		}
 	}
 
 	if len(updates) > 0 {
