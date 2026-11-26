@@ -28,7 +28,7 @@ const (
 	ImageProtocolGemini       = "gemini"
 
 	DefaultGeminiBaseURL    = "https://generativelanguage.googleapis.com/v1beta"
-	defaultImageHTTPTimeout = 120 * time.Second
+	defaultImageHTTPTimeout = 240 * time.Second
 	MaxGeneratedImageBytes  = 20 << 20 // 20 MiB
 	maxImageRedirects       = 3
 )
@@ -115,13 +115,8 @@ func NewHTTPImageGenerator(cfg ImageConfig, httpClient *http.Client) *HTTPImageG
 // TestConnection verifies endpoint reachability, authentication, and model image output.
 func (g *HTTPImageGenerator) TestConnection(ctx context.Context) error {
 	req := ImageGenerateRequest{
-		Prompt: "A minimal clean solid cobalt blue geometric square icon on a light gray studio background, no text.",
-	}
-	if g.cfg.Size == "" || strings.EqualFold(g.cfg.Size, "auto") {
-		req.Size = "1024x1024"
-		req.AspectRatio = "1:1"
-	} else {
-		req.Size = g.cfg.Size
+		Prompt: "Create a brand-new standalone minimal solid cobalt blue geometric square icon on a light gray studio background, with no text.",
+		Size:   g.cfg.Size,
 	}
 	_, err := g.GenerateImage(ctx, req)
 	return err
@@ -197,12 +192,15 @@ func (g *HTTPImageGenerator) generateOpenAIImages(ctx context.Context, req Image
 
 		statusCode, respBody, err = g.doPostJSON(ctx, endpoint, headers, payload)
 		if err != nil {
-			return nil, err
+			if sz != "" {
+				return nil, fmt.Errorf("%w (model=%s, size=%s)", err, g.cfg.Model, sz)
+			}
+			return nil, fmt.Errorf("%w (model=%s)", err, g.cfg.Model)
 		}
 		if statusCode >= 200 && statusCode < 300 {
 			break
 		}
-		if (statusCode == http.StatusBadRequest || statusCode == http.StatusUnprocessableEntity) && idx < len(sizesToTry)-1 {
+		if (statusCode == http.StatusBadRequest || statusCode == http.StatusUnprocessableEntity) && idx < len(sizesToTry)-1 && isLikelySizeError(respBody, sz) {
 			continue
 		}
 		return nil, fmt.Errorf("ai: image upstream returned HTTP %d: %s", statusCode, formatUpstreamError(respBody))
@@ -281,7 +279,7 @@ func (g *HTTPImageGenerator) generateOpenAIChat(ctx context.Context, req ImageGe
 
 		statusCode, body, reqErr := g.doPostJSON(ctx, endpoint, headers, payload)
 		if reqErr != nil {
-			return nil, reqErr
+			return nil, fmt.Errorf("%w (model=%s)", reqErr, g.cfg.Model)
 		}
 		if statusCode >= 200 && statusCode < 300 {
 			respBody = body
@@ -461,7 +459,7 @@ func (g *HTTPImageGenerator) generateGemini(ctx context.Context, req ImageGenera
 
 		statusCode, body, reqErr := g.doPostJSON(ctx, endpoint, headers, payload)
 		if reqErr != nil {
-			return nil, reqErr
+			return nil, fmt.Errorf("%w (model=%s)", reqErr, g.cfg.Model)
 		}
 		if statusCode >= 200 && statusCode < 300 {
 			respBody = body
@@ -525,9 +523,10 @@ func (g *HTTPImageGenerator) doPostJSON(ctx context.Context, endpoint string, he
 		httpReq.Header.Set(k, v)
 	}
 
+	started := time.Now()
 	resp, err := g.httpClient.Do(httpReq)
 	if err != nil {
-		return 0, nil, fmt.Errorf("ai: image request failed: %w", err)
+		return 0, nil, fmt.Errorf("ai: image request failed after %s: %w", time.Since(started).Round(time.Millisecond), err)
 	}
 	defer resp.Body.Close()
 
@@ -537,6 +536,42 @@ func (g *HTTPImageGenerator) doPostJSON(ctx context.Context, endpoint string, he
 		return 0, nil, fmt.Errorf("ai: read image response body: %w", err)
 	}
 	return resp.StatusCode, body, nil
+}
+
+func isLikelySizeError(body []byte, triedSize string) bool {
+	trimmedSize := strings.TrimSpace(triedSize)
+	if trimmedSize == "" {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(formatUpstreamError(body)))
+	if msg == "" || msg == "empty response body" {
+		return true
+	}
+	if strings.Contains(msg, strings.ToLower(trimmedSize)) {
+		return true
+	}
+	for _, kw := range []string{
+		"size",
+		"dimension",
+		"resolution",
+		"aspect",
+		"width",
+		"height",
+		"pixel",
+		"must be one of",
+		"supported values",
+		"allowed values",
+		"尺寸",
+		"分辨率",
+		"宽高",
+		"画幅",
+		"比例",
+	} {
+		if strings.Contains(msg, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *HTTPImageGenerator) extractImageFromText(ctx context.Context, text string) (*GeneratedImage, bool, error) {

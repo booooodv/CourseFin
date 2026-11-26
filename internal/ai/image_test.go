@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"coursefin/internal/ai"
 )
@@ -332,4 +333,128 @@ func TestHTTPImageGenerator_RejectsCorruptPayloadAndSurfacesUpstreamError(t *tes
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestHTTPImageGenerator_OpenAIImages_DoesNotRetryNonSize400(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "english reference image error",
+			message: "The prompt refers to a reference image, but the request did not include one. Attach the image (for example via /v1/images/edits) or remove the reference, then try again.",
+		},
+		{
+			name:    "chinese missing original image error",
+			message: "目前没有可供编辑的原始图片。请上传需要编辑的图片，我就可以按照这份设计要求制作。",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]string{
+						"message": tc.message,
+					},
+				})
+			}))
+			defer srv.Close()
+
+			gen := ai.NewHTTPImageGenerator(ai.ImageConfig{
+				Protocol: ai.ImageProtocolOpenAIImages,
+				BaseURL:  srv.URL + "/v1",
+				APIKey:   "sk-test",
+				Model:    "gpt-image-2.6-sunburst",
+			}, srv.Client())
+
+			_, err := gen.GenerateImage(context.Background(), ai.ImageGenerateRequest{Prompt: "Cover"})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("expected exactly 1 HTTP request without blind size fallback, got %d", got)
+			}
+			if !strings.Contains(err.Error(), "HTTP 400") || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestHTTPImageGenerator_TestConnection_UsesAutoSizeSequence(t *testing.T) {
+	pngBytes := makeTestPNGBytes(t, 24, 16)
+	var calls atomic.Int32
+	var seenSizes []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Size string `json:"size"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		seenSizes = append(seenSizes, body.Size)
+
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"unsupported size 1536x1024"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{
+				{"b64_json": base64.StdEncoding.EncodeToString(pngBytes)},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	gen := ai.NewHTTPImageGenerator(ai.ImageConfig{
+		Protocol: ai.ImageProtocolOpenAIImages,
+		BaseURL:  srv.URL + "/v1",
+		APIKey:   "sk-test",
+		Model:    "gpt-image-2.6-sunburst",
+	}, srv.Client())
+
+	if err := gen.TestConnection(context.Background()); err != nil {
+		t.Fatalf("TestConnection: %v", err)
+	}
+	if len(seenSizes) != 2 || seenSizes[0] != "1536x1024" || seenSizes[1] != "1792x1024" {
+		t.Fatalf("unexpected size fallback sequence in TestConnection: %v", seenSizes)
+	}
+}
+
+func TestHTTPImageGenerator_OpenAIImages_TimeoutErrorIncludesDiagnostics(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	client := &http.Client{Timeout: 40 * time.Millisecond}
+	gen := ai.NewHTTPImageGenerator(ai.ImageConfig{
+		Protocol: ai.ImageProtocolOpenAIImages,
+		BaseURL:  srv.URL + "/v1",
+		APIKey:   "sk-test",
+		Model:    "gpt-image-2.6-sunburst",
+		Size:     "1536x1024",
+	}, client)
+
+	_, err := gen.GenerateImage(context.Background(), ai.ImageGenerateRequest{Prompt: "Cover"})
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	for _, want := range []string{
+		"ai: image request failed after",
+		"model=gpt-image-2.6-sunburst",
+		"size=1536x1024",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error %q to contain %q", err.Error(), want)
+		}
+	}
 }
