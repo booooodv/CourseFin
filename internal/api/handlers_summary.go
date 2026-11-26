@@ -107,6 +107,37 @@ func (h *handler) handleGenerateLessonSummary(w http.ResponseWriter, r *http.Req
 }
 
 func (h *handler) handleCancelLessonSummary(w http.ResponseWriter, r *http.Request) {
+	h.handleCancelLessonJob(w, r, false)
+}
+
+func (h *handler) handleGenerateLessonTranscript(w http.ResponseWriter, r *http.Request) {
+	if h.summary == nil {
+		writeError(w, http.StatusServiceUnavailable, "summary service unavailable")
+		return
+	}
+	lessonID := normalizeID(chi.URLParam(r, "id"))
+	var opts summary.TranscribeLessonOptions
+	if err := decodeJSON(r, &opts, true); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	job, err := h.summary.StartLessonTranscribe(r.Context(), lessonID, opts)
+	if err != nil {
+		writeSummaryError(w, err)
+		return
+	}
+	status := http.StatusAccepted
+	if !job.Running {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, job)
+}
+
+func (h *handler) handleCancelLessonTranscript(w http.ResponseWriter, r *http.Request) {
+	h.handleCancelLessonJob(w, r, true)
+}
+
+func (h *handler) handleCancelLessonJob(w http.ResponseWriter, r *http.Request, transcribeOnly bool) {
 	if h.summary == nil {
 		writeError(w, http.StatusServiceUnavailable, "summary service unavailable")
 		return
@@ -122,7 +153,15 @@ func (h *handler) handleCancelLessonSummary(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	job, err := h.summary.CancelLessonSummary(lessonID)
+	var (
+		job *summary.LessonJobStatus
+		err error
+	)
+	if transcribeOnly {
+		job, err = h.summary.CancelLessonTranscribe(lessonID)
+	} else {
+		job, err = h.summary.CancelLessonSummary(lessonID)
+	}
 	if err != nil {
 		writeSummaryError(w, err)
 		return
@@ -161,19 +200,33 @@ func (h *handler) handleGetCourseSummariesStatus(w http.ResponseWriter, r *http.
 }
 
 func (h *handler) handleGenerateCourseSummaries(w http.ResponseWriter, r *http.Request) {
+	h.handleStartCourseBatch(w, r, summary.BatchKindSummarize)
+}
+
+func (h *handler) handleGenerateCourseTranscripts(w http.ResponseWriter, r *http.Request) {
+	h.handleStartCourseBatch(w, r, summary.BatchKindTranscribe)
+}
+
+func (h *handler) handleStartCourseBatch(w http.ResponseWriter, r *http.Request, kind summary.BatchKind) {
 	if h.summary == nil {
 		writeError(w, http.StatusServiceUnavailable, "summary service unavailable")
 		return
 	}
 	courseID := normalizeID(chi.URLParam(r, "id"))
-	var req struct {
-		Mode string `json:"mode"`
-	}
-	if err := decodeJSON(r, &req, true); err != nil {
+	var opts summary.CourseBatchOptions
+	if err := decodeJSON(r, &opts, true); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	batch, err := h.summary.StartCourseBatch(r.Context(), courseID, req.Mode)
+	var (
+		batch *summary.CourseBatchStatus
+		err   error
+	)
+	if kind == summary.BatchKindTranscribe {
+		batch, err = h.summary.StartCourseTranscribeBatch(r.Context(), courseID, opts)
+	} else {
+		batch, err = h.summary.StartCourseSummaryBatch(r.Context(), courseID, opts)
+	}
 	if err != nil {
 		writeSummaryError(w, err)
 		return
@@ -186,6 +239,14 @@ func (h *handler) handleGenerateCourseSummaries(w http.ResponseWriter, r *http.R
 }
 
 func (h *handler) handleCancelCourseSummaries(w http.ResponseWriter, r *http.Request) {
+	h.handleCancelCourseBatch(w, r, summary.BatchKindSummarize)
+}
+
+func (h *handler) handleCancelCourseTranscripts(w http.ResponseWriter, r *http.Request) {
+	h.handleCancelCourseBatch(w, r, summary.BatchKindTranscribe)
+}
+
+func (h *handler) handleCancelCourseBatch(w http.ResponseWriter, r *http.Request, kind summary.BatchKind) {
 	if h.summary == nil {
 		writeError(w, http.StatusServiceUnavailable, "summary service unavailable")
 		return
@@ -207,7 +268,15 @@ func (h *handler) handleCancelCourseSummaries(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	batch, err := h.summary.CancelCourseBatch(courseID)
+	var (
+		batch *summary.CourseBatchStatus
+		err   error
+	)
+	if kind == summary.BatchKindTranscribe {
+		batch, err = h.summary.CancelCourseTranscribeBatch(courseID)
+	} else {
+		batch, err = h.summary.CancelCourseSummaryBatch(courseID)
+	}
 	if err != nil {
 		writeSummaryError(w, err)
 		return
@@ -232,6 +301,8 @@ func writeSummaryError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, summary.ErrBatchAlreadyRunning):
 		writeErrorWithCode(w, http.StatusConflict, "batch_already_running", err.Error())
+	case errors.Is(err, summary.ErrLessonJobConflict):
+		writeErrorWithCode(w, http.StatusConflict, "lesson_job_conflict", err.Error())
 	case errors.Is(err, summary.ErrInvalidInput):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:

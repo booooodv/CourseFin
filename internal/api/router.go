@@ -199,14 +199,18 @@ func NewHandler(deps Deps) http.Handler {
 			pr.Post("/courses/{id}/ai/apply", h.handleAIApply)
 			pr.Post("/import/ai/organize", h.handleImportAIOrganize)
 
-			// Lesson & course AI summaries
+			// Lesson & course AI summaries & transcriptions
 			pr.Get("/lessons/{id}/summary", h.handleGetLessonSummary)
 			pr.Post("/lessons/{id}/summary/generate", h.handleGenerateLessonSummary)
 			pr.Post("/lessons/{id}/summary/cancel", h.handleCancelLessonSummary)
 			pr.Delete("/lessons/{id}/summary", h.handleDeleteLessonSummary)
+			pr.Post("/lessons/{id}/transcript/generate", h.handleGenerateLessonTranscript)
+			pr.Post("/lessons/{id}/transcript/cancel", h.handleCancelLessonTranscript)
 			pr.Get("/courses/{id}/summaries/status", h.handleGetCourseSummariesStatus)
 			pr.Post("/courses/{id}/summaries/generate", h.handleGenerateCourseSummaries)
 			pr.Post("/courses/{id}/summaries/cancel", h.handleCancelCourseSummaries)
+			pr.Post("/courses/{id}/transcripts/generate", h.handleGenerateCourseTranscripts)
+			pr.Post("/courses/{id}/transcripts/cancel", h.handleCancelCourseTranscripts)
 
 			// System updates
 			pr.Get("/system/update", h.handleGetUpdateStatus)

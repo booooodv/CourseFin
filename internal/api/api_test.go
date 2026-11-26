@@ -2680,9 +2680,13 @@ func TestLessonSummaryAPIEndToEndAndErrorCodes(t *testing.T) {
 		{http.MethodPost, "/api/v1/lessons/" + l1ID + "/summary/generate"},
 		{http.MethodPost, "/api/v1/lessons/" + l1ID + "/summary/cancel"},
 		{http.MethodDelete, "/api/v1/lessons/" + l1ID + "/summary"},
+		{http.MethodPost, "/api/v1/lessons/" + l1ID + "/transcript/generate"},
+		{http.MethodPost, "/api/v1/lessons/" + l1ID + "/transcript/cancel"},
 		{http.MethodGet, "/api/v1/courses/" + course.ID + "/summaries/status"},
 		{http.MethodPost, "/api/v1/courses/" + course.ID + "/summaries/generate"},
 		{http.MethodPost, "/api/v1/courses/" + course.ID + "/summaries/cancel"},
+		{http.MethodPost, "/api/v1/courses/" + course.ID + "/transcripts/generate"},
+		{http.MethodPost, "/api/v1/courses/" + course.ID + "/transcripts/cancel"},
 	}
 	for _, ep := range unauthEndpoints {
 		rec, _ := env.doRecJSON(t, ep[0], ep[1], nil, "")
@@ -2697,9 +2701,13 @@ func TestLessonSummaryAPIEndToEndAndErrorCodes(t *testing.T) {
 		{http.MethodPost, "/api/v1/lessons/nonexistent-lesson-id/summary/generate"},
 		{http.MethodPost, "/api/v1/lessons/nonexistent-lesson-id/summary/cancel"},
 		{http.MethodDelete, "/api/v1/lessons/nonexistent-lesson-id/summary"},
+		{http.MethodPost, "/api/v1/lessons/nonexistent-lesson-id/transcript/generate"},
+		{http.MethodPost, "/api/v1/lessons/nonexistent-lesson-id/transcript/cancel"},
 		{http.MethodGet, "/api/v1/courses/nonexistent-course-id/summaries/status"},
 		{http.MethodPost, "/api/v1/courses/nonexistent-course-id/summaries/generate"},
 		{http.MethodPost, "/api/v1/courses/nonexistent-course-id/summaries/cancel"},
+		{http.MethodPost, "/api/v1/courses/nonexistent-course-id/transcripts/generate"},
+		{http.MethodPost, "/api/v1/courses/nonexistent-course-id/transcripts/cancel"},
 	}
 	for _, ep := range notFoundEndpoints {
 		rec, raw := env.doRecJSON(t, ep[0], ep[1], nil, token)
@@ -2962,5 +2970,281 @@ func TestLessonSummaryAPIEndToEndAndErrorCodes(t *testing.T) {
 	}
 	if state.Summary == nil || state.Summary.Overview == "" {
 		t.Fatalf("expected existing saved summary preserved after cancel, got %+v", state.Summary)
+	}
+}
+
+type apiFakeAudioExtractor struct {
+	dataDir string
+}
+
+func (f *apiFakeAudioExtractor) ExtractChunks(ctx context.Context, mediaPath string, jobID string) ([]summary.AudioChunk, func(), error) {
+	workDir := filepath.Join(f.dataDir, "cache", "asr", jobID)
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return nil, func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(workDir) }
+	chunkPath := filepath.Join(workDir, "chunk_000.mp3")
+	if err := os.WriteFile(chunkPath, []byte("fake-mp3"), 0o644); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	return []summary.AudioChunk{{Path: chunkPath, OffsetSec: 0, DurationSec: 60}}, cleanup, nil
+}
+
+func TestDecoupledTranscriptionAndChapterBatchAPIs(t *testing.T) {
+	var (
+		mu         sync.Mutex
+		asrGateCh  chan struct{}
+		asrEntered chan struct{}
+		asrOnce    sync.Once
+	)
+
+	rt := apiRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/audio/transcriptions") {
+			mu.Lock()
+			ch := asrGateCh
+			entered := asrEntered
+			mu.Unlock()
+			if ch != nil {
+				asrOnce.Do(func() {
+					if entered != nil {
+						close(entered)
+					}
+				})
+				select {
+				case <-ch:
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				}
+			}
+			b, _ := json.Marshal(map[string]any{
+				"language": "zh",
+				"segments": []map[string]any{{"start": 0.0, "end": 5.0, "text": "API 转写片段"}},
+			})
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader(b)),
+			}, nil
+		}
+
+		payload := map[string]any{
+			"overview": "章节总结概览",
+			"outline":  []map[string]any{{"title": "大纲", "summary": "描述", "start_sec": 0}},
+			"timeline": []map[string]any{{"start_sec": 0, "end_sec": 5, "title": "分段", "summary": "内容", "key_points": []string{"点"}}},
+		}
+		b, _ := json.Marshal(payload)
+		respBytes, _ := json.Marshal(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": string(b)}}},
+		})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(respBytes)),
+		}, nil
+	})
+
+	dataDir := t.TempDir()
+	mediaDir := t.TempDir()
+	conn, err := db.Open(dataDir)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	reg := storage.NewRegistry()
+	authSvc := auth.NewService(conn)
+	scanSvc := scanner.NewService(conn, dataDir, reg, &fakeProber{})
+	catSvc := catalog.NewService(conn, dataDir)
+	catSvc.SetRegistry(reg)
+	mediaSvc := media.NewService(conn, dataDir, reg, "")
+	t.Cleanup(func() { _ = mediaSvc.Close() })
+
+	lctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	aiClient := &http.Client{Transport: rt}
+	sumSvc := summary.NewService(summary.Options{
+		DB:             conn,
+		DataDir:        dataDir,
+		Catalog:        catSvc,
+		Media:          mediaSvc,
+		LifecycleCtx:   lctx,
+		HTTPClient:     aiClient,
+		AudioExtractor: &apiFakeAudioExtractor{dataDir: dataDir},
+	})
+	t.Cleanup(sumSvc.Wait)
+
+	env := &apiRecorderEnv{
+		db:       conn,
+		dataDir:  dataDir,
+		mediaDir: mediaDir,
+		registry: reg,
+		authSvc:  authSvc,
+		scanSvc:  scanSvc,
+		catSvc:   catSvc,
+		mediaSvc: mediaSvc,
+		handler: api.NewHandler(api.Deps{
+			DB:           conn,
+			DataDir:      dataDir,
+			BaseURLHint:  "http://localhost:8096",
+			Registry:     reg,
+			Auth:         authSvc,
+			Scanner:      scanSvc,
+			Catalog:      catSvc,
+			Media:        mediaSvc,
+			Summary:      sumSvc,
+			AIHTTPClient: aiClient,
+			LifecycleCtx: lctx,
+		}),
+	}
+	token := env.loginAdmin(t)
+
+	// Build 2-chapter course: Ch1 (1 subtitled lesson), Ch2 (2 audio-only lessons)
+	courseDir := filepath.Join(env.mediaDir, "TwoStepCourse")
+	writeDummyFile(t, filepath.Join(courseDir, "ch1", "01.mp4"), []byte("v1"))
+	writeDummyFile(t, filepath.Join(courseDir, "ch1", "01.srt"), []byte("1\n00:00:00,000 --> 00:00:04,000\nCh1 Sub\n"))
+	writeDummyFile(t, filepath.Join(courseDir, "ch2", "02.mp4"), []byte("v2"))
+	writeDummyFile(t, filepath.Join(courseDir, "ch2", "03.mp4"), []byte("v3"))
+
+	src, err := env.catSvc.CreateSource(context.Background(), "TwoStepDisk", "local", env.mediaDir)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	if _, err := env.scanSvc.ScanSource(context.Background(), src.ID); err != nil {
+		t.Fatalf("ScanSource: %v", err)
+	}
+	course, err := env.catSvc.CommitDirectoryImport(context.Background(), catalog.CommitImportInput{
+		SourceID:   src.ID,
+		DirRelPath: "TwoStepCourse",
+	})
+	if err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+	ch1ID := course.Chapters[0].ID
+	ch2ID := course.Chapters[1].ID
+	ch2L1 := course.Chapters[1].Lessons[0].ID
+	ch2L2 := course.Chapters[1].Lessons[1].ID
+
+	// 1. Before ASR configured: POST /lessons/{id}/transcript/generate -> 400 asr_not_configured
+	rec, raw := env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+ch2L1+"/transcript/generate", nil, token)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(string(raw), "asr_not_configured") {
+		t.Fatalf("expected 400 asr_not_configured, got %d: %s", rec.Code, raw)
+	}
+
+	// 2. Configure ONLY ASR (NO AI LLM!) -> single-lesson transcribe succeeds with 202 -> completed
+	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_asr_base_url": "http://asr.example/v1",
+		"ai_asr_model":    "whisper-1",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings ASR only = %d: %s", rec.Code, raw)
+	}
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+ch2L1+"/transcript/generate", nil, token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /lessons/{id}/transcript/generate = %d, want 202: %s", rec.Code, raw)
+	}
+	sumSvc.Wait()
+
+	// Idempotent re-trigger when already transcribed returns 200 OK (non-running)
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+ch2L1+"/transcript/generate", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("idempotent POST /lessons/{id}/transcript/generate = %d, want 200: %s", rec.Code, raw)
+	}
+
+	// 3. Configure AI LLM as well
+	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_base_url": "https://llm.example/v1",
+		"ai_api_key":  "sk-llm",
+		"ai_model":    "gpt-4o-mini",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /settings AI = %d: %s", rec.Code, raw)
+	}
+
+	// 4. Invalid chapter_id returns 404
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/transcripts/generate", map[string]any{
+		"chapter_id": "nonexistent-chapter-id",
+	}, token)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("invalid chapter_id = %d, want 404: %s", rec.Code, raw)
+	}
+
+	// 5. Gate ASR on ch2L2 while starting chapter-scoped batch transcribe + chapter-scoped batch summarize simultaneously!
+	mu.Lock()
+	asrGateCh = make(chan struct{})
+	asrEntered = make(chan struct{})
+	asrOnce = sync.Once{}
+	mu.Unlock()
+
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/transcripts/generate", map[string]any{
+		"mode":       "missing_only",
+		"chapter_id": ch2ID,
+	}, token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /courses/{id}/transcripts/generate = %d, want 202: %s", rec.Code, raw)
+	}
+	<-asrEntered
+
+	// Duplicate transcribe batch -> 409 batch_already_running
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/transcripts/generate", nil, token)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate batch transcribe = %d, want 409: %s", rec.Code, raw)
+	}
+
+	// Opposite single-lesson summarize on ch2L2 (currently transcribing in batch) -> 409 lesson_job_conflict!
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/lessons/"+ch2L2+"/summary/generate", nil, token)
+	if rec.Code != http.StatusConflict || !strings.Contains(string(raw), "lesson_job_conflict") {
+		t.Fatalf("opposite action while transcribing = %d, want 409 lesson_job_conflict: %s", rec.Code, raw)
+	}
+
+	// Simultaneously run summary batch scoped to ch1ID (succeeds concurrently without waiting for ASR gate!).
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/summaries/generate", map[string]any{
+		"mode":       "missing_only",
+		"chapter_id": ch1ID,
+	}, token)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("concurrent ch1 summaries/generate = %d, want 202: %s", rec.Code, raw)
+	}
+
+	// Wait for ch1 summary batch to finish BEFORE releasing ASR gate!
+	deadline := time.Now().Add(5 * time.Second)
+	var status summary.CourseSummariesStatus
+	for time.Now().Before(deadline) {
+		rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/courses/"+course.ID+"/summaries/status", nil, token)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET summaries/status = %d: %s", rec.Code, raw)
+		}
+		_ = json.Unmarshal(raw, &status)
+		if status.SummaryBatchJob != nil && !status.SummaryBatchJob.Running {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if status.SummaryBatchJob == nil || status.SummaryBatchJob.Running || status.SummaryBatchJob.Completed != 1 || status.SummaryBatchJob.ChapterID != ch1ID {
+		t.Fatalf("expected ch1 summary batch completed concurrently, got %+v", status.SummaryBatchJob)
+	}
+	if status.TranscribeBatchJob == nil || !status.TranscribeBatchJob.Running || status.TranscribeBatchJob.ChapterID != ch2ID {
+		t.Fatalf("expected ch2 transcribe batch still running, got %+v", status.TranscribeBatchJob)
+	}
+
+	// Cancel transcribe batch via /courses/{id}/transcripts/cancel
+	rec, raw = env.doRecJSON(t, http.MethodPost, "/api/v1/courses/"+course.ID+"/transcripts/cancel", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /courses/{id}/transcripts/cancel = %d: %s", rec.Code, raw)
+	}
+	sumSvc.Wait()
+
+	rec, raw = env.doRecJSON(t, http.MethodGet, "/api/v1/courses/"+course.ID+"/summaries/status", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET final summaries/status = %d: %s", rec.Code, raw)
+	}
+	_ = json.Unmarshal(raw, &status)
+	if status.TranscribeBatchJob == nil || status.TranscribeBatchJob.Running || status.TranscribeBatchJob.CurrentStage != summary.StageCancelled {
+		t.Fatalf("expected cancelled transcribe_batch_job, got %+v", status.TranscribeBatchJob)
+	}
+	if status.Counts.TotalLessons != 3 || status.Counts.TranscriptReady != 2 || status.Counts.SummarizedLessons != 1 {
+		t.Fatalf("unexpected final counts: %+v", status.Counts)
 	}
 }
