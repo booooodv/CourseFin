@@ -2465,3 +2465,69 @@ func TestLessonJobConflictOppositeActionsAndSingleHandoff(t *testing.T) {
 	}
 }
 
+func TestForceRetranscribeHandoffPrefersASRWhenPhysicalSubtitleExists(t *testing.T) {
+	conn, dataDir, catSvc, mediaSvc := openTestEnv(t)
+	setAppSettings(t, conn, map[string]string{
+		"ai_base_url":     "https://mock-llm.local/v1",
+		"ai_api_key":      "sk-llm",
+		"ai_model":        "gpt-4o-mini",
+		"ai_asr_base_url": "http://asr.local/v1",
+		"ai_asr_model":    "whisper-1",
+	})
+
+	_, lessonIDs, _ := seedTestCourse(t, conn, "强转覆盖外挂字幕", []lessonSeedOpts{
+		{
+			RelPath:      "sub_and_asr.mp4",
+			SubtitleRel:  "sub_and_asr.srt",
+			SubtitleBody: "1\n00:00:00,000 --> 00:00:03,000\nPHYSICAL_SUBTITLE_TEXT\n",
+		},
+	})
+	ext := &fakeAudioExtractor{
+		dataDir: dataDir,
+		chunks:  []summary.AudioChunk{{OffsetSec: 0, DurationSec: 60}},
+	}
+	var seenASRTextInLLM bool
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(req.URL.Path, "/audio/transcriptions") {
+			return jsonResponse(http.StatusOK, map[string]any{
+				"language": "zh",
+				"segments": []map[string]any{{"start": 0.0, "end": 5.0, "text": "FRESH_ASR_TRANSCRIPT_TEXT"}},
+			}), nil
+		}
+		raw, _ := io.ReadAll(req.Body)
+		if strings.Contains(string(raw), "FRESH_ASR_TRANSCRIPT_TEXT") {
+			seenASRTextInLLM = true
+		}
+		return jsonResponse(http.StatusOK, map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": `{"overview":"基于新ASR的总结","outline":[{"title":"一","summary":"描述","start_sec":0}],"timeline":[{"start_sec":0,"end_sec":5,"title":"段","summary":"内容","key_points":["点"]}]}`,
+				},
+			}},
+		}), nil
+	})
+	svc, _ := newTestService(t, conn, dataDir, catSvc, mediaSvc, rt, func(o *summary.Options) {
+		o.AudioExtractor = ext
+	})
+
+	if _, err := svc.StartLessonSummary(context.Background(), lessonIDs[0], summary.GenerateLessonOptions{
+		Force:             true,
+		ForceRetranscribe: true,
+	}); err != nil {
+		t.Fatalf("StartLessonSummary ForceRetranscribe failed: %v", err)
+	}
+	svc.Wait()
+
+	if !seenASRTextInLLM {
+		t.Fatalf("expected ForceRetranscribe handoff to feed fresh ASR transcript to LLM")
+	}
+	st, err := svc.GetLessonSummaryState(context.Background(), lessonIDs[0])
+	if err != nil {
+		t.Fatalf("GetLessonSummaryState failed: %v", err)
+	}
+	if st.Summary == nil || st.Summary.SourceType != "asr" {
+		t.Fatalf("expected Summary.SourceType = asr, got %+v", st.Summary)
+	}
+}
+

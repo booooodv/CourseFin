@@ -302,10 +302,11 @@ type singleTranscribeRequest struct {
 }
 
 type singleSummaryRequest struct {
-	lessonID    string
-	courseID    string
-	mediaFileID string
-	opts        GenerateLessonOptions
+	lessonID               string
+	courseID               string
+	mediaFileID            string
+	preferCachedTranscript bool
+	opts                   GenerateLessonOptions
 }
 
 type batchLessonItem struct {
@@ -1542,10 +1543,11 @@ func (s *Service) executeSingleTranscribeTask(req *singleTranscribeRequest) {
 		nextOpts := req.summaryOpts
 		nextOpts.ForceRetranscribe = false
 		s.singleSummaryQueue = append(s.singleSummaryQueue, &singleSummaryRequest{
-			lessonID:    req.lessonID,
-			courseID:    req.courseID,
-			mediaFileID: req.mediaFileID,
-			opts:        nextOpts,
+			lessonID:               req.lessonID,
+			courseID:               req.courseID,
+			mediaFileID:            req.mediaFileID,
+			preferCachedTranscript: req.forceRetranscribe,
+			opts:                   nextOpts,
 		})
 		s.ensureSummaryWorkerLocked()
 		s.cond.Broadcast()
@@ -1593,7 +1595,7 @@ func (s *Service) executeSingleSummaryTask(req *singleSummaryRequest) {
 	s.activeSummaryMediaID = req.mediaFileID
 	s.mu.Unlock()
 
-	sourceType, err := s.runLessonSummaryOnly(jobCtx, req.lessonID, req.opts, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
+	sourceType, err := s.runLessonSummaryOnly(jobCtx, req.lessonID, req.opts, req.preferCachedTranscript, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
 		s.mu.Lock()
 		if e, exists := s.lessonJobs[req.lessonID]; exists {
 			e.status.Stage = stage
@@ -1832,7 +1834,7 @@ func (s *Service) executeSummaryBatchItem(batch *batchEntry, item batchLessonIte
 	batch.status.ChunkTotal = 0
 	s.mu.Unlock()
 
-	sourceType, err := s.runLessonSummaryOnly(jobCtx, item.lessonID, GenerateLessonOptions{}, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
+	sourceType, err := s.runLessonSummaryOnly(jobCtx, item.lessonID, GenerateLessonOptions{}, false, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
 		s.mu.Lock()
 		if e, exists := s.lessonJobs[item.lessonID]; exists {
 			e.status.Stage = stage
@@ -2047,6 +2049,7 @@ func (s *Service) runLessonSummaryOnly(
 	ctx context.Context,
 	lessonID string,
 	opts GenerateLessonOptions,
+	preferCached bool,
 	report progressFunc,
 ) (string, error) {
 	if err := ctx.Err(); err != nil {
@@ -2075,7 +2078,7 @@ func (s *Service) runLessonSummaryOnly(
 
 	report(StageReadingSubtitle, "正在读取字幕...", 0, 0, "")
 
-	src, err := s.resolveLessonTranscriptOnly(ctx, lesson.MediaFileID, opts)
+	src, err := s.resolveLessonTranscriptOnly(ctx, lesson.MediaFileID, opts, preferCached)
 	if err != nil {
 		return src.sourceType, err
 	}
@@ -2105,6 +2108,7 @@ func (s *Service) resolveLessonTranscriptOnly(
 	ctx context.Context,
 	mediaFileID string,
 	opts GenerateLessonOptions,
+	preferCached bool,
 ) (resolvedTranscript, error) {
 	manual := strings.TrimSpace(opts.ManualTranscript)
 	if manual != "" {
@@ -2122,6 +2126,14 @@ func (s *Service) resolveLessonTranscriptOnly(
 			vttText:       vtt,
 			plainText:     plain,
 		}, nil
+	}
+
+	if preferCached {
+		if res, ok, cacheErr := s.resolveCachedTranscript(ctx, mediaFileID); cacheErr != nil {
+			return resolvedTranscript{}, cacheErr
+		} else if ok {
+			return res, nil
+		}
 	}
 
 	if s.media != nil {
@@ -2147,10 +2159,12 @@ func (s *Service) resolveLessonTranscriptOnly(
 		}
 	}
 
-	if res, ok, cacheErr := s.resolveCachedTranscript(ctx, mediaFileID); cacheErr != nil {
-		return resolvedTranscript{}, cacheErr
-	} else if ok {
-		return res, nil
+	if !preferCached {
+		if res, ok, cacheErr := s.resolveCachedTranscript(ctx, mediaFileID); cacheErr != nil {
+			return resolvedTranscript{}, cacheErr
+		} else if ok {
+			return res, nil
+		}
 	}
 
 	return resolvedTranscript{}, errNoTranscriptReady
