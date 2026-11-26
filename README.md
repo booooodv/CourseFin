@@ -1,14 +1,14 @@
 # CourseFin
 
-![Version](https://img.shields.io/badge/version-v1.4.0-indigo)
+![Version](https://img.shields.io/badge/version-v1.5.0-indigo)
 ![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)
 ![React](https://img.shields.io/badge/Web-React%2019%20%2B%20TypeScript-61DAFB?logo=react&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-Single%20Container-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> A lightweight, Docker-deployable self-hosted course management platform that decouples physical video storage from custom course organization, exposes a **Jellyfin-compatible API**, ships with an embedded dual-theme Web manager & Artplayer player, and provides OpenAI-compatible AI course organization, per-lesson AI summaries, and subtitle-free ASR transcription.
+> A lightweight, Docker-deployable self-hosted course management platform that decouples physical video storage from custom course organization, exposes a **Jellyfin-compatible API**, ships with an embedded dual-theme Web manager & Artplayer player, and provides OpenAI-compatible AI course organization, AI cover generation with cohesive style templates, per-lesson AI summaries, and subtitle-free ASR transcription.
 
-自托管、单容器 Docker 部署的个人课程管理平台——把物理文件索引与逻辑课程彻底解耦，提供高兼容度的 **Jellyfin 协议接口**，内置明/暗双主题 Web 管理与播放端，并集成 **AI 课程整理**、**每课结构化 AI 总结（大纲 + 时间线）** 与 **无字幕语音转文字（ASR）托管字幕**，让 Infuse、VidHub、SenPlayer、Swiftfin、Findroid 与浏览器端都能流畅看课、同步进度并高效做笔记。
+自托管、单容器 Docker 部署的个人课程管理平台——把物理文件索引与逻辑课程彻底解耦，提供高兼容度的 **Jellyfin 协议接口**，内置明/暗双主题 Web 管理与播放端，并集成 **AI 课程整理**、**AI 统一风格封面生成**、**每课结构化 AI 总结（大纲 + 时间线）** 与 **无字幕语音转文字（ASR）托管字幕**，让 Infuse、VidHub、SenPlayer、Swiftfin、Findroid 与浏览器端都能流畅看课、同步进度并高效做笔记。
 
 ---
 
@@ -53,6 +53,10 @@ Jellyfin / Emby 的索引与刮削体系围绕电影和电视剧设计，管理�
 
 ## 核心功能
 
+- **AI 课程封面生成与统一风格模板（v1.5.0 新增）**：
+  - **6 套统一视觉风格与样图预览**：内置「现代书封」「暗夜科技」「柔和 3D 黏土」「温暖扁平插画」「极简蓝图」「质感影院」6 套双栏构图模板，悬停、聚焦或轻触预览图标即可直接查看对应参考样图；
+  - **多协议自填生图 API 与安全隔离**：支持 OpenAI 标准生图（`/images/generations`）、OpenAI 对话出图（`/chat/completions`）及 Google Gemini 原生接口（`:generateContent`），自动适配尺寸与参数降级、独立地址与 Gemini 模式绝不透传主 AI 密钥，并支持不写盘连通性测试；
+  - **单课预览应用与首页批量补齐**：课程编辑页支持自定义封面标题、副标题/讲师、节数角标与画面补充词，生成预览对比确认后再应用至 `/data/covers/` 并实时同步 Jellyfin 客户端；首页支持按媒体库或全部课程一键批量补齐缺失封面（或统一重绘），后台串行队列支持进度轮询、单课容错与随时取消。
 - **每课 AI 总结与无字幕语音转写（v1.4.0 新增）**：
   - **两段式结构化总结**：每节课可生成 **AI 总结视频大纲**（核心一句话概览 + 结构化要点与跳转时间）与 **AI 总结视频内容（按时间顺序）**（起止时间区间、段落概括与核心知识点）；超长课程（> 24,000 字）自动按时间分块 Map-Reduce 汇总，避免截断丢失后半段内容；
   - **一键导入笔记与时间线联动**：播放页右侧栏提供 **「课程目录 / AI 总结」** 双 Tab，点击时间戳精准跳转播放、随播放进度高亮当前段落，点击 **「复制 Markdown」** 一键粘贴至 Obsidian / Notion 等笔记工具；
@@ -141,7 +145,7 @@ COURSEFIN_PORT=8096 COURSEFIN_DATA_DIR=./data ./coursefin
 如果计划将 CourseFin 暴露到公网，请先阅读 [SECURITY.md](SECURITY.md) 中的完整自托管安全检查清单，重点注意：
 
 - 通过反向代理（Nginx / Caddy / Cloudflare Tunnel）启用 **HTTPS** 并对登录接口配置速率限制。
-- 妥善保护宿主机 `./data` 目录权限（`coursefin.db` 保存本地调用 AI / ASR 所需的 `ai_api_key` 与 `ai_asr_api_key`），切勿提交至 Git 或公开暴露。
+- 妥善保护宿主机 `./data` 目录权限（`coursefin.db` 保存本地调用 AI / ASR / 生图所需的 `ai_api_key`、`ai_asr_api_key` 与 `ai_image_api_key`），切勿提交至 Git 或公开暴露。
 - 始终对课程目录使用只读挂载（`:ro`），不要向不可信人员分享管理员账号。
 
 ---
@@ -168,6 +172,7 @@ make docker-build
 - [docs/superpowers/specs/2026-11-24-ui-redesign-design.md](docs/superpowers/specs/2026-11-24-ui-redesign-design.md)
 - [docs/superpowers/specs/2026-11-24-player-subtitle-import-ux-design.md](docs/superpowers/specs/2026-11-24-player-subtitle-import-ux-design.md)
 - [docs/superpowers/specs/2026-11-25-lesson-ai-summary-design.md](docs/superpowers/specs/2026-11-25-lesson-ai-summary-design.md)
+- [docs/superpowers/specs/2026-11-26-ai-course-cover-design.md](docs/superpowers/specs/2026-11-26-ai-course-cover-design.md)
 
 ---
 

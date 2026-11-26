@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.5.0 (2026-11-26)
+
+新增 AI 课程封面生成功能，内置统一风格模板与样图预览，支持单课预览应用与首页批量补齐：
+
+- **多协议 AI 生图客户端与安全配置**：
+  - 新增 `internal/ai/image.go`（`HTTPImageGenerator`），支持 **OpenAI 标准生图**（`/images/generations`，兼容 `b64_json` 与安全限流 `url` 下载及尺寸自动回退）、**OpenAI 对话出图**（`/chat/completions`，兼容 `message.images`、`image_url` 与 Markdown/DataURI）及 **Google Gemini 原生接口**（`:generateContent`，通过 `x-goog-api-key` 请求头鉴权与参数自动降级），并强制执行 MIME 魔数与 `image.DecodeConfig` 完整性校验（上限 20 MiB）；
+  - 系统设置页新增「AI 封面生图接口」配置区块（生图协议、模型、Base URL、脱敏 API Key 与清除开关、默认尺寸快捷预设、全局默认风格及不写盘「测试生图接口」按钮），严格执行跨域名与 Gemini 密钥防泄露规则（仅在 OpenAI 兼容协议且留空独立地址时复用主 `ai_api_key`）。
+- **6 套统一视觉风格模板与悬停/触摸样图预览**：
+  - 新增 `internal/cover`（`styles.go`、`config.go`、`service.go`），内置 **现代书封**（`editorial_modern`，默认）、**暗夜科技**（`dark_tech`）、**柔和 3D 黏土**（`clay_3d`）、**温暖扁平插画**（`warm_illustration`）、**极简蓝图**（`blueprint_grid`）、**质感影院**（`cinematic_studio`）6 套锁定双栏构图与配色的模板，并将对应 3:2 参考样图打包至 `web/public/cover-styles/` 与内嵌 `webdist`；
+  - 新增共享风格选择器组件 `CoverStylePicker`，支持鼠标悬停、键盘聚焦及触屏/点击预览图标弹出 Portal 高清样图浮层与适用课程说明。
+- **单课生成预览确认与首页批量补齐封面**：
+  - 课程编辑页封面面板新增 **「AI 生成封面」** 弹窗（`AICoverModal`），支持自定义封面主标题、副标题/讲师、节数角标开关与画面补充词；生成结果先缓存于 `{dataDir}/cache/cover_previews/`（30 分钟/50 条上限自动清理）并与原封面双栏对比，确认应用后原子写入 `{dataDir}/covers/` 并即时同步 Web 与 Jellyfin 客户端（绝不写入只读 `/media` 目录）；
+  - 首页新增 **「AI 批量封面」** 弹窗（`BatchCoverModal`）与受鉴权 REST 接口（`/api/v1/settings/ai/image/test`、`/api/v1/cover/styles`、`/api/v1/cover/previews/{previewId}`、`/api/v1/courses/{id}/cover/{generate,apply}`、`/api/v1/courses/covers/batch/{status,generate,cancel}`），支持按「全部课程」或「当前媒体库」执行「仅补齐缺失封面」或「覆盖全部课程」，后台单并发队列实时轮询并逐张刷新卡片，支持单课失败容错与随时取消。
+
 ## v1.4.0 (2026-11-25)
 
 新增每课 AI 总结、无字幕语音转文字（ASR）与 AI 转写字幕托管、以及整门课批量总结队列：
