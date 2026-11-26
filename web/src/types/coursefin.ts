@@ -633,9 +633,12 @@ export interface LessonSummary {
   updated_at: string;
 }
 
+export type LessonJobAction = 'transcribe' | 'summarize' | 'transcribe_and_summarize';
+
 export interface LessonSummaryJob {
   lesson_id: string;
   course_id: string;
+  action?: LessonJobAction;
   running: boolean;
   stage: SummaryJobStage;
   message: string;
@@ -652,6 +655,8 @@ export interface LessonSummaryCapabilities {
   has_subtitle: boolean;
   has_cached_transcript: boolean;
   transcript_source: string;
+  partial_transcript_chunks?: number;
+  partial_transcript_total?: number;
   ai_configured: boolean;
   asr_configured: boolean;
   has_ffmpeg: boolean;
@@ -670,6 +675,17 @@ export interface GenerateLessonSummaryInput {
   manual_transcript?: string;
 }
 
+export interface TranscribeLessonInput {
+  force_retranscribe?: boolean;
+}
+
+export type BatchJobKind = 'transcribe' | 'summarize';
+
+export interface CourseBatchInput {
+  mode?: 'missing_only' | 'all';
+  chapter_id?: string;
+}
+
 export interface CourseBatchLessonError {
   lesson_id: string;
   lesson_title: string;
@@ -679,10 +695,15 @@ export interface CourseBatchLessonError {
 
 export interface CourseBatchSummaryJob {
   course_id: string;
+  kind?: BatchJobKind;
+  chapter_id?: string;
+  chapter_title?: string;
   running: boolean;
   total: number;
   completed: number;
   skipped: number;
+  skipped_already_done?: number;
+  skipped_no_transcript?: number;
   failed: number;
   current_lesson_id: string;
   current_lesson_title: string;
@@ -694,10 +715,47 @@ export interface CourseBatchSummaryJob {
   finished_at?: string;
 }
 
+export type LessonTranscriptStatus =
+  | 'external_subtitle'
+  | 'embedded_subtitle'
+  | 'asr'
+  | 'manual'
+  | 'partial'
+  | 'none';
+
+export interface LessonPipelineStatus {
+  lesson_id: string;
+  chapter_id: string;
+  has_subtitle: boolean;
+  has_cached_transcript: boolean;
+  transcript_status: LessonTranscriptStatus;
+  transcript_ready: boolean;
+  transcribed_chunks?: number;
+  total_chunks?: number;
+  ai_subtitle_updated_at?: string;
+  has_summary: boolean;
+}
+
+export interface CoursePipelineCounts {
+  total_lessons: number;
+  subtitle_lessons: number;
+  transcribed_lessons: number;
+  transcript_ready: number;
+  partial_lessons: number;
+  missing_transcript: number;
+  summarized_lessons: number;
+  ready_to_summarize: number;
+}
+
 export interface CourseSummariesStatusResponse {
   course_id: string;
   summary_lesson_ids: string[];
+  transcript_lesson_ids?: string[];
+  lessons?: LessonPipelineStatus[];
+  counts?: CoursePipelineCounts;
   batch_job: CourseBatchSummaryJob | null;
+  transcribe_batch_job?: CourseBatchSummaryJob | null;
+  summary_batch_job?: CourseBatchSummaryJob | null;
 }
 
 export interface ProposalLesson {

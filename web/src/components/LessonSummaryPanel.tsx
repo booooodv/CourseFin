@@ -24,6 +24,7 @@ import Tooltip from './Tooltip';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { formatLessonSummaryMarkdown, formatTimestamp } from '../utils/summaryMarkdown';
 import type {
+  CourseBatchInput,
   CourseBatchSummaryJob,
   CourseDetail,
   GenerateLessonSummaryInput,
@@ -33,6 +34,7 @@ import type {
   LessonSummaryJob,
   SummaryJobStage,
   TimelineSection,
+  TranscribeLessonInput,
 } from '../types/coursefin';
 
 const POLL_INTERVAL_MS = 1500;
@@ -127,6 +129,20 @@ function findActiveTimelineIndex(
   return -1;
 }
 
+export function formatBatchResultSummary(batchJob: CourseBatchSummaryJob): string {
+  const prefix = batchJob.kind === 'transcribe' ? '批量转写' : '批量总结';
+  const chapterSuffix = batchJob.chapter_title ? `（${batchJob.chapter_title}）` : '';
+  const verb = batchJob.current_stage === 'cancelled' ? '已取消' : '完成';
+  const skippedNoTranscript = batchJob.skipped_no_transcript ?? 0;
+  let skipText = `跳过 ${batchJob.skipped}`;
+  if (skippedNoTranscript > 0) {
+    const skippedAlready =
+      batchJob.skipped_already_done ?? Math.max(0, batchJob.skipped - skippedNoTranscript);
+    skipText = `跳过 ${batchJob.skipped}（已总结 ${skippedAlready}，缺文稿 ${skippedNoTranscript}）`;
+  }
+  return `${prefix}${chapterSuffix}${verb}：成功 ${batchJob.completed}，${skipText}，失败 ${batchJob.failed}`;
+}
+
 export function shouldShowBatchBanner(
   batchJob: CourseBatchSummaryJob | null,
   dismissed = false,
@@ -150,12 +166,11 @@ export function BatchSummaryBanner({
   onCancel,
   onDismiss,
 }: BatchSummaryBannerProps) {
+  const isTranscribe = batchJob.kind === 'transcribe';
+
   if (!batchJob.running) {
     const errors = batchJob.errors ?? [];
-    const summaryHeading =
-      batchJob.current_stage === 'cancelled'
-        ? `批量总结已取消：成功 ${batchJob.completed}，跳过 ${batchJob.skipped}，失败 ${batchJob.failed}`
-        : `批量总结完成：成功 ${batchJob.completed}，跳过 ${batchJob.skipped}，失败 ${batchJob.failed}`;
+    const summaryHeading = formatBatchResultSummary(batchJob);
 
     return (
       <div
@@ -172,7 +187,7 @@ export function BatchSummaryBanner({
             <button
               type="button"
               onClick={onDismiss}
-              aria-label="关闭批量错误提示"
+              aria-label={isTranscribe ? '关闭批量转写错误提示' : '关闭批量错误提示'}
               className="rounded-lg p-1 text-status-danger-ink hover:bg-card/60 transition-colors shrink-0 cursor-pointer"
             >
               <X className="h-3.5 w-3.5" />
@@ -207,6 +222,10 @@ export function BatchSummaryBanner({
     batchJob.chunk_index,
     batchJob.chunk_total,
   );
+  const runningPrefix = isTranscribe ? '批量转写中' : '批量总结中';
+  const runningHeading = batchJob.chapter_title
+    ? `${runningPrefix} · ${batchJob.chapter_title} ${doneCount}/${batchJob.total}`
+    : `${runningPrefix} ${doneCount}/${batchJob.total}`;
 
   return (
     <div className="rounded-2xl border border-accent-ring/40 bg-accent-soft p-3 space-y-2">
@@ -214,9 +233,7 @@ export function BatchSummaryBanner({
         <div className="min-w-0 space-y-0.5">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-accent-ink">
             <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-            <span>
-              批量生成中 {doneCount}/{batchJob.total}
-            </span>
+            <span className="truncate">{runningHeading}</span>
           </div>
           <p className="text-[11px] text-ink-secondary leading-snug break-words">
             {stageText}
@@ -251,14 +268,22 @@ export interface LessonSummaryPanelProps {
   currentTimeSec: number;
   onSeek: (seconds: number) => void;
   onSummaryUpdated: (lessonId: string, sourceType?: string, isNewlyCompleted?: boolean) => void;
+  onTranscriptUpdated?: (lessonId: string, isNewlyCompleted?: boolean) => void;
   batchJob: CourseBatchSummaryJob | null;
+  transcribeBatchJob?: CourseBatchSummaryJob | null;
   batchSyncKey?: string;
   batchResultDismissed?: boolean;
+  transcribeBatchResultDismissed?: boolean;
   onDismissBatch?: () => void;
-  onStartBatch: (mode?: 'missing_only' | 'all') => void | Promise<void>;
+  onDismissTranscribeBatch?: () => void;
+  onStartBatch: (options?: 'missing_only' | 'all' | CourseBatchInput) => void | Promise<void>;
   onCancelBatch: () => void | Promise<void>;
+  onStartTranscribeBatch?: (options?: CourseBatchInput) => void | Promise<void>;
+  onCancelTranscribeBatch?: () => void | Promise<void>;
   startingBatch?: boolean;
   cancellingBatch?: boolean;
+  startingTranscribeBatch?: boolean;
+  cancellingTranscribeBatch?: boolean;
 }
 
 export default function LessonSummaryPanel({
@@ -267,14 +292,20 @@ export default function LessonSummaryPanel({
   currentTimeSec,
   onSeek,
   onSummaryUpdated,
+  onTranscriptUpdated,
   batchJob,
+  transcribeBatchJob = null,
   batchSyncKey,
   batchResultDismissed,
+  transcribeBatchResultDismissed,
   onDismissBatch,
+  onDismissTranscribeBatch,
   onStartBatch,
   onCancelBatch,
+  onCancelTranscribeBatch,
   startingBatch = false,
   cancellingBatch = false,
+  cancellingTranscribeBatch = false,
 }: LessonSummaryPanelProps) {
   const { toast } = useToast();
   const lessonId = activeEntry?.lesson.id ?? null;
@@ -292,12 +323,14 @@ export default function LessonSummaryPanel({
   const [showManualInput, setShowManualInput] = useState(false);
   const [manualTranscript, setManualTranscript] = useState('');
   const [localBatchDismissed, setLocalBatchDismissed] = useState(false);
+  const [localTranscribeDismissed, setLocalTranscribeDismissed] = useState(false);
 
   const scopedSummary = lessonId && summary?.lesson_id === lessonId ? summary : null;
   const scopedJob = lessonId && job?.lesson_id === lessonId ? job : null;
 
   useEffect(() => {
     setLocalBatchDismissed(false);
+    setLocalTranscribeDismissed(false);
   }, [course.id]);
 
   useEffect(() => {
@@ -306,11 +339,23 @@ export default function LessonSummaryPanel({
     }
   }, [batchJob?.running]);
 
+  useEffect(() => {
+    if (transcribeBatchJob?.running) {
+      setLocalTranscribeDismissed(false);
+    }
+  }, [transcribeBatchJob?.running]);
+
   const effectiveBatchDismissed = batchResultDismissed ?? localBatchDismissed;
   const handleDismissBatch = useCallback(() => {
     setLocalBatchDismissed(true);
     onDismissBatch?.();
   }, [onDismissBatch]);
+
+  const effectiveTranscribeDismissed = transcribeBatchResultDismissed ?? localTranscribeDismissed;
+  const handleDismissTranscribeBatch = useCallback(() => {
+    setLocalTranscribeDismissed(true);
+    onDismissTranscribeBatch?.();
+  }, [onDismissTranscribeBatch]);
 
   const activeLessonIdRef = useRef<string | null>(lessonId);
   activeLessonIdRef.current = lessonId;
@@ -319,6 +364,8 @@ export default function LessonSummaryPanel({
   const copyTimerRef = useRef<number | null>(null);
   const onSummaryUpdatedRef = useRef(onSummaryUpdated);
   onSummaryUpdatedRef.current = onSummaryUpdated;
+  const onTranscriptUpdatedRef = useRef(onTranscriptUpdated);
+  onTranscriptUpdatedRef.current = onTranscriptUpdated;
 
   useEffect(() => {
     return () => {
@@ -350,11 +397,15 @@ export default function LessonSummaryPanel({
           awaitingCompletionForLessonRef.current === targetLessonId
         ) {
           awaitingCompletionForLessonRef.current = null;
-          onSummaryUpdatedRef.current(
-            targetLessonId,
-            data.summary?.source_type ?? data.job.source_type,
-            true,
-          );
+          if (data.job.action === 'transcribe') {
+            onTranscriptUpdatedRef.current?.(targetLessonId, true);
+          } else {
+            onSummaryUpdatedRef.current(
+              targetLessonId,
+              data.summary?.source_type ?? data.job.source_type,
+              true,
+            );
+          }
         } else if (data.summary) {
           onSummaryUpdatedRef.current(targetLessonId, data.summary.source_type, false);
         }
@@ -455,8 +506,11 @@ export default function LessonSummaryPanel({
     };
   }, [lessonId, isJobRunning, fetchLessonSummaryState]);
 
-  const handleGenerate = useCallback(
-    async (input: GenerateLessonSummaryInput = {}) => {
+  const startLessonRequest = useCallback(
+    async (
+      starter: (targetLessonId: string) => Promise<LessonSummaryJob>,
+      fallbackError: string,
+    ) => {
       if (!lessonId || submitting) return;
       const targetLessonId = lessonId;
       const seq = requestSeqRef.current;
@@ -466,13 +520,14 @@ export default function LessonSummaryPanel({
       awaitingCompletionForLessonRef.current = targetLessonId;
 
       try {
-        const startedJob = await api.generateLessonSummary(targetLessonId, input);
+        const startedJob = await starter(targetLessonId);
         if (seq !== requestSeqRef.current || activeLessonIdRef.current !== targetLessonId) {
           return;
         }
         setJob(startedJob);
 
         if (!startedJob.running) {
+          awaitingCompletionForLessonRef.current = null;
           await fetchLessonSummaryState(targetLessonId, seq, false);
         }
       } catch (err) {
@@ -480,7 +535,7 @@ export default function LessonSummaryPanel({
           return;
         }
         awaitingCompletionForLessonRef.current = null;
-        const msg = err instanceof Error ? err.message : '启动 AI 总结失败';
+        const msg = err instanceof Error ? err.message : fallbackError;
         setActionError(msg);
         toast.error(msg);
       } finally {
@@ -492,16 +547,39 @@ export default function LessonSummaryPanel({
     [lessonId, submitting, fetchLessonSummaryState, toast],
   );
 
+  const handleGenerate = useCallback(
+    async (input: GenerateLessonSummaryInput = {}) => {
+      await startLessonRequest(
+        (targetLessonId) => api.generateLessonSummary(targetLessonId, input),
+        '启动 AI 总结失败',
+      );
+    },
+    [startLessonRequest],
+  );
+
+  const handleTranscribe = useCallback(
+    async (input: TranscribeLessonInput = {}) => {
+      await startLessonRequest(
+        (targetLessonId) => api.generateLessonTranscript(targetLessonId, input),
+        '启动语音转文字失败',
+      );
+    },
+    [startLessonRequest],
+  );
+
   const handleCancelLessonJob = useCallback(async () => {
     if (!lessonId || cancelling) return;
     const targetLessonId = lessonId;
     const seq = requestSeqRef.current;
+    const isTranscribeOnly = job?.lesson_id === targetLessonId && job.action === 'transcribe';
 
     setCancelling(true);
     setActionError(null);
 
     try {
-      const cancelledJob = await api.cancelLessonSummary(targetLessonId);
+      const cancelledJob = isTranscribeOnly
+        ? await api.cancelLessonTranscript(targetLessonId)
+        : await api.cancelLessonSummary(targetLessonId);
       if (seq !== requestSeqRef.current || activeLessonIdRef.current !== targetLessonId) {
         return;
       }
@@ -520,7 +598,7 @@ export default function LessonSummaryPanel({
         setCancelling(false);
       }
     }
-  }, [lessonId, cancelling, fetchLessonSummaryState, toast]);
+  }, [lessonId, cancelling, job, fetchLessonSummaryState, toast]);
 
   const handleCopyMarkdown = useCallback(async () => {
     if (!scopedSummary || !activeEntry) return;
@@ -551,7 +629,19 @@ export default function LessonSummaryPanel({
     return findActiveTimelineIndex(scopedSummary.timeline, scopedSummary.has_timestamps, currentTimeSec);
   }, [scopedSummary, currentTimeSec]);
 
-  const batchBanner = shouldShowBatchBanner(batchJob, effectiveBatchDismissed) ? (
+  const transcribeBatchBanner = shouldShowBatchBanner(
+    transcribeBatchJob,
+    effectiveTranscribeDismissed,
+  ) ? (
+    <BatchSummaryBanner
+      batchJob={transcribeBatchJob}
+      cancelling={cancellingTranscribeBatch}
+      onCancel={onCancelTranscribeBatch ?? (() => {})}
+      onDismiss={handleDismissTranscribeBatch}
+    />
+  ) : null;
+
+  const summaryBatchBanner = shouldShowBatchBanner(batchJob, effectiveBatchDismissed) ? (
     <BatchSummaryBanner
       batchJob={batchJob}
       cancelling={cancellingBatch}
@@ -560,10 +650,18 @@ export default function LessonSummaryPanel({
     />
   ) : null;
 
+  const batchBanners =
+    transcribeBatchBanner || summaryBatchBanner ? (
+      <div className="space-y-2">
+        {transcribeBatchBanner}
+        {summaryBatchBanner}
+      </div>
+    ) : null;
+
   if (!activeEntry || !lessonId) {
     return (
       <div className="p-5 space-y-4">
-        {batchBanner}
+        {batchBanners}
         <div className="rounded-2xl border border-dashed border-default bg-subtle/50 p-6 text-center text-xs text-ink-secondary">
           请选择一个课时查看或生成 AI 总结
         </div>
@@ -574,7 +672,7 @@ export default function LessonSummaryPanel({
   if (loading && !scopedSummary && !scopedJob && !capabilities) {
     return (
       <div className="p-5 space-y-4">
-        {batchBanner}
+        {batchBanners}
         <div className="flex flex-col items-center justify-center py-12 gap-2.5 text-ink-secondary">
           <Loader2 className="h-6 w-6 animate-spin text-accent" />
           <p className="text-xs">正在加载 AI 总结...</p>
@@ -586,7 +684,7 @@ export default function LessonSummaryPanel({
   if (fetchError && !scopedSummary && !capabilities) {
     return (
       <div className="p-5 space-y-4">
-        {batchBanner}
+        {batchBanners}
         <div className="rounded-2xl border border-status-danger/30 bg-status-danger-soft p-4 text-center space-y-3">
           <p className="text-xs font-medium text-status-danger-ink">{fetchError}</p>
           <button
@@ -610,21 +708,38 @@ export default function LessonSummaryPanel({
   const asrConfigured = capabilities?.asr_configured ?? false;
   const hasSubtitle = capabilities?.has_subtitle ?? false;
   const hasCachedTranscript = capabilities?.has_cached_transcript ?? false;
+  const partialChunks = capabilities?.partial_transcript_chunks ?? 0;
+  const partialTotal = capabilities?.partial_transcript_total ?? 0;
+  const hasPartialCheckpoint = !hasSubtitle && !hasCachedTranscript && partialChunks > 0 && partialTotal > 0;
   const hasFfmpeg = capabilities?.has_ffmpeg ?? true;
   const canRetranscribe =
     scopedSummary?.source_type === 'asr' || Boolean(capabilities?.has_cached_transcript);
+
+  const partialCheckpointBanner = hasPartialCheckpoint ? (
+    <p className="rounded-xl border border-status-warning/30 bg-status-warning-soft px-3 py-2 text-xs text-status-warning-ink">
+      检测到上次转写断点（已完成 {partialChunks}/{partialTotal} 分片），继续转写将自动跳过已完成分片
+    </p>
+  ) : null;
 
   const showFailureBanner =
     !scopedJob?.running &&
     (Boolean(actionError) || scopedJob?.stage === 'failed' || scopedJob?.stage === 'cancelled');
   const failureMessage =
     actionError ||
-    (scopedJob?.stage === 'failed' ? scopedJob.error || scopedJob.message || '生成 AI 总结失败' : '') ||
-    (scopedJob?.stage === 'cancelled' ? '任务已取消，可随时重新生成' : '');
+    (scopedJob?.stage === 'failed'
+      ? scopedJob.error ||
+        scopedJob.message ||
+        (scopedJob.action === 'transcribe' ? '语音转文字失败' : '生成 AI 总结失败')
+      : '') ||
+    (scopedJob?.stage === 'cancelled'
+      ? scopedJob.action === 'transcribe'
+        ? '转写已取消，已完成分片断点已保留'
+        : '任务已取消，可随时重新生成'
+      : '');
 
   return (
     <div className="max-h-[calc(100vh-8rem)] overflow-y-auto p-4 space-y-4">
-      {batchBanner}
+      {batchBanners}
 
       {/* Single-lesson running stage card (kept above old summary if one exists) */}
       {scopedJob?.running && (
@@ -911,23 +1026,73 @@ export default function LessonSummaryPanel({
       {!scopedSummary && !scopedJob?.running && capabilities && (
         <div className="rounded-2xl border border-subtle bg-subtle/40 p-4 space-y-3.5">
           {!aiConfigured ? (
-            <div className="space-y-3 text-center py-2">
-              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-2xl bg-status-warning-soft text-status-warning-ink">
-                <Settings className="h-5 w-5" />
+            <div className="space-y-4">
+              <div className="space-y-3 text-center py-1">
+                <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-2xl bg-status-warning-soft text-status-warning-ink">
+                  <Settings className="h-5 w-5" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-ink-primary">尚未配置 AI 接口</p>
+                  <p className="text-xs text-ink-secondary leading-relaxed">
+                    请先在系统设置中填写 OpenAI 兼容 Base URL、API Key 与模型名称，即可开启每课 AI 总结。
+                  </p>
+                </div>
+                <Link
+                  to="/settings"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse hover:bg-accent-hover shadow-accent transition-colors"
+                >
+                  <Settings className="h-3.5 w-3.5" />
+                  <span>前往配置 AI 接口</span>
+                </Link>
               </div>
-              <div className="space-y-1">
-                <p className="text-sm font-semibold text-ink-primary">尚未配置 AI 接口</p>
-                <p className="text-xs text-ink-secondary leading-relaxed">
-                  请先在系统设置中填写 OpenAI 兼容 Base URL、API Key 与模型名称，即可开启每课 AI 总结。
-                </p>
-              </div>
-              <Link
-                to="/settings"
-                className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse hover:bg-accent-hover shadow-accent transition-colors"
-              >
-                <Settings className="h-3.5 w-3.5" />
-                <span>前往配置 AI 接口</span>
-              </Link>
+
+              {asrConfigured && !hasSubtitle && !hasCachedTranscript && (
+                <div className="space-y-3 border-t border-subtle pt-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-ink-primary">
+                      <Mic className="h-3.5 w-3.5 text-accent" />
+                      <span>已配置语音转文字（ASR）</span>
+                    </div>
+                    <p className="text-xs text-ink-secondary leading-relaxed">
+                      即使暂未配置 AI 总结模型，也可以先将当前课时语音转写为「AI 转写字幕」。
+                    </p>
+                  </div>
+                  {partialCheckpointBanner}
+                  {!hasFfmpeg && (
+                    <p className="rounded-xl border border-status-warning/30 bg-status-warning-soft px-3 py-2 text-xs text-status-warning-ink">
+                      当前服务端未检测到 FFmpeg，无法自动抽取音频。
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void handleTranscribe({})}
+                    disabled={submitting || !hasFfmpeg}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-default bg-card px-4 py-2 text-xs font-semibold text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors cursor-pointer"
+                  >
+                    <Mic className="h-3.5 w-3.5 text-accent" />
+                    <span>{hasPartialCheckpoint ? '继续转写' : '仅语音转文字'}</span>
+                  </button>
+                </div>
+              )}
+
+              {asrConfigured && hasCachedTranscript && (
+                <div className="space-y-2 border-t border-subtle pt-3">
+                  <p className="text-xs text-ink-secondary leading-relaxed">
+                    本节已存在缓存转写文稿（AI 转写字幕），配置 AI 总结模型后即可直接生成总结。
+                  </p>
+                  {hasFfmpeg && (
+                    <button
+                      type="button"
+                      onClick={() => void handleTranscribe({ force_retranscribe: true })}
+                      disabled={submitting}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-default bg-card px-3.5 py-1.5 text-xs font-medium text-ink-secondary hover:text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors cursor-pointer"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      <span>重新转写</span>
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           ) : hasSubtitle || hasCachedTranscript ? (
             <div className="space-y-3">
@@ -962,6 +1127,20 @@ export default function LessonSummaryPanel({
                 >
                   <span>为整门课批量生成</span>
                 </button>
+
+                {hasCachedTranscript && asrConfigured && hasFfmpeg && (
+                  <Tooltip content="强制重新提取音频并语音转写（仅更新转写文稿与字幕，不生成总结）">
+                    <button
+                      type="button"
+                      onClick={() => void handleTranscribe({ force_retranscribe: true })}
+                      disabled={submitting}
+                      className="inline-flex items-center gap-1 rounded-full border border-subtle bg-card px-3 py-2 text-xs font-medium text-ink-secondary hover:text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors cursor-pointer"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      <span>重新转写</span>
+                    </button>
+                  </Tooltip>
+                )}
               </div>
             </div>
           ) : asrConfigured ? (
@@ -972,9 +1151,11 @@ export default function LessonSummaryPanel({
                   <span>自动语音转写并总结</span>
                 </div>
                 <p className="text-xs text-ink-secondary leading-relaxed">
-                  当前课时暂无外挂或内嵌文本字幕，将自动抽取音频并调用语音转文字生成总结，同时创建可播放的「AI 转写字幕」（约 1~3 分钟）。
+                  当前课时暂无外挂或内嵌文本字幕，可仅转写生成「AI 转写字幕」，或一键转写并生成总结（约 1~3 分钟）。
                 </p>
               </div>
+
+              {partialCheckpointBanner}
 
               {!hasFfmpeg && (
                 <p className="rounded-xl border border-status-warning/30 bg-status-warning-soft px-3 py-2 text-xs text-status-warning-ink">
@@ -989,8 +1170,18 @@ export default function LessonSummaryPanel({
                   disabled={submitting || !hasFfmpeg}
                   className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-xs font-semibold text-ink-inverse hover:bg-accent-hover shadow-accent disabled:opacity-50 transition-colors cursor-pointer"
                 >
-                  <Mic className="h-3.5 w-3.5" />
+                  <Sparkles className="h-3.5 w-3.5" />
                   <span>转写并生成总结</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void handleTranscribe({})}
+                  disabled={submitting || !hasFfmpeg}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-default bg-card px-3.5 py-2 text-xs font-medium text-ink-primary hover:bg-subtle disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  <Mic className="h-3.5 w-3.5 text-accent" />
+                  <span>{hasPartialCheckpoint ? '继续转写' : '仅语音转文字'}</span>
                 </button>
 
                 <button

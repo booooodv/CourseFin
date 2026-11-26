@@ -5,6 +5,7 @@ import type {
   BindSubtitleInput,
   ChapterDetail,
   CommitImportInput,
+  CourseBatchInput,
   CourseBatchSummaryJob,
   CourseCover,
   CourseDetail,
@@ -48,6 +49,7 @@ import type {
   Tag,
   TestAIImageOverrides,
   TestASROverrides,
+  TranscribeLessonInput,
   UpdateConfigInput,
   UpdateCourseInput,
   UpdateSettingsInput,
@@ -643,6 +645,24 @@ export const api = {
       { method: 'POST' },
     );
   },
+  generateLessonTranscript(
+    lessonId: string,
+    input: TranscribeLessonInput = {},
+  ): Promise<LessonSummaryJob> {
+    return request<LessonSummaryJob>(
+      `/api/v1/lessons/${encodeURIComponent(lessonId)}/transcript/generate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    );
+  },
+  cancelLessonTranscript(lessonId: string): Promise<LessonSummaryJob> {
+    return request<LessonSummaryJob>(
+      `/api/v1/lessons/${encodeURIComponent(lessonId)}/transcript/cancel`,
+      { method: 'POST' },
+    );
+  },
   deleteLessonSummary(
     lessonId: string,
     options?: boolean | { deleteTranscript?: boolean },
@@ -664,23 +684,51 @@ export const api = {
   },
   generateCourseSummaries(
     courseId: string,
-    modeOrOptions: 'missing_only' | 'all' | { mode?: 'missing_only' | 'all' } = 'missing_only',
+    modeOrOptions: 'missing_only' | 'all' | CourseBatchInput = 'missing_only',
   ): Promise<CourseBatchSummaryJob> {
     const mode =
       typeof modeOrOptions === 'string'
         ? modeOrOptions
         : modeOrOptions.mode ?? 'missing_only';
+    const chapterId =
+      typeof modeOrOptions === 'string' ? undefined : modeOrOptions.chapter_id;
+    const payload: CourseBatchInput = chapterId ? { mode, chapter_id: chapterId } : { mode };
     return request<CourseBatchSummaryJob>(
       `/api/v1/courses/${encodeURIComponent(courseId)}/summaries/generate`,
       {
         method: 'POST',
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify(payload),
       },
     );
   },
   cancelCourseSummaries(courseId: string): Promise<CourseBatchSummaryJob> {
     return request<CourseBatchSummaryJob>(
       `/api/v1/courses/${encodeURIComponent(courseId)}/summaries/cancel`,
+      { method: 'POST' },
+    );
+  },
+  generateCourseTranscripts(
+    courseId: string,
+    modeOrOptions: 'missing_only' | 'all' | CourseBatchInput = 'missing_only',
+  ): Promise<CourseBatchSummaryJob> {
+    const mode =
+      typeof modeOrOptions === 'string'
+        ? modeOrOptions
+        : modeOrOptions.mode ?? 'missing_only';
+    const chapterId =
+      typeof modeOrOptions === 'string' ? undefined : modeOrOptions.chapter_id;
+    const payload: CourseBatchInput = chapterId ? { mode, chapter_id: chapterId } : { mode };
+    return request<CourseBatchSummaryJob>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/transcripts/generate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
+  },
+  cancelCourseTranscripts(courseId: string): Promise<CourseBatchSummaryJob> {
+    return request<CourseBatchSummaryJob>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/transcripts/cancel`,
       { method: 'POST' },
     );
   },
