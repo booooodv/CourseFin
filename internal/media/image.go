@@ -46,6 +46,30 @@ func (s *Service) ServeImage(w http.ResponseWriter, r *http.Request, itemID, ima
 		return
 	}
 
+	s.ServeImageFile(w, r, srcPath, maxWidth, maxHeight)
+}
+
+// ServeCoverFile serves a specific course cover file inside {dataDir}/covers with
+// optional resizing, disk caching, and SHA-256 ETag validation.
+func (s *Service) ServeCoverFile(w http.ResponseWriter, r *http.Request, storedPath string, maxWidth, maxHeight int) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	srcPath, ok := resolveDataImagePath(s.dataDir, "covers", storedPath)
+	if !ok {
+		writeLookupError(w, os.ErrNotExist)
+		return
+	}
+
+	s.ServeImageFile(w, r, srcPath, maxWidth, maxHeight)
+}
+
+// ServeImageFile serves an already-resolved image file on disk with optional aspect-preserving
+// JPEG resizing, cached under {dataDir}/cache/images, and conditional ETag support.
+func (s *Service) ServeImageFile(w http.ResponseWriter, r *http.Request, srcPath string, maxWidth, maxHeight int) {
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
 		writeLookupError(w, err)

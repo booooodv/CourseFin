@@ -188,13 +188,15 @@ func (h *handler) handleUploadCourseCover(w http.ResponseWriter, r *http.Request
 
 	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		fileName, err := h.saveUploadedCourseImage(r, courseID, "cover", course.CoverPath)
+		raw, ext, err := readUploadedImage(r)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		updated, err := h.cat.UpdateCourse(r.Context(), courseID, catalog.UpdateCourseInput{
-			CoverPath: &fileName,
+		_, updated, err := h.cat.AddCourseCover(r.Context(), courseID, catalog.AddCourseCoverInput{
+			Ext:    ext,
+			Data:   raw,
+			Source: catalog.CoverSourceUpload,
 		})
 		if err != nil {
 			writeCatalogError(w, err)
@@ -233,14 +235,15 @@ func (h *handler) handleUploadCourseCover(w http.ResponseWriter, r *http.Request
 	if !allowedCoverExts[ext] {
 		ext = ".jpg"
 	}
-	destName := courseID + "_cover" + ext
-	if err := h.copyFileToCoversDir(srcPath, destName, course.CoverPath); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	raw, err := os.ReadFile(srcPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("read thumbnail: %v", err))
 		return
 	}
-
-	updated, err := h.cat.UpdateCourse(r.Context(), courseID, catalog.UpdateCourseInput{
-		CoverPath: &destName,
+	_, updated, err := h.cat.AddCourseCover(r.Context(), courseID, catalog.AddCourseCoverInput{
+		Ext:    ext,
+		Data:   raw,
+		Source: catalog.CoverSourceFrame,
 	})
 	if err != nil {
 		writeCatalogError(w, err)
@@ -272,23 +275,23 @@ func (h *handler) handleUploadCourseBackdrop(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (h *handler) saveUploadedCourseImage(r *http.Request, courseID, kind, prevFileName string) (string, error) {
+func readUploadedImage(r *http.Request) ([]byte, string, error) {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxCoverUploadBytes)
 	if err := r.ParseMultipartForm(maxCoverUploadBytes); err != nil {
-		return "", fmt.Errorf("parse multipart upload: %w", err)
+		return nil, "", fmt.Errorf("parse multipart upload: %w", err)
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		return "", fmt.Errorf("missing multipart field 'file': %w", err)
+		return nil, "", fmt.Errorf("missing multipart field 'file': %w", err)
 	}
 	defer file.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(file, maxCoverUploadBytes))
 	if err != nil {
-		return "", fmt.Errorf("read uploaded file: %w", err)
+		return nil, "", fmt.Errorf("read uploaded file: %w", err)
 	}
 	if len(raw) == 0 {
-		return "", fmt.Errorf("uploaded file is empty")
+		return nil, "", fmt.Errorf("uploaded file is empty")
 	}
 
 	detected := http.DetectContentType(raw)
@@ -303,12 +306,20 @@ func (h *handler) saveUploadedCourseImage(r *http.Request, courseID, kind, prevF
 	case "image/gif":
 		detectedExt = ".gif"
 	default:
-		return "", fmt.Errorf("unsupported image format (%s)", detected)
+		return nil, "", fmt.Errorf("unsupported image format (%s)", detected)
 	}
 
 	ext := strings.ToLower(path.Ext(header.Filename))
 	if !allowedCoverExts[ext] {
 		ext = detectedExt
+	}
+	return raw, ext, nil
+}
+
+func (h *handler) saveUploadedCourseImage(r *http.Request, courseID, kind, prevFileName string) (string, error) {
+	raw, ext, err := readUploadedImage(r)
+	if err != nil {
+		return "", err
 	}
 
 	coversDir := filepath.Join(h.dataDir, "covers")
@@ -341,25 +352,6 @@ func (h *handler) resolveLessonThumbnailSource(lesson *catalog.LessonDetail) (st
 		}
 	}
 	return "", fmt.Errorf("lesson has no extracted thumbnail")
-}
-
-func (h *handler) copyFileToCoversDir(srcPath, destName, prevFileName string) error {
-	coversDir := filepath.Join(h.dataDir, "covers")
-	if err := os.MkdirAll(coversDir, 0o755); err != nil {
-		return fmt.Errorf("create covers dir: %w", err)
-	}
-	raw, err := os.ReadFile(srcPath)
-	if err != nil {
-		return fmt.Errorf("read thumbnail: %w", err)
-	}
-	destPath := filepath.Join(coversDir, destName)
-	if err := os.WriteFile(destPath, raw, 0o644); err != nil {
-		return fmt.Errorf("write cover: %w", err)
-	}
-	if prevFileName != "" && filepath.Base(prevFileName) != destName {
-		_ = os.Remove(filepath.Join(coversDir, filepath.Base(prevFileName)))
-	}
-	return nil
 }
 
 func (h *handler) handleGetCourseNewFiles(w http.ResponseWriter, r *http.Request) {

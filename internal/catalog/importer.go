@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"coursefin/internal/id"
 )
@@ -316,15 +317,21 @@ func (s *Service) CommitDirectoryImport(ctx context.Context, input CommitImportI
 	}
 
 	courseID := id.New()
+	var copiedCoverID string
 	var copiedCoverName string
 	var copiedCoverAbs string
+	var copiedCoverW int
+	var copiedCoverH int
 	if coverRelPath != "" {
-		name, abs, err := s.copyCoverFromStorage(ctx, src, courseID, coverRelPath)
+		cid, name, abs, w, h, err := s.copyCoverFromStorage(ctx, src, courseID, coverRelPath)
 		if err != nil {
 			return nil, err
 		}
+		copiedCoverID = cid
 		copiedCoverName = name
 		copiedCoverAbs = abs
+		copiedCoverW = w
+		copiedCoverH = h
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -342,7 +349,7 @@ func (s *Service) CommitDirectoryImport(ctx context.Context, input CommitImportI
 		}
 	}()
 
-	now := nowUTC()
+	now := coverTimeUTC(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO courses (
 			id, library_id, title, sort_title, overview, instructor,
@@ -352,6 +359,16 @@ func (s *Service) CommitDirectoryImport(ctx context.Context, input CommitImportI
 		copiedCoverName, src.ID, cleanDir, now, now,
 	); err != nil {
 		return nil, fmt.Errorf("insert imported course: %w", err)
+	}
+
+	if copiedCoverName != "" {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO course_covers (id, course_id, file_path, source, style_id, style_name, prompt, width, height, created_at)
+			VALUES (?, ?, ?, ?, '', '', '', ?, ?, ?)`,
+			copiedCoverID, courseID, copiedCoverName, CoverSourceImport, copiedCoverW, copiedCoverH, now,
+		); err != nil {
+			return nil, fmt.Errorf("insert imported course cover: %w", err)
+		}
 	}
 
 	if len(chapters) == 0 {
@@ -412,46 +429,42 @@ func (s *Service) CommitDirectoryImport(ctx context.Context, input CommitImportI
 	return s.GetCourseDetail(ctx, courseID)
 }
 
-func (s *Service) copyCoverFromStorage(ctx context.Context, src *StorageSource, courseID, coverRelPath string) (string, string, error) {
+func (s *Service) copyCoverFromStorage(ctx context.Context, src *StorageSource, courseID, coverRelPath string) (string, string, string, int, int, error) {
 	ext := strings.ToLower(path.Ext(coverRelPath))
 	if _, ok := coverExtOrder[ext]; !ok {
-		return "", "", fmt.Errorf("%w: unsupported cover extension %q", ErrInvalidInput, ext)
+		return "", "", "", 0, 0, fmt.Errorf("%w: unsupported cover extension %q", ErrInvalidInput, ext)
 	}
 
 	provider, err := s.registry.ProviderFor(src.Driver, src.RootPath, src.ConfigJSON)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve provider for cover: %w", err)
+		return "", "", "", 0, 0, fmt.Errorf("resolve provider for cover: %w", err)
 	}
 
 	rc, err := provider.Open(ctx, coverRelPath)
 	if err != nil {
-		return "", "", fmt.Errorf("open cover %q: %w", coverRelPath, err)
+		return "", "", "", 0, 0, fmt.Errorf("open cover %q: %w", coverRelPath, err)
 	}
 	defer rc.Close()
 
+	raw, err := io.ReadAll(rc)
+	if err != nil {
+		return "", "", "", 0, 0, fmt.Errorf("read cover file: %w", err)
+	}
+
 	coversDir := filepath.Join(s.dataDir, "covers")
 	if err := os.MkdirAll(coversDir, 0o755); err != nil {
-		return "", "", fmt.Errorf("create covers dir: %w", err)
+		return "", "", "", 0, 0, fmt.Errorf("create covers dir: %w", err)
 	}
 
-	coverName := courseID + ext
+	coverID := id.New()
+	coverName := fmt.Sprintf("%s_cover_%s%s", courseID, coverID, ext)
 	destPath := filepath.Join(coversDir, coverName)
-	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return "", "", fmt.Errorf("create cover file: %w", err)
+	if err := writeCoverFileAtomically(coversDir, destPath, raw); err != nil {
+		return "", "", "", 0, 0, fmt.Errorf("write imported cover file: %w", err)
 	}
 
-	if _, err := io.Copy(out, rc); err != nil {
-		out.Close()
-		_ = os.Remove(destPath)
-		return "", "", fmt.Errorf("copy cover file: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(destPath)
-		return "", "", fmt.Errorf("close cover file: %w", err)
-	}
-
-	return coverName, destPath, nil
+	w, h := detectImageDimensions(raw)
+	return coverID, coverName, destPath, w, h, nil
 }
 
 func (s *Service) CheckNewFiles(ctx context.Context, courseID string) ([]MediaFile, error) {

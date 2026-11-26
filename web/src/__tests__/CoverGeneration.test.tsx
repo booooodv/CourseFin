@@ -252,17 +252,51 @@ describe('AI Course Cover Generation', () => {
     expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
   });
 
-  it('CourseEditorPage + AICoverModal previews and applies AI generated cover without premature overwrite', async () => {
+  it('CourseEditorPage + AICoverModal appends covers directly, keeps history & unsaved drafts, and allows switch/delete', async () => {
     const user = userEvent.setup();
     let generateBody: Record<string, unknown> | null = null;
-    let applyBody: Record<string, unknown> | null = null;
+    let activatedCoverId: string | null = null;
+    let deletedCoverId: string | null = null;
+
+    const initialCover = {
+      id: 'cov-old',
+      course_id: 'course-1',
+      file_path: 'course-1_cover_cov-old.jpg',
+      source: 'upload' as const,
+      width: 1280,
+      height: 800,
+      is_active: true,
+      image_url: '/api/v1/courses/course-1/covers/cov-old/image',
+      created_at: '2026-11-26T00:00:00.000000000Z',
+    };
+
+    const generatedCover = {
+      id: 'cov-ai-2',
+      course_id: 'course-1',
+      file_path: 'course-1_cover_cov-ai-2.png',
+      source: 'ai' as const,
+      style_id: 'clay_3d',
+      style_name: '柔和 3D 黏土',
+      prompt: 'Style: 柔和 3D 黏土 ...',
+      width: 1536,
+      height: 1024,
+      is_active: true,
+      image_url: '/api/v1/courses/course-1/covers/cov-ai-2/image',
+      created_at: '2026-11-26T00:01:00.000000000Z',
+    };
+
+    let currentCourse: CourseDetail = {
+      ...sampleCourseDetail,
+      cover_path: initialCover.file_path,
+      covers: [initialCover],
+    };
 
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.toString();
       const method = (init?.method ?? 'GET').toUpperCase();
 
       if (url.endsWith('/api/v1/courses/course-1') && method === 'GET') {
-        return jsonResponse(sampleCourseDetail);
+        return jsonResponse(currentCourse);
       }
       if (url.endsWith('/api/v1/libraries')) {
         return jsonResponse({
@@ -288,30 +322,41 @@ describe('AI Course Cover Generation', () => {
       }
       if (url.endsWith('/api/v1/courses/course-1/cover/generate') && method === 'POST') {
         generateBody = JSON.parse(String(init?.body ?? '{}'));
+        currentCourse = {
+          ...currentCourse,
+          cover_path: generatedCover.file_path,
+          updated_at: '2026-11-26T00:01:00.000000000Z',
+          covers: [generatedCover, { ...initialCover, is_active: false }],
+        };
         return jsonResponse({
-          preview_id: 'prev123',
-          course_id: 'course-1',
-          style_id: 'clay_3d',
-          style_name: '柔和 3D 黏土',
-          preview_url: '/api/v1/cover/previews/prev123',
-          prompt: 'Style: 柔和 3D 黏土 ...',
-          width: 1536,
-          height: 1024,
-          created_at: '2026-11-26T00:01:00Z',
+          cover: generatedCover,
+          course: currentCourse,
         });
       }
-      if (url.endsWith('/api/v1/courses/course-1/cover/apply') && method === 'POST') {
-        applyBody = JSON.parse(String(init?.body ?? '{}'));
-        return jsonResponse({
-          ...sampleCourseDetail,
-          cover_path: 'course-1_cover.png',
-          updated_at: '2026-11-26T00:02:00Z',
-        });
+      if (url.endsWith('/api/v1/courses/course-1/covers/cov-old/activate') && method === 'POST') {
+        activatedCoverId = 'cov-old';
+        currentCourse = {
+          ...currentCourse,
+          cover_path: initialCover.file_path,
+          updated_at: '2026-11-26T00:02:00.000000000Z',
+          covers: [{ ...generatedCover, is_active: false }, { ...initialCover, is_active: true }],
+        };
+        return jsonResponse(currentCourse);
+      }
+      if (url.endsWith('/api/v1/courses/course-1/covers/cov-ai-2') && method === 'DELETE') {
+        deletedCoverId = 'cov-ai-2';
+        currentCourse = {
+          ...currentCourse,
+          cover_path: initialCover.file_path,
+          updated_at: '2026-11-26T00:03:00.000000000Z',
+          covers: [{ ...initialCover, is_active: true }],
+        };
+        return jsonResponse(currentCourse);
       }
       return jsonResponse({});
     });
 
-    render(
+    const { container } = render(
       <MemoryRouter initialEntries={['/courses/course-1/edit']}>
         <ToastProvider>
           <Routes>
@@ -321,7 +366,15 @@ describe('AI Course Cover Generation', () => {
       </MemoryRouter>,
     );
 
-    const openBtn = await screen.findByRole('button', { name: 'AI 生成封面' });
+    const courseTitleField = await screen.findByLabelText(/课程标题/);
+    expect(screen.getByRole('heading', { name: '关联封面 (1)' })).toBeInTheDocument();
+    expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
+
+    // Edit title draft without saving metadata yet — cover operations must preserve this draft
+    await user.clear(courseTitleField);
+    await user.type(courseTitleField, '未保存草稿标题');
+
+    const openBtn = screen.getByRole('button', { name: 'AI 生成封面' });
     await user.click(openBtn);
 
     const dialog = await screen.findByRole('dialog', { name: 'AI 生成课程封面' });
@@ -339,28 +392,51 @@ describe('AI Course Cover Generation', () => {
     await user.clear(titleInput);
     await user.type(titleInput, 'Go 并发实战进阶');
 
-    await user.click(within(dialog).getByRole('button', { name: '生成预览' }));
+    await user.click(within(dialog).getByRole('button', { name: '再生成一张' }));
 
-    const previewImg = await within(dialog).findByAltText('Go 语言并发编程实战 AI 封面预览');
-    expect(previewImg).toHaveAttribute(
-      'src',
-      '/api/v1/cover/previews/prev123?api_key=test-token-cover',
-    );
-    expect(generateBody).toMatchObject({
-      style_id: 'clay_3d',
-      title: 'Go 并发实战进阶',
-      subtitle: '讲师 · 陈默',
-      include_badge: true,
-      badge: '4 节 · 2 章',
-    });
-    expect(applyBody).toBeNull();
-
-    await user.click(within(dialog).getByRole('button', { name: '应用为课程封面' }));
     await waitFor(() => {
-      expect(applyBody).toEqual({ preview_id: 'prev123' });
+      expect(generateBody).toMatchObject({
+        style_id: 'clay_3d',
+        title: 'Go 并发实战进阶',
+        subtitle: '讲师 · 陈默',
+        include_badge: true,
+        badge: '4 节 · 2 章',
+      });
+    });
+
+    expect(
+      await within(dialog).findByText('已生成新封面并设为当前，原有封面已保留'),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole('heading', { name: '关联封面历史 (2)' })).toBeInTheDocument();
+
+    // Prompt drawer shows active AI cover's prompt
+    await user.click(within(dialog).getByRole('button', { name: '查看生成 Prompt' }));
+    expect(within(dialog).getByText('Style: 柔和 3D 黏土 ...')).toBeInTheDocument();
+
+    // Switch back to the earlier upload cover right inside the modal
+    await user.click(within(dialog).getByRole('button', { name: '设为当前封面 本地上传' }));
+    await waitFor(() => {
+      expect(activatedCoverId).toBe('cov-old');
+    });
+    expect(await within(dialog).findByText('已切换为当前课程封面')).toBeInTheDocument();
+
+    // Close modal and verify editor gallery synced & unsaved title draft preserved
+    const closeBtns = within(dialog).getAllByRole('button', { name: '关闭' });
+    await user.click(closeBtns[closeBtns.length - 1]);
+    await waitFor(() => {
       expect(screen.queryByRole('dialog', { name: 'AI 生成课程封面' })).not.toBeInTheDocument();
     });
-    expect((await screen.findAllByText('已应用 AI 生成封面')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByLabelText(/课程标题/)).toHaveValue('未保存草稿标题');
+    expect(screen.getByRole('heading', { name: '关联封面 (2)' })).toBeInTheDocument();
+
+    // Delete the AI cover with inline confirmation on CourseEditorPage
+    const editorGallery = screen.getByRole('region', { name: '关联封面列表' });
+    await user.click(within(editorGallery).getByRole('button', { name: '删除封面 AI · 柔和 3D 黏土' }));
+    await user.click(within(editorGallery).getByRole('button', { name: '确认删除' }));
+    await waitFor(() => {
+      expect(deletedCoverId).toBe('cov-ai-2');
+    });
+    expect(screen.getByRole('heading', { name: '关联封面 (1)' })).toBeInTheDocument();
   });
 
   it('HomePage + BatchCoverModal starts batch generation, polls progress, refreshes cards, and supports cancel', async () => {
@@ -517,6 +593,8 @@ describe('AI Course Cover Generation', () => {
     const dialog = await screen.findByRole('dialog', { name: 'AI 批量生成课程封面' });
     expect(dialog.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
     expect(within(dialog).getByText(/仅补齐缺失封面/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/为当前范围全部课程新增封面/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/原有历史封面将全部保留/)).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole('radio', { name: /温暖扁平插画/ }));
     await user.click(within(dialog).getByRole('button', { name: /开始批量生成 \(1 门\)/ }));

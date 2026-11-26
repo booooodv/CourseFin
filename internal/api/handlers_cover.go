@@ -3,6 +3,9 @@ package api
 import (
 	"errors"
 	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"coursefin/internal/ai"
 	"coursefin/internal/cover"
@@ -104,20 +107,64 @@ func (h *handler) handleListCoverStyles(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (h *handler) handleGetCoverPreview(w http.ResponseWriter, r *http.Request) {
-	if h.cover == nil {
-		writeError(w, http.StatusServiceUnavailable, "cover service unavailable")
-		return
-	}
-	previewID := chi.URLParam(r, "previewId")
-	filePath, contentType, err := h.cover.GetPreviewFile(previewID)
+func (h *handler) handleListCourseCovers(w http.ResponseWriter, r *http.Request) {
+	courseID := normalizeID(chi.URLParam(r, "id"))
+	covers, err := h.cat.ListCourseCovers(r.Context(), courseID)
 	if err != nil {
-		writeCoverError(w, err)
+		writeCatalogError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, filePath)
+	writeJSON(w, http.StatusOK, map[string]any{"covers": covers})
+}
+
+func (h *handler) handleGetCourseCoverImage(w http.ResponseWriter, r *http.Request) {
+	courseID := normalizeID(chi.URLParam(r, "id"))
+	coverID := normalizeID(chi.URLParam(r, "coverId"))
+	cov, err := h.cat.GetCourseCover(r.Context(), courseID, coverID)
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+
+	if h.media != nil {
+		var maxW, maxH int
+		if raw := strings.TrimSpace(r.URL.Query().Get("maxWidth")); raw != "" {
+			if v, convErr := strconv.Atoi(raw); convErr == nil && v > 0 {
+				maxW = v
+			}
+		}
+		if raw := strings.TrimSpace(r.URL.Query().Get("maxHeight")); raw != "" {
+			if v, convErr := strconv.Atoi(raw); convErr == nil && v > 0 {
+				maxH = v
+			}
+		}
+		h.media.ServeCoverFile(w, r, cov.FilePath, maxW, maxH)
+		return
+	}
+
+	http.ServeFile(w, r, filepath.Join(h.dataDir, "covers", filepath.Base(cov.FilePath)))
+}
+
+func (h *handler) handleActivateCourseCover(w http.ResponseWriter, r *http.Request) {
+	courseID := normalizeID(chi.URLParam(r, "id"))
+	coverID := normalizeID(chi.URLParam(r, "coverId"))
+	updated, err := h.cat.ActivateCourseCover(r.Context(), courseID, coverID)
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (h *handler) handleDeleteCourseCover(w http.ResponseWriter, r *http.Request) {
+	courseID := normalizeID(chi.URLParam(r, "id"))
+	coverID := normalizeID(chi.URLParam(r, "coverId"))
+	updated, err := h.cat.DeleteCourseCover(r.Context(), courseID, coverID)
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (h *handler) handleGenerateCourseCover(w http.ResponseWriter, r *http.Request) {
@@ -126,38 +173,17 @@ func (h *handler) handleGenerateCourseCover(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	courseID := normalizeID(chi.URLParam(r, "id"))
-	var req cover.GeneratePreviewInput
+	var req cover.GenerateCoverInput
 	if err := decodeJSON(r, &req, true); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	preview, err := h.cover.GenerateCoursePreview(r.Context(), courseID, req)
+	result, err := h.cover.GenerateCourseCover(r.Context(), courseID, req)
 	if err != nil {
 		writeCoverError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, preview)
-}
-
-func (h *handler) handleApplyCourseCover(w http.ResponseWriter, r *http.Request) {
-	if h.cover == nil {
-		writeError(w, http.StatusServiceUnavailable, "cover service unavailable")
-		return
-	}
-	courseID := normalizeID(chi.URLParam(r, "id"))
-	var req struct {
-		PreviewID string `json:"preview_id"`
-	}
-	if err := decodeJSON(r, &req, false); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	updated, err := h.cover.ApplyCoursePreview(r.Context(), courseID, req.PreviewID)
-	if err != nil {
-		writeCoverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *handler) handleGetBatchCoverStatus(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +228,7 @@ func writeCoverError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, cover.ErrImageNotConfigured):
 		writeErrorWithCode(w, http.StatusBadRequest, "image_not_configured", err.Error())
-	case errors.Is(err, cover.ErrNotFound), errors.Is(err, cover.ErrPreviewNotFound):
+	case errors.Is(err, cover.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, cover.ErrBatchAlreadyRunning):
 		writeErrorWithCode(w, http.StatusConflict, "batch_already_running", err.Error())

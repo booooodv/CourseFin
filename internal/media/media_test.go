@@ -1586,3 +1586,60 @@ func TestResolveLocalMediaInfoDetectsAudio(t *testing.T) {
 		t.Errorf("expected HasAudio == true for empty streams_json (let FFmpeg decide), got false")
 	}
 }
+
+func TestServeCoverFileResizesCachesETagAndRejectsTraversal(t *testing.T) {
+	conn, dataDir := openTestDB(t)
+	svc := media.NewService(conn, dataDir, storage.NewRegistry(), "")
+	defer svc.Close()
+
+	coversDir := filepath.Join(dataDir, "covers")
+	if err := os.MkdirAll(coversDir, 0o755); err != nil {
+		t.Fatalf("mkdir covers: %v", err)
+	}
+	coverName := "course1_cover_cov1.jpg"
+	coverPath := filepath.Join(coversDir, coverName)
+	writeTestJPEG(t, coverPath, 600, 375, color.RGBA{R: 30, G: 120, B: 220, A: 255})
+	origBytes, err := os.ReadFile(coverPath)
+	if err != nil {
+		t.Fatalf("read cover: %v", err)
+	}
+
+	// 1. Original file
+	reqOrig := httptest.NewRequest(http.MethodGet, "/api/v1/courses/course1/covers/cov1/image", nil)
+	recOrig := httptest.NewRecorder()
+	svc.ServeCoverFile(recOrig, reqOrig, coverName, 0, 0)
+	if recOrig.Code != http.StatusOK || !bytes.Equal(recOrig.Body.Bytes(), origBytes) {
+		t.Fatalf("ServeCoverFile original mismatch: code=%d len=%d", recOrig.Code, recOrig.Body.Len())
+	}
+
+	// 2. Resized image + ETag 304 Not Modified
+	reqResized := httptest.NewRequest(http.MethodGet, "/api/v1/courses/course1/covers/cov1/image?maxWidth=200", nil)
+	recResized := httptest.NewRecorder()
+	svc.ServeCoverFile(recResized, reqResized, coverName, 200, 0)
+	if recResized.Code != http.StatusOK || recResized.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("ServeCoverFile resized unexpected: code=%d ct=%q", recResized.Code, recResized.Header().Get("Content-Type"))
+	}
+	etag := recResized.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected non-empty ETag header")
+	}
+
+	req304 := httptest.NewRequest(http.MethodGet, "/api/v1/courses/course1/covers/cov1/image?maxWidth=200", nil)
+	req304.Header.Set("If-None-Match", etag)
+	rec304 := httptest.NewRecorder()
+	svc.ServeCoverFile(rec304, req304, coverName, 200, 0)
+	if rec304.Code != http.StatusNotModified {
+		t.Fatalf("expected 304 Not Modified, got %d", rec304.Code)
+	}
+
+	// 3. Reject traversal outside covers dir
+	if err := os.WriteFile(filepath.Join(dataDir, "secret.jpg"), origBytes, 0o644); err != nil {
+		t.Fatalf("write secret.jpg: %v", err)
+	}
+	reqTrav := httptest.NewRequest(http.MethodGet, "/api/v1/courses/course1/covers/cov1/image", nil)
+	recTrav := httptest.NewRecorder()
+	svc.ServeCoverFile(recTrav, reqTrav, "../secret.jpg", 0, 0)
+	if recTrav.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on traversal path, got %d", recTrav.Code)
+	}
+}

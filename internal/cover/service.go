@@ -6,9 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,18 +15,13 @@ import (
 	"coursefin/internal/id"
 )
 
-const (
-	previewTTL        = 30 * time.Minute
-	maxCachedPreviews = 50
-	defaultCoverHTTP  = 120 * time.Second
-)
+const defaultCoverHTTP = 240 * time.Second
 
 var (
 	ErrNotFound            = errors.New("not found")
 	ErrImageNotConfigured  = errors.New("ai image provider is not configured")
 	ErrInvalidInput        = errors.New("invalid input")
 	ErrBatchAlreadyRunning = errors.New("batch cover generation is already running")
-	ErrPreviewNotFound     = errors.New("cover preview not found or expired")
 	ErrUpstream            = errors.New("upstream image generation failed")
 )
 
@@ -50,8 +42,8 @@ type Options struct {
 	GeneratorFactory GeneratorFactory
 }
 
-// GeneratePreviewInput specifies optional overrides when generating a single-course cover preview.
-type GeneratePreviewInput struct {
+// GenerateCoverInput specifies optional overrides when generating a single-course AI cover.
+type GenerateCoverInput struct {
 	StyleID      string  `json:"style_id"`
 	Title        string  `json:"title"`
 	Subtitle     *string `json:"subtitle"`
@@ -60,17 +52,10 @@ type GeneratePreviewInput struct {
 	ExtraPrompt  string  `json:"extra_prompt"`
 }
 
-// CoverPreview describes a temporary generated cover image ready for review before applying.
-type CoverPreview struct {
-	PreviewID  string `json:"preview_id"`
-	CourseID   string `json:"course_id"`
-	StyleID    string `json:"style_id"`
-	StyleName  string `json:"style_name"`
-	PreviewURL string `json:"preview_url"`
-	Prompt     string `json:"prompt"`
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
-	CreatedAt  string `json:"created_at"`
+// GeneratedCourseCover returns the newly created active cover and refreshed course detail.
+type GeneratedCourseCover struct {
+	Cover  *catalog.CourseCover  `json:"cover"`
+	Course *catalog.CourseDetail `json:"course"`
 }
 
 // BatchCoverInput configures a batch cover generation run across a library or all courses.
@@ -107,21 +92,12 @@ type BatchCoverStatus struct {
 	FinishedAt         string             `json:"finished_at,omitempty"`
 }
 
-type previewEntry struct {
-	previewID   string
-	courseID    string
-	filePath    string
-	contentType string
-	ext         string
-	createdAt   time.Time
-}
-
 type batchCourseTarget struct {
 	id    string
 	title string
 }
 
-// Service manages style templates, single-course AI cover previews/application,
+// Service manages style templates, single-course AI cover generation (append & activate),
 // and serialized background batch cover generation.
 type Service struct {
 	db               *sql.DB
@@ -135,20 +111,19 @@ type Service struct {
 
 	mu              sync.Mutex
 	wg              sync.WaitGroup
-	previews        map[string]previewEntry
 	batch           BatchCoverStatus
 	batchJobID      string
 	batchCancel     context.CancelFunc
 	cancelRequested bool
 }
 
-// NewService constructs a cover Service and clears stale preview files from previous runs.
+// NewService constructs a cover Service.
 func NewService(opts Options) *Service {
 	lctx := opts.LifecycleCtx
 	if lctx == nil {
 		lctx = context.Background()
 	}
-	s := &Service{
+	return &Service{
 		db:               opts.DB,
 		dataDir:          opts.DataDir,
 		catalog:          opts.Catalog,
@@ -157,35 +132,16 @@ func NewService(opts Options) *Service {
 		defaultClient:    &http.Client{Timeout: defaultCoverHTTP},
 		configLoader:     opts.ConfigLoader,
 		generatorFactory: opts.GeneratorFactory,
-		previews:         make(map[string]previewEntry),
 		batch: BatchCoverStatus{
 			State:  "idle",
 			Errors: []BatchCourseError{},
 		},
 	}
-	s.cleanPreviewCacheDir()
-	return s
 }
 
 // Wait blocks until any active batch cover generation goroutine has exited.
 func (s *Service) Wait() {
 	s.wg.Wait()
-}
-
-func (s *Service) cleanPreviewCacheDir() {
-	if s.dataDir == "" {
-		return
-	}
-	dir := filepath.Join(s.dataDir, "cache", "cover_previews")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			_ = os.Remove(filepath.Join(dir, entry.Name()))
-		}
-	}
 }
 
 func (s *Service) imageClient() *http.Client {
@@ -230,8 +186,8 @@ func (s *Service) LoadSettings(ctx context.Context) (EffectiveImageSettings, err
 	return ResolveEffectiveImageSettings(settings), nil
 }
 
-// GenerateCoursePreview generates a temporary AI cover preview without overwriting the course's current cover.
-func (s *Service) GenerateCoursePreview(ctx context.Context, courseID string, input GeneratePreviewInput) (*CoverPreview, error) {
+// GenerateCourseCover generates an AI cover, persists it as a new associated cover, and activates it.
+func (s *Service) GenerateCourseCover(ctx context.Context, courseID string, input GenerateCoverInput) (*GeneratedCourseCover, error) {
 	courseID = normalizeOrRaw(courseID)
 	if courseID == "" {
 		return nil, ErrInvalidInput
@@ -272,105 +228,30 @@ func (s *Service) GenerateCoursePreview(ctx context.Context, courseID string, in
 		return nil, fmt.Errorf("%w: %v", ErrUpstream, err)
 	}
 
-	previewDir := filepath.Join(s.dataDir, "cache", "cover_previews")
-	if err := os.MkdirAll(previewDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create cover preview dir: %w", err)
-	}
-
-	previewID := id.New()
-	filePath := filepath.Join(previewDir, previewID+img.Ext)
-	if err := writeFileAtomically(previewDir, filePath, img.Data); err != nil {
-		return nil, fmt.Errorf("save cover preview: %w", err)
-	}
-
-	now := time.Now().UTC()
-	s.mu.Lock()
-	s.previews[previewID] = previewEntry{
-		previewID:   previewID,
-		courseID:    course.ID,
-		filePath:    filePath,
-		contentType: img.ContentType,
-		ext:         img.Ext,
-		createdAt:   now,
-	}
-	s.prunePreviewsLocked(now)
-	s.mu.Unlock()
-
-	return &CoverPreview{
-		PreviewID:  previewID,
-		CourseID:   course.ID,
-		StyleID:    style.ID,
-		StyleName:  style.Name,
-		PreviewURL: "/api/v1/cover/previews/" + previewID,
-		Prompt:     prompt,
-		Width:      img.Width,
-		Height:     img.Height,
-		CreatedAt:  now.Format(time.RFC3339Nano),
-	}, nil
-}
-
-// GetPreviewFile returns the validated on-disk path and MIME type of an active preview.
-func (s *Service) GetPreviewFile(previewID string) (string, string, error) {
-	normID, ok := id.Normalize(strings.TrimSpace(previewID))
-	if !ok {
-		return "", "", ErrPreviewNotFound
-	}
-
-	now := time.Now().UTC()
-	s.mu.Lock()
-	s.prunePreviewsLocked(now)
-	entry, exists := s.previews[normID]
-	s.mu.Unlock()
-
-	if !exists {
-		return "", "", ErrPreviewNotFound
-	}
-	info, err := os.Stat(entry.filePath)
-	if err != nil || info.IsDir() || info.Size() == 0 {
-		return "", "", ErrPreviewNotFound
-	}
-	return entry.filePath, entry.contentType, nil
-}
-
-// ApplyCoursePreview promotes a generated preview to the course's persisted cover image.
-func (s *Service) ApplyCoursePreview(ctx context.Context, courseID, previewID string) (*catalog.CourseDetail, error) {
-	courseID = normalizeOrRaw(courseID)
-	normPreviewID, ok := id.Normalize(strings.TrimSpace(previewID))
-	if courseID == "" || !ok {
-		return nil, ErrPreviewNotFound
-	}
-
-	now := time.Now().UTC()
-	s.mu.Lock()
-	s.prunePreviewsLocked(now)
-	entry, exists := s.previews[normPreviewID]
-	s.mu.Unlock()
-
-	if !exists {
-		return nil, ErrPreviewNotFound
-	}
-	if entry.courseID != courseID {
-		return nil, fmt.Errorf("%w: preview does not belong to course", ErrInvalidInput)
-	}
-
-	raw, err := os.ReadFile(entry.filePath)
+	created, updated, err := s.catalog.AddCourseCover(ctx, course.ID, catalog.AddCourseCoverInput{
+		Ext:       img.Ext,
+		Data:      img.Data,
+		Source:    catalog.CoverSourceAI,
+		StyleID:   style.ID,
+		StyleName: style.Name,
+		Prompt:    prompt,
+		Width:     img.Width,
+		Height:    img.Height,
+	})
 	if err != nil {
-		return nil, ErrPreviewNotFound
-	}
-
-	updated, err := s.saveCourseCoverBytes(ctx, courseID, entry.ext, raw)
-	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		if errors.Is(err, catalog.ErrInvalidInput) {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		}
 		return nil, err
 	}
 
-	s.mu.Lock()
-	if cur, ok := s.previews[normPreviewID]; ok {
-		delete(s.previews, normPreviewID)
-		_ = os.Remove(cur.filePath)
-	}
-	s.mu.Unlock()
-
-	return updated, nil
+	return &GeneratedCourseCover{
+		Cover:  created,
+		Course: updated,
+	}, nil
 }
 
 // GetBatchStatus returns a snapshot of the current or most recent batch cover generation job.
@@ -547,7 +428,7 @@ func (s *Service) runBatch(
 			continue
 		}
 
-		prompt := buildCoursePrompt(course, style, GeneratePreviewInput{
+		prompt := buildCoursePrompt(course, style, GenerateCoverInput{
 			StyleID:      style.ID,
 			Title:        course.Title,
 			IncludeBadge: includeBadge,
@@ -572,7 +453,16 @@ func (s *Service) runBatch(
 			return
 		}
 
-		if _, err := s.saveCourseCoverBytes(ctx, course.ID, img.Ext, img.Data); err != nil {
+		if _, _, err := s.catalog.AddCourseCover(ctx, course.ID, catalog.AddCourseCoverInput{
+			Ext:       img.Ext,
+			Data:      img.Data,
+			Source:    catalog.CoverSourceAIBatch,
+			StyleID:   style.ID,
+			StyleName: style.Name,
+			Prompt:    prompt,
+			Width:     img.Width,
+			Height:    img.Height,
+		}); err != nil {
 			if ctx.Err() != nil || s.isJobCancelled(jobID) {
 				s.finishBatchCancelled(jobID)
 				return
@@ -638,70 +528,7 @@ func (s *Service) recordBatchFailure(jobID string, target batchCourseTarget, err
 	})
 }
 
-func (s *Service) saveCourseCoverBytes(ctx context.Context, courseID, ext string, raw []byte) (*catalog.CourseDetail, error) {
-	course, err := s.catalog.GetCourseDetail(ctx, courseID)
-	if err != nil {
-		if errors.Is(err, catalog.ErrNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-
-	coversDir := filepath.Join(s.dataDir, "covers")
-	if err := os.MkdirAll(coversDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create covers dir: %w", err)
-	}
-
-	destName := course.ID + "_cover" + ext
-	destPath := filepath.Join(coversDir, destName)
-	if err := writeFileAtomically(coversDir, destPath, raw); err != nil {
-		return nil, fmt.Errorf("write course cover: %w", err)
-	}
-
-	updated, err := s.catalog.UpdateCourse(ctx, course.ID, catalog.UpdateCourseInput{
-		CoverPath: &destName,
-	})
-	if err != nil {
-		if course.CoverPath == "" || filepath.Base(course.CoverPath) != destName {
-			_ = os.Remove(destPath)
-		}
-		if errors.Is(err, catalog.ErrNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-
-	if course.CoverPath != "" && filepath.Base(course.CoverPath) != destName {
-		_ = os.Remove(filepath.Join(coversDir, filepath.Base(course.CoverPath)))
-	}
-	return updated, nil
-}
-
-func (s *Service) prunePreviewsLocked(now time.Time) {
-	for pid, entry := range s.previews {
-		if now.Sub(entry.createdAt) > previewTTL {
-			delete(s.previews, pid)
-			_ = os.Remove(entry.filePath)
-		}
-	}
-	if len(s.previews) <= maxCachedPreviews {
-		return
-	}
-	all := make([]previewEntry, 0, len(s.previews))
-	for _, entry := range s.previews {
-		all = append(all, entry)
-	}
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].createdAt.Before(all[j].createdAt)
-	})
-	excess := len(all) - maxCachedPreviews
-	for i := 0; i < excess; i++ {
-		delete(s.previews, all[i].previewID)
-		_ = os.Remove(all[i].filePath)
-	}
-}
-
-func buildCoursePrompt(course *catalog.CourseDetail, style StyleTemplate, input GeneratePreviewInput) string {
+func buildCoursePrompt(course *catalog.CourseDetail, style StyleTemplate, input GenerateCoverInput) string {
 	title := strings.TrimSpace(input.Title)
 	if title == "" {
 		title = strings.TrimSpace(course.Title)
@@ -743,35 +570,6 @@ func buildCoursePrompt(course *catalog.CourseDetail, style StyleTemplate, input 
 		ChapterTitles: chapters,
 		ExtraPrompt:   input.ExtraPrompt,
 	})
-}
-
-func writeFileAtomically(dir, destPath string, data []byte) error {
-	tmp, err := os.CreateTemp(dir, ".cover-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	cleanup := func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, destPath); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
 }
 
 func cloneBatchStatus(st BatchCoverStatus) BatchCoverStatus {

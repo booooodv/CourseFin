@@ -103,6 +103,7 @@ type CourseSummary struct {
 type CourseDetail struct {
 	CourseSummary
 	Chapters []ChapterDetail `json:"chapters"`
+	Covers   []CourseCover   `json:"covers"`
 }
 
 type ChapterDetail struct {
@@ -472,6 +473,30 @@ func (s *Service) DeleteLibraryWithOptions(ctx context.Context, libraryID string
 		}
 		rows.Close()
 
+		covRows, err := tx.QueryContext(ctx, `
+			SELECT cc.file_path
+			FROM course_covers cc
+			JOIN courses c ON c.id = cc.course_id
+			WHERE c.library_id = ?`, libraryID)
+		if err != nil {
+			return fmt.Errorf("query library course_covers: %w", err)
+		}
+		for covRows.Next() {
+			var fp string
+			if err := covRows.Scan(&fp); err != nil {
+				covRows.Close()
+				return fmt.Errorf("scan library course_covers: %w", err)
+			}
+			if fp != "" {
+				coversToClean = append(coversToClean, fp)
+			}
+		}
+		if err := covRows.Err(); err != nil {
+			covRows.Close()
+			return fmt.Errorf("iterate library course_covers: %w", err)
+		}
+		covRows.Close()
+
 		if _, err := tx.ExecContext(ctx, `DELETE FROM courses WHERE library_id = ?`, libraryID); err != nil {
 			return fmt.Errorf("delete library courses: %w", err)
 		}
@@ -493,8 +518,14 @@ func (s *Service) DeleteLibraryWithOptions(ctx context.Context, libraryID string
 	// Clean up app-managed cover/backdrop artifacts inside dataDir/covers only (never touch media volumes).
 	if s.dataDir != "" && len(coversToClean) > 0 {
 		coversDir := filepath.Join(s.dataDir, "covers")
+		seen := make(map[string]bool, len(coversToClean))
 		for _, p := range coversToClean {
-			_ = os.Remove(filepath.Join(coversDir, filepath.Base(p)))
+			base := filepath.Base(strings.TrimSpace(p))
+			if base == "" || base == "." || base == ".." || seen[base] {
+				continue
+			}
+			seen[base] = true
+			_ = os.Remove(filepath.Join(coversDir, base))
 		}
 	}
 	return nil
@@ -670,6 +701,7 @@ func (s *Service) GetCourseDetail(ctx context.Context, courseID string) (*Course
 	detail := &CourseDetail{
 		CourseSummary: summaries[0],
 		Chapters:      []ChapterDetail{},
+		Covers:        []CourseCover{},
 	}
 
 	chRows, err := s.db.QueryContext(ctx, `
@@ -755,6 +787,12 @@ func (s *Service) GetCourseDetail(ctx context.Context, courseID string) (*Course
 			}
 		}
 	}
+
+	covers, err := s.ListCourseCovers(ctx, courseID)
+	if err != nil {
+		return nil, err
+	}
+	detail.Covers = covers
 
 	return detail, nil
 }
@@ -967,6 +1005,33 @@ func (s *Service) DeleteCourse(ctx context.Context, courseID string) error {
 		return err
 	}
 
+	filesToClean := make([]string, 0, 4)
+	if coverPath != "" {
+		filesToClean = append(filesToClean, coverPath)
+	}
+	if backdropPath != "" {
+		filesToClean = append(filesToClean, backdropPath)
+	}
+	covRows, err := s.db.QueryContext(ctx, `SELECT file_path FROM course_covers WHERE course_id = ?`, courseID)
+	if err != nil {
+		return fmt.Errorf("query course_covers for delete: %w", err)
+	}
+	for covRows.Next() {
+		var fp string
+		if err := covRows.Scan(&fp); err != nil {
+			covRows.Close()
+			return fmt.Errorf("scan course_covers for delete: %w", err)
+		}
+		if fp != "" {
+			filesToClean = append(filesToClean, fp)
+		}
+	}
+	if err := covRows.Err(); err != nil {
+		covRows.Close()
+		return fmt.Errorf("iterate course_covers for delete: %w", err)
+	}
+	covRows.Close()
+
 	res, err := s.db.ExecContext(ctx, `DELETE FROM courses WHERE id = ?`, courseID)
 	if err != nil {
 		return fmt.Errorf("delete course: %w", err)
@@ -979,10 +1044,14 @@ func (s *Service) DeleteCourse(ctx context.Context, courseID string) error {
 	// Clean up app-managed cover/backdrop artifacts inside dataDir/covers only (never touch media volumes).
 	if s.dataDir != "" {
 		coversDir := filepath.Join(s.dataDir, "covers")
-		for _, p := range []string{coverPath, backdropPath} {
-			if p != "" {
-				_ = os.Remove(filepath.Join(coversDir, filepath.Base(p)))
+		seen := make(map[string]bool, len(filesToClean))
+		for _, p := range filesToClean {
+			base := filepath.Base(strings.TrimSpace(p))
+			if base == "" || base == "." || base == ".." || seen[base] {
+				continue
 			}
+			seen[base] = true
+			_ = os.Remove(filepath.Join(coversDir, base))
 		}
 	}
 	return nil

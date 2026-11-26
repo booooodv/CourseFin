@@ -45,12 +45,14 @@ import {
 } from '../api/client';
 import AICoverModal from '../components/AICoverModal';
 import AIOrganizeModal from '../components/AIOrganizeModal';
+import CourseCoverGallery from '../components/CourseCoverGallery';
 import SubtitleBindModal from '../components/SubtitleBindModal';
 import { useToast } from '../components/Toast';
 import Tooltip from '../components/Tooltip';
 import { useLibrary } from '../contexts/LibraryContext';
 import type {
   ChapterDetail,
+  CourseCover,
   CourseDetail,
   LessonDetail,
   LessonPlacement,
@@ -704,6 +706,7 @@ export default function CourseEditorPage() {
 
   // Cover & backdrop state
   const [uploadingCover, setUploadingCover] = useState(false);
+  const [busyCoverId, setBusyCoverId] = useState<string | null>(null);
   const [uploadingBackdrop, setUploadingBackdrop] = useState(false);
   const [showFramePicker, setShowFramePicker] = useState(false);
   const [coverFailed, setCoverFailed] = useState(false);
@@ -748,6 +751,12 @@ export default function CourseEditorPage() {
     setLibraryId(c.library_id);
     setOverview(c.overview ?? '');
     setTags(c.tags ?? []);
+    setCoverFailed(false);
+    setBackdropFailed(false);
+  }, []);
+
+  const syncCourseCoverState = useCallback((updated: CourseDetail) => {
+    setCourse(updated);
     setCoverFailed(false);
     setBackdropFailed(false);
   }, []);
@@ -869,8 +878,8 @@ export default function CourseEditorPage() {
     setError(null);
     try {
       const updated = await api.uploadCourseCover(course.id, file);
-      syncFormFromCourse(updated);
-      showNotice('课程封面已更新');
+      syncCourseCoverState(updated);
+      showNotice('已新增并设为当前课程封面');
     } catch (err) {
       showError(err instanceof Error ? err.message : '上传封面失败');
     } finally {
@@ -885,13 +894,49 @@ export default function CourseEditorPage() {
     setError(null);
     try {
       const updated = await api.pickCourseCoverFromLesson(course.id, lessonId);
-      syncFormFromCourse(updated);
+      syncCourseCoverState(updated);
       setShowFramePicker(false);
-      showNotice('已从课时帧更新封面');
+      showNotice('已从课时帧新增并设为当前封面');
     } catch (err) {
       showError(err instanceof Error ? err.message : '选取课时帧封面失败');
     } finally {
       setUploadingCover(false);
+    }
+  }
+
+  async function handleActivateCover(cover: CourseCover) {
+    if (!course || busyCoverId || cover.is_active) return;
+    setBusyCoverId(cover.id);
+    setError(null);
+    try {
+      const updated = await api.activateCourseCover(course.id, cover.id);
+      syncCourseCoverState(updated);
+      showNotice('已切换为当前课程封面');
+    } catch (err) {
+      showError(err instanceof Error ? err.message : '切换封面失败');
+    } finally {
+      setBusyCoverId(null);
+    }
+  }
+
+  async function handleDeleteCover(cover: CourseCover) {
+    if (!course || busyCoverId) return;
+    setBusyCoverId(cover.id);
+    setError(null);
+    try {
+      const updated = await api.deleteCourseCover(course.id, cover.id);
+      syncCourseCoverState(updated);
+      showNotice(
+        cover.is_active
+          ? updated.cover_path
+            ? '已删除当前封面并自动切换历史封面'
+            : '已删除当前封面'
+          : '已删除该历史封面',
+      );
+    } catch (err) {
+      showError(err instanceof Error ? err.message : '删除封面失败');
+    } finally {
+      setBusyCoverId(null);
     }
   }
 
@@ -902,7 +947,7 @@ export default function CourseEditorPage() {
     setError(null);
     try {
       const updated = await api.uploadCourseBackdrop(course.id, file);
-      syncFormFromCourse(updated);
+      syncCourseCoverState(updated);
       showNotice('课程背景图已更新');
     } catch (err) {
       showError(err instanceof Error ? err.message : '上传背景图失败');
@@ -1629,7 +1674,7 @@ export default function CourseEditorPage() {
                 </button>
               </Tooltip>
 
-              <Tooltip content="按统一风格模板使用 AI 生成课程封面并预览应用">
+              <Tooltip content="按统一风格模板使用 AI 新增课程封面并设为当前">
                 <button
                   type="button"
                   disabled={uploadingCover}
@@ -1645,7 +1690,7 @@ export default function CourseEditorPage() {
             {showFramePicker && (
               <div className="rounded-2xl border border-subtle bg-subtle/60 p-3 space-y-2 max-h-48 overflow-y-auto">
                 <p className="text-[11px] font-medium text-ink-muted">
-                  点击下方课时，将使用其视频截图作为课程封面：
+                  点击下方课时，将使用其视频截图新增并设为课程封面：
                 </p>
                 {allLessons.map((lesson) => (
                   <button
@@ -1661,6 +1706,30 @@ export default function CourseEditorPage() {
                   </button>
                 ))}
               </div>
+            )}
+
+            {(course.covers ?? []).length > 0 && (
+              <section
+                aria-label="关联封面列表"
+                className="border-t border-subtle pt-4 space-y-2.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-semibold text-ink-secondary">
+                    关联封面 ({(course.covers ?? []).length})
+                  </h3>
+                  <span className="text-[11px] text-ink-muted">
+                    点击缩略图可随时切换
+                  </span>
+                </div>
+                <CourseCoverGallery
+                  covers={course.covers ?? []}
+                  busyCoverId={busyCoverId}
+                  disabled={uploadingCover}
+                  compact
+                  onActivate={handleActivateCover}
+                  onDelete={handleDeleteCover}
+                />
+              </section>
             )}
           </div>
 
@@ -1881,9 +1950,8 @@ export default function CourseEditorPage() {
         course={course}
         isOpen={showAICoverModal}
         onClose={() => setShowAICoverModal(false)}
-        onApplied={(updated) => {
-          syncFormFromCourse(updated);
-          showNotice('已应用 AI 生成封面');
+        onCourseUpdated={(updated) => {
+          syncCourseCoverState(updated);
         }}
       />
 

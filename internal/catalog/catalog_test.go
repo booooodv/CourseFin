@@ -1,12 +1,17 @@
 package catalog_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -415,11 +420,13 @@ func TestDirectoryImportPreviewDeepNestingAndIdempotentSync(t *testing.T) {
 		t.Fatalf("CommitDirectoryImport: %v", err)
 	}
 
-	expectedCoverName := course.ID + ".jpg"
-	if course.CoverPath != expectedCoverName {
-		t.Fatalf("course.CoverPath = %q, want %q", course.CoverPath, expectedCoverName)
+	if len(course.Covers) != 1 || course.Covers[0].Source != catalog.CoverSourceImport {
+		t.Fatalf("expected 1 import cover in course.Covers, got %+v", course.Covers)
 	}
-	copiedCover, err := os.ReadFile(filepath.Join(dataDir, "covers", expectedCoverName))
+	if !strings.HasPrefix(course.CoverPath, course.ID+"_cover_") || !strings.HasSuffix(course.CoverPath, ".jpg") || course.CoverPath != course.Covers[0].FilePath {
+		t.Fatalf("unexpected imported course.CoverPath = %q (cover=%+v)", course.CoverPath, course.Covers[0])
+	}
+	copiedCover, err := os.ReadFile(filepath.Join(dataDir, "covers", course.CoverPath))
 	if err != nil {
 		t.Fatalf("read copied cover: %v", err)
 	}
@@ -919,5 +926,229 @@ func TestBindSubtitleRejectsCrossSourceOrMissingMediaFile(t *testing.T) {
 	}
 	if _, err := svc.BindSubtitle(ctx, subID, catalog.BindSubtitleInput{MediaFileID: &mfA}); !errors.Is(err, catalog.ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for missing media_file bind, got %v", err)
+	}
+}
+
+func makeTestPNGBytes(t *testing.T, w, h int, r uint8) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{R: r, G: 80, B: 200, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png.Encode: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestMultiCourseCoversLifecycleAndCleanup(t *testing.T) {
+	ctx := context.Background()
+	svc, conn, dataDir := setupTestCatalog(t)
+
+	course, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{Title: "Multi Cover Go"})
+	if err != nil {
+		t.Fatalf("CreateCourse: %v", err)
+	}
+	otherCourse, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{Title: "Other Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse other: %v", err)
+	}
+
+	// 1. Seed a legacy cover via UpdateCourse (not yet in course_covers) and verify AddCourseCover preserves it
+	coversDir := filepath.Join(dataDir, "covers")
+	legacyName := course.ID + "_cover.jpg"
+	legacyAbs := filepath.Join(coversDir, legacyName)
+	if err := os.WriteFile(legacyAbs, []byte("legacy-jpg"), 0o644); err != nil {
+		t.Fatalf("write legacy cover: %v", err)
+	}
+	if _, err := svc.UpdateCourse(ctx, course.ID, catalog.UpdateCourseInput{CoverPath: &legacyName}); err != nil {
+		t.Fatalf("UpdateCourse legacy cover: %v", err)
+	}
+
+	png1 := makeTestPNGBytes(t, 32, 20, 10)
+	cov1, detail1, err := svc.AddCourseCover(ctx, course.ID, catalog.AddCourseCoverInput{
+		Ext:       ".png",
+		Data:      png1,
+		Source:    catalog.CoverSourceAI,
+		StyleID:   "dark_tech",
+		StyleName: "暗夜科技",
+		Prompt:    "prompt 1",
+	})
+	if err != nil {
+		t.Fatalf("AddCourseCover 1: %v", err)
+	}
+	if !cov1.IsActive || cov1.Width != 32 || cov1.Height != 20 {
+		t.Fatalf("unexpected cov1: %+v", cov1)
+	}
+	if detail1.CoverPath != cov1.FilePath || len(detail1.Covers) != 2 {
+		t.Fatalf("expected 2 covers with cov1 active, got path=%q len=%d", detail1.CoverPath, len(detail1.Covers))
+	}
+	if detail1.Covers[0].ID != cov1.ID || !detail1.Covers[0].IsActive {
+		t.Fatalf("expected cov1 newest & active first: %+v", detail1.Covers)
+	}
+	if detail1.Covers[1].FilePath != legacyName || detail1.Covers[1].Source != catalog.CoverSourceLegacy || detail1.Covers[1].IsActive {
+		t.Fatalf("expected legacy cover preserved second & inactive: %+v", detail1.Covers[1])
+	}
+	if _, err := os.Stat(legacyAbs); err != nil {
+		t.Fatalf("expected legacy cover file preserved on disk: %v", err)
+	}
+
+	// 2. Rapidly add a second AI cover; newest becomes active while all previous remain on disk
+	png2 := makeTestPNGBytes(t, 48, 30, 200)
+	cov2, detail2, err := svc.AddCourseCover(ctx, course.ID, catalog.AddCourseCoverInput{
+		Ext:       ".png",
+		Data:      png2,
+		Source:    catalog.CoverSourceAI,
+		StyleID:   "clay_3d",
+		StyleName: "柔和 3D 黏土",
+		Prompt:    "prompt 2",
+	})
+	if err != nil {
+		t.Fatalf("AddCourseCover 2: %v", err)
+	}
+	if detail2.CoverPath != cov2.FilePath || len(detail2.Covers) != 3 {
+		t.Fatalf("expected 3 covers with cov2 active, got path=%q len=%d", detail2.CoverPath, len(detail2.Covers))
+	}
+	if detail2.Covers[0].ID != cov2.ID || !detail2.Covers[0].IsActive || detail2.Covers[1].ID != cov1.ID || detail2.Covers[1].IsActive {
+		t.Fatalf("unexpected cover ordering/active flags: %+v", detail2.Covers)
+	}
+
+	// 3. Cross-course access must fail with ErrNotFound
+	if _, err := svc.GetCourseCover(ctx, otherCourse.ID, cov1.ID); !errors.Is(err, catalog.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-course GetCourseCover, got %v", err)
+	}
+	if _, err := svc.ActivateCourseCover(ctx, otherCourse.ID, cov1.ID); !errors.Is(err, catalog.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-course ActivateCourseCover, got %v", err)
+	}
+	if _, err := svc.DeleteCourseCover(ctx, otherCourse.ID, cov1.ID); !errors.Is(err, catalog.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-course DeleteCourseCover, got %v", err)
+	}
+
+	// 4. Activate cov1 (older cover), verify courses.cover_path & updated_at change
+	prevUpdated := detail2.UpdatedAt
+	time.Sleep(2 * time.Millisecond)
+	activated, err := svc.ActivateCourseCover(ctx, course.ID, cov1.ID)
+	if err != nil {
+		t.Fatalf("ActivateCourseCover: %v", err)
+	}
+	if activated.CoverPath != cov1.FilePath || activated.UpdatedAt == prevUpdated {
+		t.Fatalf("expected CoverPath=%q and updated_at bumped (prev=%q cur=%q)", cov1.FilePath, prevUpdated, activated.UpdatedAt)
+	}
+	if !activated.Covers[1].IsActive || activated.Covers[0].IsActive {
+		t.Fatalf("expected cov1 active in Covers list: %+v", activated.Covers)
+	}
+
+	// 5. Delete non-active legacy cover -> cov1 stays active, legacy file removed
+	legacyCoverID := activated.Covers[2].ID
+	afterDelLegacy, err := svc.DeleteCourseCover(ctx, course.ID, legacyCoverID)
+	if err != nil {
+		t.Fatalf("DeleteCourseCover legacy: %v", err)
+	}
+	if afterDelLegacy.CoverPath != cov1.FilePath || len(afterDelLegacy.Covers) != 2 {
+		t.Fatalf("expected cov1 still active and 2 covers left, got %+v", afterDelLegacy.Covers)
+	}
+	if _, err := os.Stat(legacyAbs); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy cover file removed, stat err=%v", err)
+	}
+
+	// 6. Delete active cover (cov1) -> cov2 (newest remaining) is promoted
+	afterDelActive, err := svc.DeleteCourseCover(ctx, course.ID, cov1.ID)
+	if err != nil {
+		t.Fatalf("DeleteCourseCover active: %v", err)
+	}
+	if afterDelActive.CoverPath != cov2.FilePath || len(afterDelActive.Covers) != 1 || !afterDelActive.Covers[0].IsActive {
+		t.Fatalf("expected cov2 promoted after deleting active cov1: path=%q covers=%+v", afterDelActive.CoverPath, afterDelActive.Covers)
+	}
+	if _, err := os.Stat(filepath.Join(coversDir, cov1.FilePath)); !os.IsNotExist(err) {
+		t.Fatalf("expected cov1 file deleted from disk, stat err=%v", err)
+	}
+
+	// 7. Delete last remaining cover (cov2) -> CoverPath cleared
+	afterDelLast, err := svc.DeleteCourseCover(ctx, course.ID, cov2.ID)
+	if err != nil {
+		t.Fatalf("DeleteCourseCover last: %v", err)
+	}
+	if afterDelLast.CoverPath != "" || len(afterDelLast.Covers) != 0 {
+		t.Fatalf("expected empty CoverPath and 0 covers, got path=%q len=%d", afterDelLast.CoverPath, len(afterDelLast.Covers))
+	}
+
+	// 8. DeleteCourse cleans up ALL associated cover files
+	cDelA, _, err := svc.AddCourseCover(ctx, course.ID, catalog.AddCourseCoverInput{Ext: ".png", Data: png1, Source: catalog.CoverSourceUpload})
+	if err != nil {
+		t.Fatalf("re-add cover A: %v", err)
+	}
+	cDelB, _, err := svc.AddCourseCover(ctx, course.ID, catalog.AddCourseCoverInput{Ext: ".png", Data: png2, Source: catalog.CoverSourceFrame})
+	if err != nil {
+		t.Fatalf("re-add cover B: %v", err)
+	}
+	if err := svc.DeleteCourse(ctx, course.ID); err != nil {
+		t.Fatalf("DeleteCourse: %v", err)
+	}
+	for _, fn := range []string{cDelA.FilePath, cDelB.FilePath} {
+		if _, err := os.Stat(filepath.Join(coversDir, fn)); !os.IsNotExist(err) {
+			t.Fatalf("expected DeleteCourse to remove %s, stat err=%v", fn, err)
+		}
+	}
+
+	// 9. Force delete library cleans up all associated course_covers files
+	libForce, err := svc.CreateLibrary(ctx, "ForceLib")
+	if err != nil {
+		t.Fatalf("CreateLibrary ForceLib: %v", err)
+	}
+	cf, err := svc.CreateCourse(ctx, catalog.CreateCourseInput{LibraryID: libForce.ID, Title: "Force Course"})
+	if err != nil {
+		t.Fatalf("CreateCourse Force: %v", err)
+	}
+	f1, _, err := svc.AddCourseCover(ctx, cf.ID, catalog.AddCourseCoverInput{Ext: ".png", Data: png1, Source: catalog.CoverSourceAI})
+	if err != nil {
+		t.Fatalf("AddCourseCover f1: %v", err)
+	}
+	f2, _, err := svc.AddCourseCover(ctx, cf.ID, catalog.AddCourseCoverInput{Ext: ".png", Data: png2, Source: catalog.CoverSourceUpload})
+	if err != nil {
+		t.Fatalf("AddCourseCover f2: %v", err)
+	}
+	if err := svc.DeleteLibraryWithOptions(ctx, libForce.ID, catalog.DeleteLibraryOptions{Force: true}); err != nil {
+		t.Fatalf("DeleteLibraryWithOptions force: %v", err)
+	}
+	for _, fn := range []string{f1.FilePath, f2.FilePath} {
+		if _, err := os.Stat(filepath.Join(coversDir, fn)); !os.IsNotExist(err) {
+			t.Fatalf("expected force library delete to remove %s, stat err=%v", fn, err)
+		}
+	}
+
+	// 10. CommitDirectoryImport registers imported cover in course_covers with source="import"
+	mediaRoot := t.TempDir()
+	srcDir := filepath.Join(mediaRoot, "ImportedCourse")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("mkdir ImportedCourse: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "cover.png"), png1, 0o644); err != nil {
+		t.Fatalf("write cover.png: %v", err)
+	}
+	src, err := svc.CreateSource(ctx, "ImportSrc", "local", mediaRoot)
+	if err != nil {
+		t.Fatalf("CreateSource: %v", err)
+	}
+	mfImp := seedMediaFile(t, conn, src.ID, "ImportedCourse/01_intro.mp4", 60000)
+	imported, err := svc.CommitDirectoryImport(ctx, catalog.CommitImportInput{
+		SourceID:     src.ID,
+		DirRelPath:   "ImportedCourse",
+		Title:        "Imported Course",
+		CoverRelPath: "ImportedCourse/cover.png",
+		Chapters: []catalog.CommitImportChapter{
+			{Title: "正片", Lessons: []catalog.CommitImportLesson{{MediaFileID: mfImp, Title: "01"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitDirectoryImport: %v", err)
+	}
+	if len(imported.Covers) != 1 || imported.Covers[0].Source != catalog.CoverSourceImport || !imported.Covers[0].IsActive || !strings.HasPrefix(imported.CoverPath, imported.ID+"_cover_") {
+		t.Fatalf("expected 1 import cover active, got path=%q covers=%+v", imported.CoverPath, imported.Covers)
+	}
+	if imported.Covers[0].Width != 32 || imported.Covers[0].Height != 20 {
+		t.Fatalf("expected imported cover dimensions 32x20, got %dx%d", imported.Covers[0].Width, imported.Covers[0].Height)
 	}
 }

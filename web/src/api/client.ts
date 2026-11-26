@@ -6,17 +6,18 @@ import type {
   ChapterDetail,
   CommitImportInput,
   CourseBatchSummaryJob,
+  CourseCover,
   CourseDetail,
   CourseFilterParams,
   CourseOrganizeProposal,
   CourseSummariesStatusResponse,
   CourseSummary,
-  CoverPreview,
   CoverStylesResponse,
   CreateCourseInput,
   DeleteLibraryOptions,
   FsBrowseResponse,
   GenerateCourseCoverInput,
+  GenerateCourseCoverResponse,
   GenerateLessonSummaryInput,
   HealthStatus,
   HomeResponse,
@@ -117,6 +118,16 @@ export function itemBackdropImageUrl(itemId: string, tag?: string, maxWidth = 12
     return `${base}?tag=${encodeURIComponent(tag)}&maxWidth=${maxWidth}`;
   }
   return `${base}?maxWidth=${maxWidth}`;
+}
+
+export function courseCoverImageUrl(imageUrl: string, maxWidth?: number): string {
+  if (!imageUrl) return '';
+  let nextUrl = imageUrl;
+  if (maxWidth && maxWidth > 0 && !/[?&]maxWidth=/i.test(nextUrl)) {
+    const sep = nextUrl.includes('?') ? '&' : '?';
+    nextUrl = `${nextUrl}${sep}maxWidth=${maxWidth}`;
+  }
+  return withApiKey(nextUrl);
 }
 
 function redirectToLoginOnUnauthorized(): void {
@@ -549,24 +560,36 @@ export const api = {
   listCoverStyles(): Promise<CoverStylesResponse> {
     return request<CoverStylesResponse>('/api/v1/cover/styles');
   },
+  listCourseCovers(courseId: string): Promise<{ covers: CourseCover[] }> {
+    return request<{ covers: CourseCover[] }>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/covers`,
+    );
+  },
+  activateCourseCover(courseId: string, coverId: string): Promise<CourseDetail> {
+    return request<CourseDetail>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/covers/${encodeURIComponent(coverId)}/activate`,
+      {
+        method: 'POST',
+      },
+    );
+  },
+  deleteCourseCover(courseId: string, coverId: string): Promise<CourseDetail> {
+    return request<CourseDetail>(
+      `/api/v1/courses/${encodeURIComponent(courseId)}/covers/${encodeURIComponent(coverId)}`,
+      {
+        method: 'DELETE',
+      },
+    );
+  },
   generateCourseCover(
     courseId: string,
     input: GenerateCourseCoverInput = {},
-  ): Promise<CoverPreview> {
-    return request<CoverPreview>(
+  ): Promise<GenerateCourseCoverResponse> {
+    return request<GenerateCourseCoverResponse>(
       `/api/v1/courses/${encodeURIComponent(courseId)}/cover/generate`,
       {
         method: 'POST',
         body: JSON.stringify(input),
-      },
-    );
-  },
-  applyCourseCover(courseId: string, previewId: string): Promise<CourseDetail> {
-    return request<CourseDetail>(
-      `/api/v1/courses/${encodeURIComponent(courseId)}/cover/apply`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ preview_id: previewId }),
       },
     );
   },

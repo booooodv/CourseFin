@@ -267,9 +267,9 @@ export default function BatchCoverModal({
                     className="mt-0.5 h-4 w-4 text-accent focus:ring-2 focus:ring-accent-ring"
                   />
                   <div className="text-xs">
-                    <p className="font-semibold text-ink-primary">覆盖当前范围全部课程</p>
+                    <p className="font-semibold text-ink-primary">为当前范围全部课程新增封面</p>
                     <p className="mt-0.5 text-ink-muted tabular-nums">
-                      统一重绘 {totalCount} 门课程封面，将替换原有封面
+                      为 {totalCount} 门课程统一生成新封面并设为当前，原有历史封面将全部保留
                     </p>
                   </div>
                 </label>

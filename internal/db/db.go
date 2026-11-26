@@ -60,7 +60,6 @@ func ensureDataDirs(dataDir string) error {
 		filepath.Join(dataDir, "cache", "images"),
 		filepath.Join(dataDir, "cache", "remux"),
 		filepath.Join(dataDir, "cache", "asr"),
-		filepath.Join(dataDir, "cache", "cover_previews"),
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {

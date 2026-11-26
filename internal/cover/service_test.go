@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -164,7 +165,71 @@ func TestStylesAndBuildPrompt(t *testing.T) {
 	}
 }
 
-func TestService_GeneratePreviewAndApply(t *testing.T) {
+func TestBuildPrompt_NoEditOrReferenceTriggers(t *testing.T) {
+	forbiddenPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bpreserve\b`),
+		regexp.MustCompile(`(?i)\bomit\b`),
+		regexp.MustCompile(`(?i)\breference\b`),
+		regexp.MustCompile(`(?i)\bedit\b`),
+		regexp.MustCompile(`(?i)\bmodify\b`),
+		regexp.MustCompile(`(?i)\breplace\b`),
+		regexp.MustCompile(`(?i)\bremove\b`),
+		regexp.MustCompile(`(?i)\boriginal\b`),
+		regexp.MustCompile(`(?i)on the image`),
+	}
+
+	cases := []struct {
+		name  string
+		input cover.PromptInput
+		empty bool
+	}{
+		{
+			name: "full metadata",
+			input: cover.PromptInput{
+				Title:         "ICT 2022 交易带教课（中文系列）",
+				Subtitle:      "讲师 · ICT",
+				Badge:         "24 节 · 4 章",
+				Overview:      "系统讲解流动性与市场结构",
+				Tags:          []string{"交易", "价格行为"},
+				ChapterTitles: []string{"市场结构", "流动性扫荡"},
+				ExtraPrompt:   "简约金融线条",
+			},
+			empty: false,
+		},
+		{
+			name: "minimal metadata without badge or subtitle",
+			input: cover.PromptInput{
+				Title: "Fabio",
+			},
+			empty: true,
+		},
+	}
+
+	for _, st := range cover.ListStyles() {
+		for _, tc := range cases {
+			t.Run(st.ID+"/"+tc.name, func(t *testing.T) {
+				prompt := cover.BuildPrompt(st, tc.input)
+				if !strings.HasPrefix(prompt, "Create a brand-new standalone") {
+					t.Fatalf("prompt does not start with standalone text-to-image instruction:\n%s", prompt)
+				}
+				for _, re := range forbiddenPatterns {
+					if re.MatchString(prompt) {
+						t.Fatalf("prompt matched forbidden trigger %q:\n%s", re.String(), prompt)
+					}
+				}
+				if tc.empty {
+					for _, banned := range []string{"Badge style:", "Subtitle style:", "Top badge pill:", "Subtitle below divider:"} {
+						if strings.Contains(prompt, banned) {
+							t.Fatalf("empty badge/subtitle prompt unexpectedly contains %q:\n%s", banned, prompt)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestService_GenerateCourseCover_AppendsAndPreservesHistory(t *testing.T) {
 	dataDir, cat, lib1, _ := setupCoverTestEnv(t)
 	ctx := context.Background()
 
@@ -178,16 +243,8 @@ func TestService_GeneratePreviewAndApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCourse A: %v", err)
 	}
-	courseB, err := cat.CreateCourse(ctx, catalog.CreateCourseInput{
-		LibraryID: lib1.ID,
-		Title:     "Rust 所有权精讲",
-	})
-	if err != nil {
-		t.Fatalf("CreateCourse B: %v", err)
-	}
 
-	// Pre-populate an old .jpg cover for courseA so we verify preview doesn't overwrite it
-	// and apply cleans up the old extension file.
+	// Pre-populate a legacy .jpg cover for courseA; generating AI covers must preserve it
 	oldCoverName := courseA.ID + "_cover.jpg"
 	oldCoverPath := filepath.Join(dataDir, "covers", oldCoverName)
 	if err := os.WriteFile(oldCoverPath, []byte("old-jpg"), 0o644); err != nil {
@@ -197,11 +254,18 @@ func TestService_GeneratePreviewAndApply(t *testing.T) {
 		t.Fatalf("UpdateCourse old cover: %v", err)
 	}
 
-	pngData := makePNG(t, 42)
+	pngData1 := makePNG(t, 42)
+	pngData2 := makePNG(t, 128)
+	callNum := 0
 	gen := &fakeImageGen{
 		fn: func(ctx context.Context, req ai.ImageGenerateRequest) (*ai.GeneratedImage, error) {
+			callNum++
+			data := pngData1
+			if callNum > 1 {
+				data = pngData2
+			}
 			return &ai.GeneratedImage{
-				Data:        pngData,
+				Data:        data,
 				ContentType: "image/png",
 				Ext:         ".png",
 				Width:       1536,
@@ -226,58 +290,54 @@ func TestService_GeneratePreviewAndApply(t *testing.T) {
 
 	emptySub := ""
 	incBadge := false
-	preview, err := svc.GenerateCoursePreview(ctx, courseA.ID, cover.GeneratePreviewInput{
+	res1, err := svc.GenerateCourseCover(ctx, courseA.ID, cover.GenerateCoverInput{
 		StyleID:      "dark_tech",
 		Title:        "Go 并发实战 Pro",
 		Subtitle:     &emptySub,
 		IncludeBadge: &incBadge,
 	})
 	if err != nil {
-		t.Fatalf("GenerateCoursePreview: %v", err)
+		t.Fatalf("GenerateCourseCover 1: %v", err)
 	}
-	if preview.StyleID != "dark_tech" || !strings.HasSuffix(preview.PreviewURL, preview.PreviewID) {
-		t.Fatalf("unexpected preview: %+v", preview)
+	if res1.Cover.StyleID != "dark_tech" || res1.Cover.Source != catalog.CoverSourceAI || !res1.Cover.IsActive {
+		t.Fatalf("unexpected first generated cover: %+v", res1.Cover)
 	}
 	// Verify prompt respected empty subtitle and disabled badge
-	if strings.Contains(preview.Prompt, "讲师 · 陈默") || strings.Contains(preview.Prompt, "0 节") {
-		t.Fatalf("expected omitted subtitle and badge in prompt:\n%s", preview.Prompt)
+	if strings.Contains(res1.Cover.Prompt, "讲师 · 陈默") || strings.Contains(res1.Cover.Prompt, "0 节") {
+		t.Fatalf("expected omitted subtitle and badge in prompt:\n%s", res1.Cover.Prompt)
+	}
+	if res1.Course.CoverPath != res1.Cover.FilePath || len(res1.Course.Covers) != 2 {
+		t.Fatalf("expected 2 covers with new active cover, got path=%q len=%d", res1.Course.CoverPath, len(res1.Course.Covers))
+	}
+	// Legacy cover must still exist on disk
+	if _, err := os.Stat(oldCoverPath); err != nil {
+		t.Fatalf("expected legacy cover preserved on disk: %v", err)
 	}
 
-	// Course A's persisted cover must still be unchanged before apply
-	curA, _ := cat.GetCourseDetail(ctx, courseA.ID)
-	if curA.CoverPath != oldCoverName {
-		t.Fatalf("expected old cover preserved before apply, got %q", curA.CoverPath)
-	}
-
-	// Cross-course apply must be rejected
-	if _, err := svc.ApplyCoursePreview(ctx, courseB.ID, preview.PreviewID); !errors.Is(err, cover.ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput on cross-course apply, got %v", err)
-	}
-
-	// GetPreviewFile returns valid file
-	pPath, pType, err := svc.GetPreviewFile(preview.PreviewID)
-	if err != nil || pType != "image/png" {
-		t.Fatalf("GetPreviewFile: path=%q type=%q err=%v", pPath, pType, err)
-	}
-
-	// Apply to course A
-	updated, err := svc.ApplyCoursePreview(ctx, courseA.ID, preview.PreviewID)
+	// Generate a second AI cover
+	res2, err := svc.GenerateCourseCover(ctx, courseA.ID, cover.GenerateCoverInput{
+		StyleID: "clay_3d",
+		Title:   "Go 并发实战 V2",
+	})
 	if err != nil {
-		t.Fatalf("ApplyCoursePreview: %v", err)
+		t.Fatalf("GenerateCourseCover 2: %v", err)
 	}
-	wantCover := courseA.ID + "_cover.png"
-	if updated.CoverPath != wantCover {
-		t.Fatalf("updated.CoverPath=%q, want %q", updated.CoverPath, wantCover)
+	if res2.Course.CoverPath != res2.Cover.FilePath || len(res2.Course.Covers) != 3 {
+		t.Fatalf("expected 3 covers after second generation, got path=%q len=%d", res2.Course.CoverPath, len(res2.Course.Covers))
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "covers", wantCover)); err != nil {
-		t.Fatalf("expected new cover on disk: %v", err)
+	if res2.Course.Covers[0].ID != res2.Cover.ID || !res2.Course.Covers[0].IsActive {
+		t.Fatalf("expected res2 active and first: %+v", res2.Course.Covers)
 	}
-	if _, err := os.Stat(oldCoverPath); !os.IsNotExist(err) {
-		t.Fatalf("expected old .jpg cover to be cleaned up, stat err=%v", err)
+	if res2.Course.Covers[1].ID != res1.Cover.ID || res2.Course.Covers[1].IsActive {
+		t.Fatalf("expected res1 preserved second and inactive: %+v", res2.Course.Covers)
 	}
-	// Preview should be removed after apply
-	if _, _, err := svc.GetPreviewFile(preview.PreviewID); !errors.Is(err, cover.ErrPreviewNotFound) {
-		t.Fatalf("expected preview cleaned after apply, got %v", err)
+	if res2.Course.Covers[2].FilePath != oldCoverName {
+		t.Fatalf("expected legacy cover third: %+v", res2.Course.Covers[2])
+	}
+	for _, cov := range res2.Course.Covers {
+		if _, err := os.Stat(filepath.Join(dataDir, "covers", cov.FilePath)); err != nil {
+			t.Fatalf("expected cover file %q on disk: %v", cov.FilePath, err)
+		}
 	}
 }
 
@@ -352,12 +412,33 @@ func TestService_BatchGenerateAndCancel(t *testing.T) {
 		t.Fatalf("existing cover was overwritten: %q", gotKeep.CoverPath)
 	}
 	gotGen, _ := cat.GetCourseDetail(ctx, cMissingOK.ID)
-	if gotGen.CoverPath != cMissingOK.ID+"_cover.png" {
+	if !strings.HasPrefix(gotGen.CoverPath, cMissingOK.ID+"_cover_") || !strings.HasSuffix(gotGen.CoverPath, ".png") {
 		t.Fatalf("expected generated cover for cMissingOK, got %q", gotGen.CoverPath)
+	}
+	if len(gotGen.Covers) != 1 || gotGen.Covers[0].Source != catalog.CoverSourceAIBatch {
+		t.Fatalf("expected 1 ai_batch cover for cMissingOK, got %+v", gotGen.Covers)
 	}
 	gotOther, _ := cat.GetCourseDetail(ctx, cOtherLib.ID)
 	if gotOther.CoverPath != "" {
 		t.Fatalf("expected lib2 course untouched, got %q", gotOther.CoverPath)
+	}
+
+	// Batch mode "all" on cWithCover (via lib1, ignoring failure on cMissingFail) must append new cover & preserve existing
+	if _, err := svc.StartBatch(ctx, cover.BatchCoverInput{
+		LibraryID: lib1.ID,
+		Mode:      "all",
+		StyleID:   "dark_tech",
+	}); err != nil {
+		t.Fatalf("StartBatch mode=all: %v", err)
+	}
+	svc.Wait()
+
+	afterAllKeep, _ := cat.GetCourseDetail(ctx, cWithCover.ID)
+	if len(afterAllKeep.Covers) != 2 || afterAllKeep.CoverPath == existingName {
+		t.Fatalf("expected mode=all to append & activate new cover while preserving legacy: path=%q covers=%+v", afterAllKeep.CoverPath, afterAllKeep.Covers)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "covers", existingName)); err != nil {
+		t.Fatalf("expected existing cover file preserved after mode=all: %v", err)
 	}
 
 	// Test 409 conflict & cancellation

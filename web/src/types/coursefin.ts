@@ -166,8 +166,32 @@ export interface ChapterDetail {
   updated_at: string;
 }
 
+export type CourseCoverSource =
+  | 'ai'
+  | 'ai_batch'
+  | 'upload'
+  | 'frame'
+  | 'import'
+  | 'legacy';
+
+export interface CourseCover {
+  id: string;
+  course_id: string;
+  file_path: string;
+  source: CourseCoverSource | string;
+  style_id?: string;
+  style_name?: string;
+  prompt?: string;
+  width: number;
+  height: number;
+  is_active: boolean;
+  image_url: string;
+  created_at: string;
+}
+
 export interface CourseDetail extends CourseSummary {
   chapters: ChapterDetail[];
+  covers?: CourseCover[];
 }
 
 export interface LessonWithContext extends LessonDetail {
@@ -516,16 +540,9 @@ export interface GenerateCourseCoverInput {
   extra_prompt?: string;
 }
 
-export interface CoverPreview {
-  preview_id: string;
-  course_id: string;
-  style_id: string;
-  style_name: string;
-  preview_url: string;
-  prompt: string;
-  width: number;
-  height: number;
-  created_at: string;
+export interface GenerateCourseCoverResponse {
+  cover: CourseCover;
+  course: CourseDetail;
 }
 
 export interface BatchCourseCoverError {
