@@ -28,7 +28,10 @@ var (
 	ErrAINotConfigured     = errors.New("ai provider is not configured")
 	ErrASRNotConfigured    = errors.New("asr provider is not configured")
 	ErrBatchAlreadyRunning = errors.New("course batch summary already running")
+	ErrLessonJobConflict   = errors.New("lesson has conflicting active job")
 	ErrInvalidInput        = errors.New("invalid input")
+
+	errNoTranscriptReady = errors.New("no transcript available for lesson")
 )
 
 // JobStage identifies the current execution phase of a lesson or course summary task.
@@ -251,6 +254,17 @@ type GenerateLessonOptions struct {
 	ManualTranscript  string `json:"manual_transcript"`
 }
 
+// TranscribeLessonOptions configures single-lesson speech-to-text transcription.
+type TranscribeLessonOptions struct {
+	ForceRetranscribe bool `json:"force_retranscribe"`
+}
+
+// CourseBatchOptions configures course-wide or chapter-scoped batch transcription/summarization.
+type CourseBatchOptions struct {
+	Mode      string `json:"mode"`
+	ChapterID string `json:"chapter_id"`
+}
+
 // Options configures a summary Service instance.
 type Options struct {
 	DB                  *sql.DB
@@ -270,23 +284,39 @@ type Options struct {
 
 type lessonJobEntry struct {
 	status          LessonJobStatus
+	action          LessonJobAction
 	queued          bool
+	queueKind       BatchKind
+	ownerIsBatch    bool
 	cancelRequested bool
 	cancel          context.CancelFunc
 }
 
-type singleJobRequest struct {
-	lessonID string
-	courseID string
-	opts     GenerateLessonOptions
+type singleTranscribeRequest struct {
+	lessonID          string
+	courseID          string
+	mediaFileID       string
+	forceRetranscribe bool
+	thenSummarize     bool
+	summaryOpts       GenerateLessonOptions
+}
+
+type singleSummaryRequest struct {
+	lessonID    string
+	courseID    string
+	mediaFileID string
+	opts        GenerateLessonOptions
 }
 
 type batchLessonItem struct {
-	lessonID    string
-	lessonTitle string
+	lessonID          string
+	lessonTitle       string
+	mediaFileID       string
+	forceRetranscribe bool
 }
 
 type batchEntry struct {
+	kind               BatchKind
 	status             CourseBatchStatus
 	mode               string
 	pending            []batchLessonItem
@@ -309,7 +339,7 @@ func (e *pipelineError) Unwrap() error {
 }
 
 // Service manages background lesson AI summarization, audio extraction/ASR transcription,
-// and serialized priority + batch job queues.
+// and dual independent serial priority + batch job queues.
 type Service struct {
 	db                 *sql.DB
 	dataDir            string
@@ -327,16 +357,28 @@ type Service struct {
 	compactWindowSec   float64
 	compactMaxRunes    int
 
-	mu            sync.Mutex
-	workerActive  bool
-	wg            sync.WaitGroup
-	singleQueue   []*singleJobRequest
-	batchQueue    []*batchEntry
-	lessonJobs    map[string]*lessonJobEntry
-	courseBatches map[string]*batchEntry
+	mu   sync.Mutex
+	cond *sync.Cond
+	wg   sync.WaitGroup
+
+	transcribeWorkerActive   bool
+	singleTranscribeQueue    []*singleTranscribeRequest
+	batchTranscribeQueue     []*batchEntry
+	courseTranscribeBatches  map[string]*batchEntry
+	activeTranscribeLessonID string
+	activeTranscribeMediaID  string
+
+	summaryWorkerActive   bool
+	singleSummaryQueue    []*singleSummaryRequest
+	batchSummaryQueue     []*batchEntry
+	courseSummaryBatches  map[string]*batchEntry
+	activeSummaryLessonID string
+	activeSummaryMediaID  string
+
+	lessonJobs map[string]*lessonJobEntry
 }
 
-// NewService constructs a summary Service. The background worker is started lazily on first enqueue.
+// NewService constructs a summary Service. Background workers are started lazily on first enqueue.
 func NewService(opts Options) *Service {
 	lctx := opts.LifecycleCtx
 	if lctx == nil {
@@ -379,24 +421,31 @@ func NewService(opts Options) *Service {
 	}
 
 	s := &Service{
-		db:                 opts.DB,
-		dataDir:            opts.DataDir,
-		catalog:            opts.Catalog,
-		media:              opts.Media,
-		lifecycleCtx:       lctx,
-		httpClient:         opts.HTTPClient,
-		defaultLLMClient:   &http.Client{Timeout: defaultLLMTimeout},
-		configLoader:       opts.ConfigLoader,
-		audioExtractor:     extractor,
-		hasCustomExtractor: hasCustomExtractor,
-		audioSegmentSec:    segSec,
-		singlePassMaxRunes: singlePassMax,
-		mapChunkMaxRunes:   mapChunkMax,
-		compactWindowSec:   compactWin,
-		compactMaxRunes:    compactMax,
-		lessonJobs:         make(map[string]*lessonJobEntry),
-		courseBatches:      make(map[string]*batchEntry),
+		db:                      opts.DB,
+		dataDir:                 opts.DataDir,
+		catalog:                 opts.Catalog,
+		media:                   opts.Media,
+		lifecycleCtx:            lctx,
+		httpClient:              opts.HTTPClient,
+		defaultLLMClient:        &http.Client{Timeout: defaultLLMTimeout},
+		configLoader:            opts.ConfigLoader,
+		audioExtractor:          extractor,
+		hasCustomExtractor:      hasCustomExtractor,
+		audioSegmentSec:         segSec,
+		singlePassMaxRunes:      singlePassMax,
+		mapChunkMaxRunes:        mapChunkMax,
+		compactWindowSec:        compactWin,
+		compactMaxRunes:         compactMax,
+		courseTranscribeBatches: make(map[string]*batchEntry),
+		courseSummaryBatches:    make(map[string]*batchEntry),
+		lessonJobs:              make(map[string]*lessonJobEntry),
 	}
+	s.cond = sync.NewCond(&s.mu)
+	context.AfterFunc(lctx, func() {
+		s.mu.Lock()
+		s.cond.Broadcast()
+		s.mu.Unlock()
+	})
 	return s
 }
 
@@ -487,9 +536,107 @@ func (s *Service) GetLessonSummaryState(ctx context.Context, lessonID string) (*
 	}, nil
 }
 
-// StartLessonSummary validates configuration and enqueues a single-lesson summary job
-// onto the high-priority single-lesson queue. Re-triggering an already running/queued lesson
-// returns its current job snapshot idempotently.
+// StartLessonTranscribe validates ASR configuration (without requiring LLM configuration)
+// and enqueues a single-lesson transcription job onto the high-priority transcribe queue.
+func (s *Service) StartLessonTranscribe(ctx context.Context, lessonID string, opts TranscribeLessonOptions) (*LessonJobStatus, error) {
+	lessonID = normalizeOrRaw(lessonID)
+	if lessonID == "" {
+		return nil, ErrInvalidInput
+	}
+
+	lesson, err := s.catalog.GetLesson(ctx, lessonID)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if entry, ok := s.lessonJobs[lesson.ID]; ok && entry.status.Running {
+		if entry.action == ActionTranscribe || entry.action == ActionTranscribeAndSummarize {
+			cp := entry.status
+			s.mu.Unlock()
+			return &cp, nil
+		}
+		s.mu.Unlock()
+		return nil, ErrLessonJobConflict
+	}
+	s.mu.Unlock()
+
+	cfg, err := s.loadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.ASRConfigured {
+		return nil, ErrASRNotConfigured
+	}
+
+	if !opts.ForceRetranscribe {
+		caps, capErr := s.computeLessonCapabilities(ctx, lesson, cfg)
+		if capErr != nil {
+			return nil, capErr
+		}
+		if caps.HasSubtitle || caps.HasCachedTranscript {
+			now := nowUTC()
+			return &LessonJobStatus{
+				LessonID:   lesson.ID,
+				CourseID:   lesson.CourseID,
+				Action:     ActionTranscribe,
+				Running:    false,
+				Stage:      StageCompleted,
+				Message:    "已有可用字幕或转写文稿",
+				StartedAt:  now,
+				FinishedAt: now,
+			}, nil
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.lifecycleCtx.Err(); err != nil {
+		return nil, err
+	}
+	if entry, ok := s.lessonJobs[lesson.ID]; ok && entry.status.Running {
+		if entry.action == ActionTranscribe || entry.action == ActionTranscribeAndSummarize {
+			cp := entry.status
+			return &cp, nil
+		}
+		return nil, ErrLessonJobConflict
+	}
+
+	now := nowUTC()
+	entry := &lessonJobEntry{
+		status: LessonJobStatus{
+			LessonID:  lesson.ID,
+			CourseID:  lesson.CourseID,
+			Action:    ActionTranscribe,
+			Running:   true,
+			Stage:     StageQueued,
+			Message:   "等待语音转文字...",
+			StartedAt: now,
+		},
+		action:    ActionTranscribe,
+		queued:    true,
+		queueKind: BatchKindTranscribe,
+	}
+	s.lessonJobs[lesson.ID] = entry
+	s.singleTranscribeQueue = append(s.singleTranscribeQueue, &singleTranscribeRequest{
+		lessonID:          lesson.ID,
+		courseID:          lesson.CourseID,
+		mediaFileID:       lesson.MediaFileID,
+		forceRetranscribe: opts.ForceRetranscribe,
+		thenSummarize:     false,
+	})
+	s.ensureTranscribeWorkerLocked()
+
+	cp := entry.status
+	return &cp, nil
+}
+
+// StartLessonSummary validates configuration and enqueues a single-lesson summary job.
+// If ASR transcription is required, it starts on the transcribe worker and hands off to the summary worker.
 func (s *Service) StartLessonSummary(ctx context.Context, lessonID string, opts GenerateLessonOptions) (*LessonJobStatus, error) {
 	lessonID = normalizeOrRaw(lessonID)
 	if lessonID == "" {
@@ -506,9 +653,13 @@ func (s *Service) StartLessonSummary(ctx context.Context, lessonID string, opts 
 
 	s.mu.Lock()
 	if entry, ok := s.lessonJobs[lesson.ID]; ok && entry.status.Running {
-		cp := entry.status
+		if entry.action == ActionSummarize || entry.action == ActionTranscribeAndSummarize {
+			cp := entry.status
+			s.mu.Unlock()
+			return &cp, nil
+		}
 		s.mu.Unlock()
-		return &cp, nil
+		return nil, ErrLessonJobConflict
 	}
 	s.mu.Unlock()
 
@@ -520,19 +671,24 @@ func (s *Service) StartLessonSummary(ctx context.Context, lessonID string, opts 
 		return nil, ErrAINotConfigured
 	}
 
+	needsASR := false
 	manual := strings.TrimSpace(opts.ManualTranscript)
 	if manual == "" {
 		if opts.ForceRetranscribe {
 			if !cfg.ASRConfigured {
 				return nil, ErrASRNotConfigured
 			}
+			needsASR = true
 		} else {
 			caps, capErr := s.computeLessonCapabilities(ctx, lesson, cfg)
 			if capErr != nil {
 				return nil, capErr
 			}
-			if !caps.HasSubtitle && !caps.HasCachedTranscript && !cfg.ASRConfigured {
-				return nil, ErrASRNotConfigured
+			if !caps.HasSubtitle && !caps.HasCachedTranscript {
+				if !cfg.ASRConfigured {
+					return nil, ErrASRNotConfigured
+				}
+				needsASR = true
 			}
 		}
 	}
@@ -544,36 +700,81 @@ func (s *Service) StartLessonSummary(ctx context.Context, lessonID string, opts 
 		return nil, err
 	}
 	if entry, ok := s.lessonJobs[lesson.ID]; ok && entry.status.Running {
+		if entry.action == ActionSummarize || entry.action == ActionTranscribeAndSummarize {
+			cp := entry.status
+			return &cp, nil
+		}
+		return nil, ErrLessonJobConflict
+	}
+
+	now := nowUTC()
+	if needsASR {
+		entry := &lessonJobEntry{
+			status: LessonJobStatus{
+				LessonID:  lesson.ID,
+				CourseID:  lesson.CourseID,
+				Action:    ActionTranscribeAndSummarize,
+				Running:   true,
+				Stage:     StageQueued,
+				Message:   "等待语音转文字...",
+				StartedAt: now,
+			},
+			action:    ActionTranscribeAndSummarize,
+			queued:    true,
+			queueKind: BatchKindTranscribe,
+		}
+		s.lessonJobs[lesson.ID] = entry
+		s.singleTranscribeQueue = append(s.singleTranscribeQueue, &singleTranscribeRequest{
+			lessonID:          lesson.ID,
+			courseID:          lesson.CourseID,
+			mediaFileID:       lesson.MediaFileID,
+			forceRetranscribe: opts.ForceRetranscribe,
+			thenSummarize:     true,
+			summaryOpts:       opts,
+		})
+		s.ensureTranscribeWorkerLocked()
 		cp := entry.status
 		return &cp, nil
 	}
 
-	now := nowUTC()
 	entry := &lessonJobEntry{
 		status: LessonJobStatus{
 			LessonID:  lesson.ID,
 			CourseID:  lesson.CourseID,
+			Action:    ActionSummarize,
 			Running:   true,
 			Stage:     StageQueued,
 			Message:   "等待生成 AI 总结...",
 			StartedAt: now,
 		},
-		queued: true,
+		action:    ActionSummarize,
+		queued:    true,
+		queueKind: BatchKindSummarize,
 	}
 	s.lessonJobs[lesson.ID] = entry
-	s.singleQueue = append(s.singleQueue, &singleJobRequest{
-		lessonID: lesson.ID,
-		courseID: lesson.CourseID,
-		opts:     opts,
+	s.singleSummaryQueue = append(s.singleSummaryQueue, &singleSummaryRequest{
+		lessonID:    lesson.ID,
+		courseID:    lesson.CourseID,
+		mediaFileID: lesson.MediaFileID,
+		opts:        opts,
 	})
-	s.ensureWorkerLocked()
+	s.ensureSummaryWorkerLocked()
 
 	cp := entry.status
 	return &cp, nil
 }
 
-// CancelLessonSummary cancels a queued or active single-lesson summary job.
+// CancelLessonTranscribe cancels a queued or active single-lesson transcription (or combined) job.
+func (s *Service) CancelLessonTranscribe(lessonID string) (*LessonJobStatus, error) {
+	return s.cancelLessonJob(lessonID)
+}
+
+// CancelLessonSummary cancels a queued or active single-lesson summary (or combined) job.
 func (s *Service) CancelLessonSummary(lessonID string) (*LessonJobStatus, error) {
+	return s.cancelLessonJob(lessonID)
+}
+
+func (s *Service) cancelLessonJob(lessonID string) (*LessonJobStatus, error) {
 	lessonID = normalizeOrRaw(lessonID)
 	if lessonID == "" {
 		return nil, ErrInvalidInput
@@ -599,7 +800,8 @@ func (s *Service) CancelLessonSummary(lessonID string) (*LessonJobStatus, error)
 
 	entry.cancelRequested = true
 	if entry.queued {
-		s.removeSingleQueuedLocked(lessonID)
+		s.removeSingleTranscribeQueuedLocked(lessonID)
+		s.removeSingleSummaryQueuedLocked(lessonID)
 		entry.queued = false
 		entry.status.Running = false
 		entry.status.Stage = StageCancelled
@@ -609,6 +811,7 @@ func (s *Service) CancelLessonSummary(lessonID string) (*LessonJobStatus, error)
 		entry.status.Message = "正在取消..."
 		entry.cancel()
 	}
+	s.cond.Broadcast()
 
 	cp := entry.status
 	return &cp, nil
@@ -671,10 +874,14 @@ func (s *Service) GetCourseSummaryStatus(ctx context.Context, courseID string) (
 	}
 
 	s.mu.Lock()
-	var batchCopy *CourseBatchStatus
-	if batch, ok := s.courseBatches[courseID]; ok {
+	var transcribeCopy, summaryCopy *CourseBatchStatus
+	if batch, ok := s.courseTranscribeBatches[courseID]; ok {
 		cp := cloneBatchStatus(batch.status)
-		batchCopy = &cp
+		transcribeCopy = &cp
+	}
+	if batch, ok := s.courseSummaryBatches[courseID]; ok {
+		cp := cloneBatchStatus(batch.status)
+		summaryCopy = &cp
 	}
 	s.mu.Unlock()
 
@@ -684,32 +891,185 @@ func (s *Service) GetCourseSummaryStatus(ctx context.Context, courseID string) (
 		TranscriptLessonIDs: snap.transcriptLessonIDs,
 		Lessons:             snap.lessons,
 		Counts:              snap.counts,
-		BatchJob:            batchCopy,
-		SummaryBatchJob:     batchCopy,
+		BatchJob:            summaryCopy,
+		TranscribeBatchJob:  transcribeCopy,
+		SummaryBatchJob:     summaryCopy,
 	}, nil
 }
 
-// StartCourseBatch validates AI configuration and queues all target lessons in courseID for serial summarization.
-// mode may be "" / "missing_only" (default) or "all".
-func (s *Service) StartCourseBatch(ctx context.Context, courseID string, mode string) (*CourseBatchStatus, error) {
+type preparedBatchScope struct {
+	courseID     string
+	mode         string
+	chapterID    string
+	chapterTitle string
+	snap         *coursePipelineSnapshot
+	mediaByID    map[string]string
+	items        []LessonPipelineStatus
+}
+
+func (s *Service) prepareCourseBatchScope(ctx context.Context, courseID string, opts CourseBatchOptions) (*preparedBatchScope, error) {
 	courseID = normalizeOrRaw(courseID)
 	if courseID == "" {
 		return nil, ErrInvalidInput
 	}
 
-	modeNorm := strings.ToLower(strings.TrimSpace(mode))
+	modeNorm := strings.ToLower(strings.TrimSpace(opts.Mode))
 	if modeNorm == "" {
 		modeNorm = "missing_only"
 	}
 	if modeNorm != "missing_only" && modeNorm != "all" {
-		return nil, fmt.Errorf("%w: unsupported batch mode %q", ErrInvalidInput, mode)
+		return nil, fmt.Errorf("%w: unsupported batch mode %q", ErrInvalidInput, opts.Mode)
 	}
+
+	chapterID := normalizeOrRaw(opts.ChapterID)
 
 	course, err := s.catalog.GetCourseDetail(ctx, courseID)
 	if err != nil {
 		if errors.Is(err, catalog.ErrNotFound) {
 			return nil, ErrNotFound
 		}
+		return nil, err
+	}
+
+	var chapterTitle string
+	mediaByLesson := make(map[string]string)
+	foundChapter := chapterID == ""
+	for _, ch := range course.Chapters {
+		if ch.ID == chapterID {
+			foundChapter = true
+			chapterTitle = ch.Title
+		}
+		for _, l := range ch.Lessons {
+			mediaByLesson[l.ID] = l.MediaFileID
+		}
+	}
+	if !foundChapter {
+		return nil, ErrNotFound
+	}
+
+	snap, err := s.computeCourseLessonsPipelineStatus(ctx, course.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var items []LessonPipelineStatus
+	for _, lp := range snap.lessons {
+		if chapterID != "" && lp.ChapterID != chapterID {
+			continue
+		}
+		items = append(items, lp)
+	}
+
+	return &preparedBatchScope{
+		courseID:     course.ID,
+		mode:         modeNorm,
+		chapterID:    chapterID,
+		chapterTitle: chapterTitle,
+		snap:         snap,
+		mediaByID:    mediaByLesson,
+		items:        items,
+	}, nil
+}
+
+// StartCourseTranscribeBatch validates ASR configuration (without requiring AI LLM configuration)
+// and queues target lessons in courseID (optionally scoped to ChapterID) for serial transcription.
+func (s *Service) StartCourseTranscribeBatch(ctx context.Context, courseID string, opts CourseBatchOptions) (*CourseBatchStatus, error) {
+	scope, err := s.prepareCourseBatchScope(ctx, courseID, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := s.loadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.ASRConfigured {
+		return nil, ErrASRNotConfigured
+	}
+
+	s.mu.Lock()
+	if existing, ok := s.courseTranscribeBatches[scope.courseID]; ok && existing.status.Running {
+		cp := cloneBatchStatus(existing.status)
+		s.mu.Unlock()
+		return &cp, ErrBatchAlreadyRunning
+	}
+	s.mu.Unlock()
+
+	var pending []batchLessonItem
+	skippedAlreadyDone := 0
+	for _, lp := range scope.items {
+		if scope.mode == "missing_only" {
+			if lp.TranscriptReady {
+				skippedAlreadyDone++
+				continue
+			}
+		} else if lp.HasSubtitle {
+			// "all" mode re-transcribes cached/missing lessons while skipping physical subtitles.
+			skippedAlreadyDone++
+			continue
+		}
+		pending = append(pending, batchLessonItem{
+			lessonID:          lp.LessonID,
+			lessonTitle:       scope.snap.lessonTitles[lp.LessonID],
+			mediaFileID:       scope.mediaByID[lp.LessonID],
+			forceRetranscribe: scope.mode == "all",
+		})
+	}
+
+	now := nowUTC()
+	status := CourseBatchStatus{
+		CourseID:           scope.courseID,
+		Kind:               BatchKindTranscribe,
+		ChapterID:          scope.chapterID,
+		ChapterTitle:       scope.chapterTitle,
+		Running:            len(pending) > 0,
+		Total:              len(scope.items),
+		Skipped:            skippedAlreadyDone,
+		SkippedAlreadyDone: skippedAlreadyDone,
+		Errors:             []BatchLessonError{},
+		StartedAt:          now,
+	}
+	if len(pending) == 0 {
+		status.CurrentStage = StageCompleted
+		status.FinishedAt = now
+	} else {
+		status.CurrentStage = StageQueued
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.courseTranscribeBatches[scope.courseID]; ok && existing.status.Running {
+		cp := cloneBatchStatus(existing.status)
+		return &cp, ErrBatchAlreadyRunning
+	}
+	if len(pending) > 0 {
+		if err := s.lifecycleCtx.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	entry := &batchEntry{
+		kind:    BatchKindTranscribe,
+		status:  status,
+		mode:    scope.mode,
+		pending: pending,
+	}
+	s.courseTranscribeBatches[scope.courseID] = entry
+	if len(pending) > 0 {
+		s.batchTranscribeQueue = append(s.batchTranscribeQueue, entry)
+		s.ensureTranscribeWorkerLocked()
+	}
+
+	cp := cloneBatchStatus(entry.status)
+	return &cp, nil
+}
+
+// StartCourseSummaryBatch validates AI configuration and queues lessons with available transcripts
+// in courseID (optionally scoped to ChapterID) for serial summarization without triggering ASR.
+func (s *Service) StartCourseSummaryBatch(ctx context.Context, courseID string, opts CourseBatchOptions) (*CourseBatchStatus, error) {
+	scope, err := s.prepareCourseBatchScope(ctx, courseID, opts)
+	if err != nil {
 		return nil, err
 	}
 
@@ -722,66 +1082,45 @@ func (s *Service) StartCourseBatch(ctx context.Context, courseID string, mode st
 	}
 
 	s.mu.Lock()
-	if existing, ok := s.courseBatches[course.ID]; ok && existing.status.Running {
+	if existing, ok := s.courseSummaryBatches[scope.courseID]; ok && existing.status.Running {
 		cp := cloneBatchStatus(existing.status)
 		s.mu.Unlock()
 		return &cp, ErrBatchAlreadyRunning
 	}
 	s.mu.Unlock()
 
-	var allLessons []batchLessonItem
-	for _, ch := range course.Chapters {
-		for _, l := range ch.Lessons {
-			allLessons = append(allLessons, batchLessonItem{
-				lessonID:    l.ID,
-				lessonTitle: l.Title,
-			})
-		}
-	}
-
-	existingSet := make(map[string]bool)
-	if modeNorm == "missing_only" && len(allLessons) > 0 {
-		rows, err := s.db.QueryContext(ctx, `
-			SELECT ls.lesson_id
-			FROM lesson_summaries ls
-			JOIN lessons l ON l.id = ls.lesson_id
-			WHERE l.course_id = ?`, course.ID)
-		if err != nil {
-			return nil, fmt.Errorf("query existing course summaries: %w", err)
-		}
-		for rows.Next() {
-			var lid string
-			if err := rows.Scan(&lid); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			existingSet[lid] = true
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
-	}
-
 	var pending []batchLessonItem
-	skipped := 0
-	for _, item := range allLessons {
-		if modeNorm == "missing_only" && existingSet[item.lessonID] {
-			skipped++
+	skippedAlreadyDone := 0
+	skippedNoTranscript := 0
+	for _, lp := range scope.items {
+		if scope.mode == "missing_only" && lp.HasSummary {
+			skippedAlreadyDone++
 			continue
 		}
-		pending = append(pending, item)
+		if !lp.TranscriptReady {
+			skippedNoTranscript++
+			continue
+		}
+		pending = append(pending, batchLessonItem{
+			lessonID:    lp.LessonID,
+			lessonTitle: scope.snap.lessonTitles[lp.LessonID],
+			mediaFileID: scope.mediaByID[lp.LessonID],
+		})
 	}
 
 	now := nowUTC()
 	status := CourseBatchStatus{
-		CourseID:  course.ID,
-		Running:   len(pending) > 0,
-		Total:     len(allLessons),
-		Skipped:   skipped,
-		Errors:    []BatchLessonError{},
-		StartedAt: now,
+		CourseID:            scope.courseID,
+		Kind:                BatchKindSummarize,
+		ChapterID:           scope.chapterID,
+		ChapterTitle:        scope.chapterTitle,
+		Running:             len(pending) > 0,
+		Total:               len(scope.items),
+		Skipped:             skippedAlreadyDone + skippedNoTranscript,
+		SkippedAlreadyDone:  skippedAlreadyDone,
+		SkippedNoTranscript: skippedNoTranscript,
+		Errors:              []BatchLessonError{},
+		StartedAt:           now,
 	}
 	if len(pending) == 0 {
 		status.CurrentStage = StageCompleted
@@ -793,11 +1132,10 @@ func (s *Service) StartCourseBatch(ctx context.Context, courseID string, mode st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if existing, ok := s.courseBatches[course.ID]; ok && existing.status.Running {
+	if existing, ok := s.courseSummaryBatches[scope.courseID]; ok && existing.status.Running {
 		cp := cloneBatchStatus(existing.status)
 		return &cp, ErrBatchAlreadyRunning
 	}
-
 	if len(pending) > 0 {
 		if err := s.lifecycleCtx.Err(); err != nil {
 			return nil, err
@@ -805,23 +1143,42 @@ func (s *Service) StartCourseBatch(ctx context.Context, courseID string, mode st
 	}
 
 	entry := &batchEntry{
+		kind:    BatchKindSummarize,
 		status:  status,
-		mode:    modeNorm,
+		mode:    scope.mode,
 		pending: pending,
 	}
-	s.courseBatches[course.ID] = entry
-
+	s.courseSummaryBatches[scope.courseID] = entry
 	if len(pending) > 0 {
-		s.batchQueue = append(s.batchQueue, entry)
-		s.ensureWorkerLocked()
+		s.batchSummaryQueue = append(s.batchSummaryQueue, entry)
+		s.ensureSummaryWorkerLocked()
 	}
 
 	cp := cloneBatchStatus(entry.status)
 	return &cp, nil
 }
 
-// CancelCourseBatch clears any remaining queued lessons in courseID's batch and cancels its active lesson if running.
+// StartCourseBatch is a backward-compatible wrapper around StartCourseSummaryBatch.
+func (s *Service) StartCourseBatch(ctx context.Context, courseID string, mode string) (*CourseBatchStatus, error) {
+	return s.StartCourseSummaryBatch(ctx, courseID, CourseBatchOptions{Mode: mode})
+}
+
+// CancelCourseTranscribeBatch cancels the active/queued transcription batch for courseID.
+func (s *Service) CancelCourseTranscribeBatch(courseID string) (*CourseBatchStatus, error) {
+	return s.cancelCourseBatch(courseID, BatchKindTranscribe)
+}
+
+// CancelCourseSummaryBatch cancels the active/queued summary batch for courseID.
+func (s *Service) CancelCourseSummaryBatch(courseID string) (*CourseBatchStatus, error) {
+	return s.cancelCourseBatch(courseID, BatchKindSummarize)
+}
+
+// CancelCourseBatch is a backward-compatible wrapper around CancelCourseSummaryBatch.
 func (s *Service) CancelCourseBatch(courseID string) (*CourseBatchStatus, error) {
+	return s.CancelCourseSummaryBatch(courseID)
+}
+
+func (s *Service) cancelCourseBatch(courseID string, kind BatchKind) (*CourseBatchStatus, error) {
 	courseID = normalizeOrRaw(courseID)
 	if courseID == "" {
 		return nil, ErrInvalidInput
@@ -830,10 +1187,18 @@ func (s *Service) CancelCourseBatch(courseID string) (*CourseBatchStatus, error)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	batch, ok := s.courseBatches[courseID]
+	batches := s.courseSummaryBatches
+	queuePtr := &s.batchSummaryQueue
+	if kind == BatchKindTranscribe {
+		batches = s.courseTranscribeBatches
+		queuePtr = &s.batchTranscribeQueue
+	}
+
+	batch, ok := batches[courseID]
 	if !ok {
 		return &CourseBatchStatus{
 			CourseID:     courseID,
+			Kind:         kind,
 			Running:      false,
 			CurrentStage: StageCancelled,
 			Errors:       []BatchLessonError{},
@@ -847,7 +1212,7 @@ func (s *Service) CancelCourseBatch(courseID string) (*CourseBatchStatus, error)
 
 	batch.cancelRequested = true
 	batch.pending = nil
-	s.removeBatchFromQueueLocked(batch)
+	removeBatchEntryLocked(queuePtr, batch)
 
 	if batch.activeLessonCancel != nil {
 		if entry, ok := s.lessonJobs[batch.activeLessonID]; ok {
@@ -857,18 +1222,28 @@ func (s *Service) CancelCourseBatch(courseID string) (*CourseBatchStatus, error)
 	} else {
 		finishBatchLocked(batch, StageCancelled)
 	}
+	s.cond.Broadcast()
 
 	cp := cloneBatchStatus(batch.status)
 	return &cp, nil
 }
 
-func (s *Service) ensureWorkerLocked() {
-	if s.workerActive {
+func (s *Service) ensureTranscribeWorkerLocked() {
+	if s.transcribeWorkerActive {
 		return
 	}
-	s.workerActive = true
+	s.transcribeWorkerActive = true
 	s.wg.Add(1)
-	go s.runWorker()
+	go s.runTranscribeWorker()
+}
+
+func (s *Service) ensureSummaryWorkerLocked() {
+	if s.summaryWorkerActive {
+		return
+	}
+	s.summaryWorkerActive = true
+	s.wg.Add(1)
+	go s.runSummaryWorker()
 }
 
 type nextTaskKind int
@@ -879,21 +1254,22 @@ const (
 	taskBatchItem
 )
 
-func (s *Service) runWorker() {
+func (s *Service) runTranscribeWorker() {
 	defer s.wg.Done()
 
 	for {
 		s.mu.Lock()
 		if s.lifecycleCtx.Err() != nil {
-			s.cancelQueuedOnShutdownLocked()
-			s.workerActive = false
+			s.cancelQueuedTranscribeOnShutdownLocked()
+			s.transcribeWorkerActive = false
+			s.cond.Broadcast()
 			s.mu.Unlock()
 			return
 		}
 
-		kind, singleReq, batch, item := s.popNextTaskLocked()
+		kind, singleReq, batch, item := s.popNextTranscribeTaskLocked()
 		if kind == taskNone {
-			s.workerActive = false
+			s.transcribeWorkerActive = false
 			s.mu.Unlock()
 			return
 		}
@@ -901,73 +1277,129 @@ func (s *Service) runWorker() {
 
 		switch kind {
 		case taskSingle:
-			s.executeSingleTask(singleReq)
+			s.executeSingleTranscribeTask(singleReq)
 		case taskBatchItem:
-			s.executeBatchItem(batch, item)
+			s.executeTranscribeBatchItem(batch, item)
 		}
 	}
 }
 
-func (s *Service) popNextTaskLocked() (nextTaskKind, *singleJobRequest, *batchEntry, batchLessonItem) {
-	if len(s.singleQueue) > 0 {
-		req := s.singleQueue[0]
-		s.singleQueue = s.singleQueue[1:]
+func (s *Service) runSummaryWorker() {
+	defer s.wg.Done()
+
+	for {
+		s.mu.Lock()
+		if s.lifecycleCtx.Err() != nil {
+			s.cancelQueuedSummaryOnShutdownLocked()
+			s.summaryWorkerActive = false
+			s.cond.Broadcast()
+			s.mu.Unlock()
+			return
+		}
+
+		kind, singleReq, batch, item := s.popNextSummaryTaskLocked()
+		if kind == taskNone {
+			s.summaryWorkerActive = false
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+
+		switch kind {
+		case taskSingle:
+			s.executeSingleSummaryTask(singleReq)
+		case taskBatchItem:
+			s.executeSummaryBatchItem(batch, item)
+		}
+	}
+}
+
+func (s *Service) popNextTranscribeTaskLocked() (nextTaskKind, *singleTranscribeRequest, *batchEntry, batchLessonItem) {
+	if len(s.singleTranscribeQueue) > 0 {
+		req := s.singleTranscribeQueue[0]
+		s.singleTranscribeQueue = s.singleTranscribeQueue[1:]
 		return taskSingle, req, nil, batchLessonItem{}
 	}
+	kind, batch, item := popBatchQueueLocked(&s.batchTranscribeQueue)
+	return kind, nil, batch, item
+}
 
-	for len(s.batchQueue) > 0 {
-		batch := s.batchQueue[0]
+func (s *Service) popNextSummaryTaskLocked() (nextTaskKind, *singleSummaryRequest, *batchEntry, batchLessonItem) {
+	if len(s.singleSummaryQueue) > 0 {
+		req := s.singleSummaryQueue[0]
+		s.singleSummaryQueue = s.singleSummaryQueue[1:]
+		return taskSingle, req, nil, batchLessonItem{}
+	}
+	kind, batch, item := popBatchQueueLocked(&s.batchSummaryQueue)
+	return kind, nil, batch, item
+}
+
+func popBatchQueueLocked(queuePtr *[]*batchEntry) (nextTaskKind, *batchEntry, batchLessonItem) {
+	q := *queuePtr
+	for len(q) > 0 {
+		batch := q[0]
 		if batch.cancelRequested || len(batch.pending) == 0 {
-			s.batchQueue = s.batchQueue[1:]
+			q = q[1:]
 			continue
 		}
 		item := batch.pending[0]
 		batch.pending = batch.pending[1:]
 		if len(batch.pending) == 0 {
-			s.batchQueue = s.batchQueue[1:]
+			q = q[1:]
 		}
-		return taskBatchItem, nil, batch, item
+		*queuePtr = q
+		return taskBatchItem, batch, item
 	}
-
-	return taskNone, nil, nil, batchLessonItem{}
+	*queuePtr = q
+	return taskNone, nil, batchLessonItem{}
 }
 
-func (s *Service) removeSingleQueuedLocked(lessonID string) {
-	kept := s.singleQueue[:0]
-	for _, req := range s.singleQueue {
+func (s *Service) removeSingleTranscribeQueuedLocked(lessonID string) {
+	kept := s.singleTranscribeQueue[:0]
+	for _, req := range s.singleTranscribeQueue {
 		if req.lessonID == lessonID {
 			continue
 		}
 		kept = append(kept, req)
 	}
-	s.singleQueue = kept
+	s.singleTranscribeQueue = kept
 }
 
-func (s *Service) removeBatchFromQueueLocked(target *batchEntry) {
-	kept := s.batchQueue[:0]
-	for _, b := range s.batchQueue {
+func (s *Service) removeSingleSummaryQueuedLocked(lessonID string) {
+	kept := s.singleSummaryQueue[:0]
+	for _, req := range s.singleSummaryQueue {
+		if req.lessonID == lessonID {
+			continue
+		}
+		kept = append(kept, req)
+	}
+	s.singleSummaryQueue = kept
+}
+
+func removeBatchEntryLocked(queuePtr *[]*batchEntry, target *batchEntry) {
+	q := *queuePtr
+	kept := q[:0]
+	for _, b := range q {
 		if b == target {
 			continue
 		}
 		kept = append(kept, b)
 	}
-	s.batchQueue = kept
+	*queuePtr = kept
 }
 
-func (s *Service) cancelQueuedOnShutdownLocked() {
-	now := nowUTC()
-	for _, req := range s.singleQueue {
-		if entry, ok := s.lessonJobs[req.lessonID]; ok && entry.status.Running {
-			entry.queued = false
-			entry.status.Running = false
-			entry.status.Stage = StageCancelled
-			entry.status.Message = "已取消"
-			entry.status.FinishedAt = now
-		}
+func (s *Service) markQueuedLessonCancelledLocked(lessonID, now string) {
+	if entry, ok := s.lessonJobs[lessonID]; ok && entry.status.Running {
+		entry.queued = false
+		entry.status.Running = false
+		entry.status.Stage = StageCancelled
+		entry.status.Message = "已取消"
+		entry.status.FinishedAt = now
 	}
-	s.singleQueue = nil
+}
 
-	for _, batch := range s.batchQueue {
+func cancelBatchQueueOnShutdownLocked(q []*batchEntry) {
+	for _, batch := range q {
 		batch.cancelRequested = true
 		if batch.status.Running {
 			finishBatchLocked(batch, StageCancelled)
@@ -975,7 +1407,50 @@ func (s *Service) cancelQueuedOnShutdownLocked() {
 			batch.pending = nil
 		}
 	}
-	s.batchQueue = nil
+}
+
+func (s *Service) cancelQueuedTranscribeOnShutdownLocked() {
+	now := nowUTC()
+	for _, req := range s.singleTranscribeQueue {
+		s.markQueuedLessonCancelledLocked(req.lessonID, now)
+	}
+	s.singleTranscribeQueue = nil
+	cancelBatchQueueOnShutdownLocked(s.batchTranscribeQueue)
+	s.batchTranscribeQueue = nil
+}
+
+func (s *Service) cancelQueuedSummaryOnShutdownLocked() {
+	now := nowUTC()
+	for _, req := range s.singleSummaryQueue {
+		s.markQueuedLessonCancelledLocked(req.lessonID, now)
+	}
+	s.singleSummaryQueue = nil
+	cancelBatchQueueOnShutdownLocked(s.batchSummaryQueue)
+	s.batchSummaryQueue = nil
+}
+
+func (s *Service) waitForWorkerSlotLocked(kind BatchKind, lessonID, mediaFileID string, ownerIsBatch bool, isCancelled func() bool) bool {
+	for {
+		if isCancelled() || s.lifecycleCtx.Err() != nil {
+			return false
+		}
+		var conflict bool
+		if kind == BatchKindTranscribe {
+			conflict = s.activeSummaryLessonID == lessonID || (mediaFileID != "" && s.activeSummaryMediaID == mediaFileID)
+		} else {
+			conflict = s.activeTranscribeLessonID == lessonID || (mediaFileID != "" && s.activeTranscribeMediaID == mediaFileID)
+		}
+		// Ensure a batch item never overwrites a live single-lesson job (including during ASR -> LLM handoff).
+		if !conflict && ownerIsBatch {
+			if existing, ok := s.lessonJobs[lessonID]; ok && existing.status.Running && !existing.ownerIsBatch {
+				conflict = true
+			}
+		}
+		if !conflict {
+			return true
+		}
+		s.cond.Wait()
+	}
 }
 
 func clearBatchActiveFieldsLocked(batch *batchEntry, stage JobStage) {
@@ -993,7 +1468,7 @@ func finishBatchLocked(batch *batchEntry, stage JobStage) {
 	batch.status.FinishedAt = nowUTC()
 }
 
-func (s *Service) executeSingleTask(req *singleJobRequest) {
+func (s *Service) executeSingleTranscribeTask(req *singleTranscribeRequest) {
 	jobCtx, jobCancel := context.WithCancel(s.lifecycleCtx)
 	defer jobCancel()
 
@@ -1004,12 +1479,14 @@ func (s *Service) executeSingleTask(req *singleJobRequest) {
 			status: LessonJobStatus{
 				LessonID:  req.lessonID,
 				CourseID:  req.courseID,
+				Action:    ActionTranscribe,
 				StartedAt: nowUTC(),
 			},
+			action: ActionTranscribe,
 		}
 		s.lessonJobs[req.lessonID] = entry
 	}
-	if entry.cancelRequested || s.lifecycleCtx.Err() != nil {
+	if !s.waitForWorkerSlotLocked(BatchKindTranscribe, req.lessonID, req.mediaFileID, false, func() bool { return entry.cancelRequested }) {
 		entry.queued = false
 		entry.status.Running = false
 		entry.status.Stage = StageCancelled
@@ -1020,11 +1497,13 @@ func (s *Service) executeSingleTask(req *singleJobRequest) {
 	}
 	entry.queued = false
 	entry.cancel = jobCancel
-	entry.status.Stage = StageReadingSubtitle
-	entry.status.Message = "正在读取字幕..."
+	entry.status.Stage = StageExtractingAudio
+	entry.status.Message = "正在准备语音转写..."
+	s.activeTranscribeLessonID = req.lessonID
+	s.activeTranscribeMediaID = req.mediaFileID
 	s.mu.Unlock()
 
-	sourceType, err := s.runLessonSummary(jobCtx, req.lessonID, req.opts, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
+	sourceType, err := s.runLessonTranscribe(jobCtx, req.lessonID, req.forceRetranscribe, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
 		s.mu.Lock()
 		if e, exists := s.lessonJobs[req.lessonID]; exists {
 			e.status.Stage = stage
@@ -1040,15 +1519,110 @@ func (s *Service) executeSingleTask(req *singleJobRequest) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.activeTranscribeLessonID = ""
+	s.activeTranscribeMediaID = ""
+
+	e, exists := s.lessonJobs[req.lessonID]
+	if exists {
+		e.cancel = nil
+	}
+
+	if err == nil && req.thenSummarize && exists && !e.cancelRequested && s.lifecycleCtx.Err() == nil {
+		// Hand off seamlessly to summaryWorker without clearing Running status.
+		e.queued = true
+		e.queueKind = BatchKindSummarize
+		e.status.Stage = StageQueued
+		e.status.Message = "语音转写完成，等待生成 AI 总结..."
+		e.status.ChunkIndex = 0
+		e.status.ChunkTotal = 0
+		if sourceType != "" {
+			e.status.SourceType = sourceType
+		}
+		nextOpts := req.summaryOpts
+		nextOpts.ForceRetranscribe = false
+		s.singleSummaryQueue = append(s.singleSummaryQueue, &singleSummaryRequest{
+			lessonID:    req.lessonID,
+			courseID:    req.courseID,
+			mediaFileID: req.mediaFileID,
+			opts:        nextOpts,
+		})
+		s.ensureSummaryWorkerLocked()
+		s.cond.Broadcast()
+		return
+	}
+
+	if exists {
+		s.finalizeLessonJobLocked(e, sourceType, err)
+	}
+	s.cond.Broadcast()
+}
+
+func (s *Service) executeSingleSummaryTask(req *singleSummaryRequest) {
+	jobCtx, jobCancel := context.WithCancel(s.lifecycleCtx)
+	defer jobCancel()
+
+	s.mu.Lock()
+	entry, ok := s.lessonJobs[req.lessonID]
+	if !ok {
+		entry = &lessonJobEntry{
+			status: LessonJobStatus{
+				LessonID:  req.lessonID,
+				CourseID:  req.courseID,
+				Action:    ActionSummarize,
+				StartedAt: nowUTC(),
+			},
+			action: ActionSummarize,
+		}
+		s.lessonJobs[req.lessonID] = entry
+	}
+	if !s.waitForWorkerSlotLocked(BatchKindSummarize, req.lessonID, req.mediaFileID, false, func() bool { return entry.cancelRequested }) {
+		entry.queued = false
+		entry.status.Running = false
+		entry.status.Stage = StageCancelled
+		entry.status.Message = "已取消"
+		entry.status.FinishedAt = nowUTC()
+		s.mu.Unlock()
+		return
+	}
+	entry.queued = false
+	entry.cancel = jobCancel
+	entry.status.Stage = StageReadingSubtitle
+	entry.status.Message = "正在读取字幕..."
+	s.activeSummaryLessonID = req.lessonID
+	s.activeSummaryMediaID = req.mediaFileID
+	s.mu.Unlock()
+
+	sourceType, err := s.runLessonSummaryOnly(jobCtx, req.lessonID, req.opts, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
+		s.mu.Lock()
+		if e, exists := s.lessonJobs[req.lessonID]; exists {
+			e.status.Stage = stage
+			e.status.Message = msg
+			e.status.ChunkIndex = chunkIdx
+			e.status.ChunkTotal = chunkTotal
+			if srcType != "" {
+				e.status.SourceType = srcType
+			}
+		}
+		s.mu.Unlock()
+	})
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.activeSummaryLessonID = ""
+	s.activeSummaryMediaID = ""
+
 	if e, exists := s.lessonJobs[req.lessonID]; exists {
 		e.cancel = nil
 		s.finalizeLessonJobLocked(e, sourceType, err)
 	}
+	s.cond.Broadcast()
 }
 
-func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
+func (s *Service) executeTranscribeBatchItem(batch *batchEntry, item batchLessonItem) {
 	s.mu.Lock()
-	if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
+	if !s.waitForWorkerSlotLocked(BatchKindTranscribe, item.lessonID, item.mediaFileID, true, func() bool { return batch.cancelRequested }) {
 		if batch.status.Running {
 			finishBatchLocked(batch, StageCancelled)
 		}
@@ -1058,28 +1632,24 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 	mode := batch.mode
 	s.mu.Unlock()
 
-	// If a priority single-lesson job summarized this lesson while it was waiting in missing_only mode, skip it.
-	if mode == "missing_only" {
-		var exists int
-		err := s.db.QueryRowContext(s.lifecycleCtx, `SELECT 1 FROM lesson_summaries WHERE lesson_id = ?`, item.lessonID).Scan(&exists)
-		if err == nil {
-			s.mu.Lock()
-			if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
-				if batch.status.Running {
-					finishBatchLocked(batch, StageCancelled)
-				}
-				s.mu.Unlock()
-				return
-			}
-			batch.status.Skipped++
-			if len(batch.pending) == 0 {
-				finishBatchLocked(batch, StageCompleted)
-			} else {
-				clearBatchActiveFieldsLocked(batch, StageQueued)
+	if mode == "missing_only" && s.hasReadyTranscriptOrSubtitle(s.lifecycleCtx, item.mediaFileID) {
+		s.mu.Lock()
+		if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
+			if batch.status.Running {
+				finishBatchLocked(batch, StageCancelled)
 			}
 			s.mu.Unlock()
 			return
 		}
+		batch.status.Skipped++
+		batch.status.SkippedAlreadyDone++
+		if len(batch.pending) == 0 {
+			finishBatchLocked(batch, StageCompleted)
+		} else {
+			clearBatchActiveFieldsLocked(batch, StageQueued)
+		}
+		s.mu.Unlock()
+		return
 	}
 
 	jobCtx, jobCancel := context.WithCancel(s.lifecycleCtx)
@@ -1099,25 +1669,30 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 		status: LessonJobStatus{
 			LessonID:  item.lessonID,
 			CourseID:  batch.status.CourseID,
+			Action:    ActionTranscribe,
 			Running:   true,
-			Stage:     StageReadingSubtitle,
-			Message:   "正在读取字幕...",
+			Stage:     StageExtractingAudio,
+			Message:   "正在提取视频音频...",
 			StartedAt: now,
 		},
-		cancel: jobCancel,
+		action:       ActionTranscribe,
+		ownerIsBatch: true,
+		cancel:       jobCancel,
 	}
 	s.lessonJobs[item.lessonID] = entry
 
+	s.activeTranscribeLessonID = item.lessonID
+	s.activeTranscribeMediaID = item.mediaFileID
 	batch.activeLessonID = item.lessonID
 	batch.activeLessonCancel = jobCancel
 	batch.status.CurrentLessonID = item.lessonID
 	batch.status.CurrentLessonTitle = item.lessonTitle
-	batch.status.CurrentStage = StageReadingSubtitle
+	batch.status.CurrentStage = StageExtractingAudio
 	batch.status.ChunkIndex = 0
 	batch.status.ChunkTotal = 0
 	s.mu.Unlock()
 
-	sourceType, err := s.runLessonSummary(jobCtx, item.lessonID, GenerateLessonOptions{}, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
+	sourceType, err := s.runLessonTranscribe(jobCtx, item.lessonID, item.forceRetranscribe, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
 		s.mu.Lock()
 		if e, exists := s.lessonJobs[item.lessonID]; exists {
 			e.status.Stage = stage
@@ -1137,6 +1712,9 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.activeTranscribeLessonID = ""
+	s.activeTranscribeMediaID = ""
+
 	if e, exists := s.lessonJobs[item.lessonID]; exists {
 		e.cancel = nil
 		s.finalizeLessonJobLocked(e, sourceType, err)
@@ -1144,6 +1722,7 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 
 	batch.activeLessonID = ""
 	batch.activeLessonCancel = nil
+	s.cond.Broadcast()
 
 	if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
 		if batch.status.Running {
@@ -1176,6 +1755,158 @@ func (s *Service) executeBatchItem(batch *batchEntry, item batchLessonItem) {
 	}
 }
 
+func (s *Service) executeSummaryBatchItem(batch *batchEntry, item batchLessonItem) {
+	s.mu.Lock()
+	if !s.waitForWorkerSlotLocked(BatchKindSummarize, item.lessonID, item.mediaFileID, true, func() bool { return batch.cancelRequested }) {
+		if batch.status.Running {
+			finishBatchLocked(batch, StageCancelled)
+		}
+		s.mu.Unlock()
+		return
+	}
+	mode := batch.mode
+	s.mu.Unlock()
+
+	// If a priority single-lesson job summarized this lesson while it was waiting in missing_only mode, skip it.
+	if mode == "missing_only" {
+		var exists int
+		err := s.db.QueryRowContext(s.lifecycleCtx, `SELECT 1 FROM lesson_summaries WHERE lesson_id = ?`, item.lessonID).Scan(&exists)
+		if err == nil {
+			s.mu.Lock()
+			if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
+				if batch.status.Running {
+					finishBatchLocked(batch, StageCancelled)
+				}
+				s.mu.Unlock()
+				return
+			}
+			batch.status.Skipped++
+			batch.status.SkippedAlreadyDone++
+			if len(batch.pending) == 0 {
+				finishBatchLocked(batch, StageCompleted)
+			} else {
+				clearBatchActiveFieldsLocked(batch, StageQueued)
+			}
+			s.mu.Unlock()
+			return
+		}
+	}
+
+	jobCtx, jobCancel := context.WithCancel(s.lifecycleCtx)
+	defer jobCancel()
+
+	s.mu.Lock()
+	if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
+		if batch.status.Running {
+			finishBatchLocked(batch, StageCancelled)
+		}
+		s.mu.Unlock()
+		return
+	}
+
+	now := nowUTC()
+	entry := &lessonJobEntry{
+		status: LessonJobStatus{
+			LessonID:  item.lessonID,
+			CourseID:  batch.status.CourseID,
+			Action:    ActionSummarize,
+			Running:   true,
+			Stage:     StageReadingSubtitle,
+			Message:   "正在读取字幕...",
+			StartedAt: now,
+		},
+		action:       ActionSummarize,
+		ownerIsBatch: true,
+		cancel:       jobCancel,
+	}
+	s.lessonJobs[item.lessonID] = entry
+
+	s.activeSummaryLessonID = item.lessonID
+	s.activeSummaryMediaID = item.mediaFileID
+	batch.activeLessonID = item.lessonID
+	batch.activeLessonCancel = jobCancel
+	batch.status.CurrentLessonID = item.lessonID
+	batch.status.CurrentLessonTitle = item.lessonTitle
+	batch.status.CurrentStage = StageReadingSubtitle
+	batch.status.ChunkIndex = 0
+	batch.status.ChunkTotal = 0
+	s.mu.Unlock()
+
+	sourceType, err := s.runLessonSummaryOnly(jobCtx, item.lessonID, GenerateLessonOptions{}, func(stage JobStage, msg string, chunkIdx, chunkTotal int, srcType string) {
+		s.mu.Lock()
+		if e, exists := s.lessonJobs[item.lessonID]; exists {
+			e.status.Stage = stage
+			e.status.Message = msg
+			e.status.ChunkIndex = chunkIdx
+			e.status.ChunkTotal = chunkTotal
+			if srcType != "" {
+				e.status.SourceType = srcType
+			}
+		}
+		batch.status.CurrentStage = stage
+		batch.status.ChunkIndex = chunkIdx
+		batch.status.ChunkTotal = chunkTotal
+		s.mu.Unlock()
+	})
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.activeSummaryLessonID = ""
+	s.activeSummaryMediaID = ""
+
+	if e, exists := s.lessonJobs[item.lessonID]; exists {
+		e.cancel = nil
+		if errors.Is(err, errNoTranscriptReady) {
+			e.status.Running = false
+			e.status.Stage = StageCancelled
+			e.status.Message = "无可用字幕或转写文稿，已跳过"
+			e.status.Error = ""
+			e.status.ErrorCode = ""
+			e.status.FinishedAt = nowUTC()
+		} else {
+			s.finalizeLessonJobLocked(e, sourceType, err)
+		}
+	}
+
+	batch.activeLessonID = ""
+	batch.activeLessonCancel = nil
+	s.cond.Broadcast()
+
+	if batch.cancelRequested || s.lifecycleCtx.Err() != nil {
+		if batch.status.Running {
+			finishBatchLocked(batch, StageCancelled)
+		}
+		return
+	}
+
+	if err == nil {
+		batch.status.Completed++
+	} else if errors.Is(err, errNoTranscriptReady) {
+		batch.status.Skipped++
+		batch.status.SkippedNoTranscript++
+	} else {
+		batch.status.Failed++
+		errCode, errMsg := classifyJobError(err)
+		if errors.Is(err, context.Canceled) {
+			errCode = "cancelled"
+			errMsg = "任务已取消"
+		}
+		batch.status.Errors = append(batch.status.Errors, BatchLessonError{
+			LessonID:    item.lessonID,
+			LessonTitle: item.lessonTitle,
+			Error:       errMsg,
+			ErrorCode:   errCode,
+		})
+	}
+
+	if len(batch.pending) == 0 {
+		finishBatchLocked(batch, StageCompleted)
+	} else {
+		clearBatchActiveFieldsLocked(batch, StageQueued)
+	}
+}
+
 func (s *Service) finalizeLessonJobLocked(entry *lessonJobEntry, sourceType string, err error) {
 	now := nowUTC()
 	entry.status.Running = false
@@ -1186,7 +1917,11 @@ func (s *Service) finalizeLessonJobLocked(entry *lessonJobEntry, sourceType stri
 
 	if err == nil {
 		entry.status.Stage = StageCompleted
-		entry.status.Message = "AI 总结生成完成"
+		if entry.action == ActionTranscribe {
+			entry.status.Message = "语音转文字完成"
+		} else {
+			entry.status.Message = "AI 总结生成完成"
+		}
 		entry.status.Error = ""
 		entry.status.ErrorCode = ""
 		return
@@ -1202,7 +1937,11 @@ func (s *Service) finalizeLessonJobLocked(entry *lessonJobEntry, sourceType stri
 
 	code, msg := classifyJobError(err)
 	entry.status.Stage = StageFailed
-	entry.status.Message = "生成失败"
+	if entry.action == ActionTranscribe {
+		entry.status.Message = "转写失败"
+	} else {
+		entry.status.Message = "生成失败"
+	}
 	entry.status.Error = msg
 	entry.status.ErrorCode = code
 }
@@ -1220,6 +1959,8 @@ func classifyJobError(err error) (code string, msg string) {
 		return "ai_not_configured", err.Error()
 	case errors.Is(err, ErrASRNotConfigured):
 		return "asr_not_configured", err.Error()
+	case errors.Is(err, ErrLessonJobConflict):
+		return "lesson_job_conflict", err.Error()
 	case errors.Is(err, ErrNotFound):
 		return "not_found", err.Error()
 	case errors.Is(err, ErrInvalidInput):
@@ -1239,7 +1980,70 @@ type resolvedTranscript struct {
 	plainText     string
 }
 
-func (s *Service) runLessonSummary(
+func (s *Service) hasReadyTranscriptOrSubtitle(ctx context.Context, mediaFileID string) bool {
+	if mediaFileID == "" {
+		return false
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM subtitle_files WHERE media_file_id = ? AND status = 'active'`, mediaFileID).Scan(&count); err == nil && count > 0 {
+		return true
+	}
+	var streamsJSON string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(streams_json, '[]') FROM media_files WHERE id = ?`, mediaFileID).Scan(&streamsJSON); err == nil && hasEmbeddedTextSubtitleJSON(streamsJSON) {
+		return true
+	}
+	if _, found, err := s.loadCachedTranscript(ctx, mediaFileID); err == nil && found {
+		return true
+	}
+	return false
+}
+
+func (s *Service) runLessonTranscribe(
+	ctx context.Context,
+	lessonID string,
+	forceRetranscribe bool,
+	report progressFunc,
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	lesson, err := s.catalog.GetLesson(ctx, lessonID)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNotFound) {
+			return "", &pipelineError{code: "not_found", err: ErrNotFound}
+		}
+		return "", err
+	}
+
+	cfg, err := s.loadConfig(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !cfg.ASRConfigured {
+		return "", &pipelineError{code: "asr_not_configured", err: ErrASRNotConfigured}
+	}
+
+	if !forceRetranscribe {
+		caps, capErr := s.computeLessonCapabilities(ctx, lesson, cfg)
+		if capErr == nil {
+			if caps.HasSubtitle {
+				return "subtitle", nil
+			}
+			if caps.HasCachedTranscript {
+				return caps.TranscriptSource, nil
+			}
+		}
+	}
+
+	_, _, asrErr := s.runASRPipeline(ctx, lesson.MediaFileID, forceRetranscribe, cfg, report)
+	if asrErr != nil {
+		return "asr", asrErr
+	}
+	return "asr", nil
+}
+
+func (s *Service) runLessonSummaryOnly(
 	ctx context.Context,
 	lessonID string,
 	opts GenerateLessonOptions,
@@ -1271,7 +2075,7 @@ func (s *Service) runLessonSummary(
 
 	report(StageReadingSubtitle, "正在读取字幕...", 0, 0, "")
 
-	src, err := s.resolveLessonTranscript(ctx, lesson.MediaFileID, opts, cfg, report)
+	src, err := s.resolveLessonTranscriptOnly(ctx, lesson.MediaFileID, opts)
 	if err != nil {
 		return src.sourceType, err
 	}
@@ -1297,12 +2101,10 @@ func (s *Service) runLessonSummary(
 	return src.sourceType, nil
 }
 
-func (s *Service) resolveLessonTranscript(
+func (s *Service) resolveLessonTranscriptOnly(
 	ctx context.Context,
 	mediaFileID string,
 	opts GenerateLessonOptions,
-	cfg AIConfigSnapshot,
-	report progressFunc,
 ) (resolvedTranscript, error) {
 	manual := strings.TrimSpace(opts.ManualTranscript)
 	if manual != "" {
@@ -1322,47 +2124,36 @@ func (s *Service) resolveLessonTranscript(
 		}, nil
 	}
 
-	if !opts.ForceRetranscribe {
-		if s.media != nil {
-			vtt, st, sl, found, subErr := s.media.ExtractBestSubtitleVTT(ctx, mediaFileID)
-			if subErr != nil {
-				if ctx.Err() != nil {
-					return resolvedTranscript{}, ctx.Err()
-				}
-				// If physical subtitle extraction failed (e.g. embedded subtitle without ffmpeg),
-				// still check cached transcript before failing.
-				if res, ok, cErr := s.resolveCachedTranscript(ctx, mediaFileID); cErr == nil && ok {
-					return res, nil
-				}
-				return resolvedTranscript{}, &pipelineError{code: "subtitle_extract_failed", err: subErr}
+	if s.media != nil {
+		vtt, st, sl, found, subErr := s.media.ExtractBestSubtitleVTT(ctx, mediaFileID)
+		if subErr != nil {
+			if ctx.Err() != nil {
+				return resolvedTranscript{}, ctx.Err()
 			}
-			if found {
-				return resolvedTranscript{
-					sourceType:    st,
-					sourceLabel:   sl,
-					hasTimestamps: true,
-					vttText:       vtt,
-				}, nil
+			// If physical subtitle extraction failed (e.g. embedded subtitle without ffmpeg),
+			// still check cached transcript before failing.
+			if res, ok, cErr := s.resolveCachedTranscript(ctx, mediaFileID); cErr == nil && ok {
+				return res, nil
 			}
+			return resolvedTranscript{}, &pipelineError{code: "subtitle_extract_failed", err: subErr}
 		}
-
-		if res, ok, cacheErr := s.resolveCachedTranscript(ctx, mediaFileID); cacheErr != nil {
-			return resolvedTranscript{}, cacheErr
-		} else if ok {
-			return res, nil
+		if found {
+			return resolvedTranscript{
+				sourceType:    st,
+				sourceLabel:   sl,
+				hasTimestamps: true,
+				vttText:       vtt,
+			}, nil
 		}
 	}
 
-	vtt, lang, asrErr := s.runASRPipeline(ctx, mediaFileID, opts.ForceRetranscribe, cfg, report)
-	if asrErr != nil {
-		return resolvedTranscript{sourceType: "asr"}, asrErr
+	if res, ok, cacheErr := s.resolveCachedTranscript(ctx, mediaFileID); cacheErr != nil {
+		return resolvedTranscript{}, cacheErr
+	} else if ok {
+		return res, nil
 	}
-	return resolvedTranscript{
-		sourceType:    "asr",
-		sourceLabel:   formatASRSourceLabel(lang),
-		hasTimestamps: true,
-		vttText:       vtt,
-	}, nil
+
+	return resolvedTranscript{}, errNoTranscriptReady
 }
 
 func (s *Service) resolveCachedTranscript(ctx context.Context, mediaFileID string) (resolvedTranscript, bool, error) {
