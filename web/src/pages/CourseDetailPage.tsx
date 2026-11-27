@@ -22,6 +22,7 @@ import { api, itemPrimaryImageUrl } from '../api/client';
 import LessonProgressIcon from '../components/LessonProgressIcon';
 import LessonSummaryPanel, {
   BatchSummaryBanner,
+  formatBatchCancelNotice,
   formatBatchResultSummary,
   shouldShowBatchBanner,
 } from '../components/LessonSummaryPanel';
@@ -438,12 +439,14 @@ export default function CourseDetailPage() {
       const wasUserCancelled = userCancelledBatchRef.current;
       userCancelledBatchRef.current = false;
 
-      if (batchJob && !wasUserCancelled && batchJob.current_stage !== 'cancelled') {
-        const msg = formatBatchResultSummary(batchJob);
+      if (batchJob) {
+        const isCancelled = wasUserCancelled || batchJob.current_stage === 'cancelled';
         if (batchJob.failed > 0 || (batchJob.errors?.length ?? 0) > 0) {
-          toast.error(msg);
+          toast.error(formatBatchResultSummary(batchJob));
+        } else if (isCancelled) {
+          toast.info(formatBatchCancelNotice(batchJob));
         } else {
-          toast.success(msg);
+          toast.success(formatBatchResultSummary(batchJob));
         }
       }
     }
@@ -464,16 +467,15 @@ export default function CourseDetailPage() {
       const wasUserCancelled = userCancelledTranscribeBatchRef.current;
       userCancelledTranscribeBatchRef.current = false;
 
-      if (
-        transcribeBatchJob &&
-        !wasUserCancelled &&
-        transcribeBatchJob.current_stage !== 'cancelled'
-      ) {
-        const msg = formatBatchResultSummary(transcribeBatchJob);
+      if (transcribeBatchJob) {
+        const isCancelled =
+          wasUserCancelled || transcribeBatchJob.current_stage === 'cancelled';
         if (transcribeBatchJob.failed > 0 || (transcribeBatchJob.errors?.length ?? 0) > 0) {
-          toast.error(msg);
+          toast.error(formatBatchResultSummary(transcribeBatchJob));
+        } else if (isCancelled) {
+          toast.info(formatBatchCancelNotice(transcribeBatchJob));
         } else {
-          toast.success(msg);
+          toast.success(formatBatchResultSummary(transcribeBatchJob));
         }
       }
     }

@@ -50,10 +50,11 @@ const (
 
 // AIConfigSnapshot contains resolved effective LLM and ASR settings plus readiness flags.
 type AIConfigSnapshot struct {
-	AI            ai.Config
-	ASR           ai.ASRConfig
-	AIConfigured  bool
-	ASRConfigured bool
+	AI                ai.Config
+	ASR               ai.ASRConfig
+	ASRSegmentSeconds int
+	AIConfigured      bool
+	ASRConfigured     bool
 }
 
 // ConfigLoader loads effective AI and ASR configuration for summary execution.
@@ -78,6 +79,20 @@ func ResolveEffectiveSettings(settings map[string]string) AIConfigSnapshot {
 	asrModel := strings.TrimSpace(settings["ai_asr_model"])
 	asrLanguage := strings.TrimSpace(settings["ai_asr_language"])
 
+	asrSegSec := DefaultAudioSegmentSeconds
+	if raw := strings.TrimSpace(settings["ai_asr_segment_seconds"]); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= MinAudioSegmentSeconds && v <= MaxAudioSegmentSeconds {
+			asrSegSec = v
+		}
+	}
+
+	asrTimeoutSec := ai.DefaultASRTimeoutSeconds
+	if raw := strings.TrimSpace(settings["ai_asr_timeout_seconds"]); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= ai.MinASRTimeoutSeconds && v <= ai.MaxASRTimeoutSeconds {
+			asrTimeoutSec = v
+		}
+	}
+
 	effectiveASRBaseURL := asrBaseURLRaw
 	if effectiveASRBaseURL == "" {
 		effectiveASRBaseURL = aiBaseURL
@@ -99,13 +114,15 @@ func ResolveEffectiveSettings(settings map[string]string) AIConfigSnapshot {
 			MaxSubtitleChars: maxSubChars,
 		},
 		ASR: ai.ASRConfig{
-			BaseURL:  effectiveASRBaseURL,
-			APIKey:   effectiveASRAPIKey,
-			Model:    asrModel,
-			Language: asrLanguage,
+			BaseURL:        effectiveASRBaseURL,
+			APIKey:         effectiveASRAPIKey,
+			Model:          asrModel,
+			Language:       asrLanguage,
+			TimeoutSeconds: asrTimeoutSec,
 		},
-		AIConfigured:  aiConfigured,
-		ASRConfigured: asrConfigured,
+		ASRSegmentSeconds: asrSegSec,
+		AIConfigured:      aiConfigured,
+		ASRConfigured:     asrConfigured,
 	}
 }
 
@@ -194,6 +211,7 @@ type CourseBatchStatus struct {
 	CurrentLessonID     string             `json:"current_lesson_id"`
 	CurrentLessonTitle  string             `json:"current_lesson_title"`
 	CurrentStage        JobStage           `json:"current_stage"`
+	CurrentMessage      string             `json:"current_message,omitempty"`
 	ChunkIndex          int                `json:"chunk_index"`
 	ChunkTotal          int                `json:"chunk_total"`
 	Errors              []BatchLessonError `json:"errors"`
@@ -350,9 +368,10 @@ type Service struct {
 	httpClient         *http.Client
 	defaultLLMClient   *http.Client
 	configLoader       ConfigLoader
-	audioExtractor     AudioExtractor
-	hasCustomExtractor bool
-	audioSegmentSec    int
+	audioExtractor      AudioExtractor
+	hasCustomExtractor  bool
+	hasCustomSegmentSec bool
+	audioSegmentSec     int
 	singlePassMaxRunes int
 	mapChunkMaxRunes   int
 	compactWindowSec   float64
@@ -403,6 +422,7 @@ func NewService(opts Options) *Service {
 		compactMax = DefaultCompactMaxRunes
 	}
 
+	hasCustomSegmentSec := opts.AudioSegmentSeconds > 0
 	segSec := opts.AudioSegmentSeconds
 	if segSec <= 0 {
 		segSec = DefaultAudioSegmentSeconds
@@ -432,6 +452,7 @@ func NewService(opts Options) *Service {
 		configLoader:            opts.ConfigLoader,
 		audioExtractor:          extractor,
 		hasCustomExtractor:      hasCustomExtractor,
+		hasCustomSegmentSec:     hasCustomSegmentSec,
 		audioSegmentSec:         segSec,
 		singlePassMaxRunes:      singlePassMax,
 		mapChunkMaxRunes:        mapChunkMax,
@@ -448,6 +469,32 @@ func NewService(opts Options) *Service {
 		s.mu.Unlock()
 	})
 	return s
+}
+
+func (s *Service) effectiveAudioSegmentSec(cfg AIConfigSnapshot) int {
+	if s.hasCustomSegmentSec && s.audioSegmentSec > 0 {
+		return s.audioSegmentSec
+	}
+	if cfg.ASRSegmentSeconds >= MinAudioSegmentSeconds && cfg.ASRSegmentSeconds <= MaxAudioSegmentSeconds {
+		return cfg.ASRSegmentSeconds
+	}
+	if s.audioSegmentSec > 0 {
+		return s.audioSegmentSec
+	}
+	return DefaultAudioSegmentSeconds
+}
+
+func (s *Service) resolveExpectedSegmentSec(ctx context.Context) int {
+	if s.hasCustomSegmentSec && s.audioSegmentSec > 0 {
+		return s.audioSegmentSec
+	}
+	if cfg, err := s.loadConfig(ctx); err == nil {
+		return s.effectiveAudioSegmentSec(cfg)
+	}
+	if s.audioSegmentSec > 0 {
+		return s.audioSegmentSec
+	}
+	return DefaultAudioSegmentSeconds
 }
 
 // Wait blocks until any active background worker goroutine has exited.
@@ -1218,7 +1265,9 @@ func (s *Service) cancelCourseBatch(courseID string, kind BatchKind) (*CourseBat
 	if batch.activeLessonCancel != nil {
 		if entry, ok := s.lessonJobs[batch.activeLessonID]; ok {
 			entry.cancelRequested = true
+			entry.status.Message = "正在取消..."
 		}
+		batch.status.CurrentMessage = "正在取消..."
 		batch.activeLessonCancel()
 	} else {
 		finishBatchLocked(batch, StageCancelled)
@@ -1456,6 +1505,7 @@ func (s *Service) waitForWorkerSlotLocked(kind BatchKind, lessonID, mediaFileID 
 
 func clearBatchActiveFieldsLocked(batch *batchEntry, stage JobStage) {
 	batch.status.CurrentStage = stage
+	batch.status.CurrentMessage = ""
 	batch.status.CurrentLessonID = ""
 	batch.status.CurrentLessonTitle = ""
 	batch.status.ChunkIndex = 0
@@ -1690,6 +1740,7 @@ func (s *Service) executeTranscribeBatchItem(batch *batchEntry, item batchLesson
 	batch.status.CurrentLessonID = item.lessonID
 	batch.status.CurrentLessonTitle = item.lessonTitle
 	batch.status.CurrentStage = StageExtractingAudio
+	batch.status.CurrentMessage = "正在提取视频音频..."
 	batch.status.ChunkIndex = 0
 	batch.status.ChunkTotal = 0
 	s.mu.Unlock()
@@ -1706,6 +1757,7 @@ func (s *Service) executeTranscribeBatchItem(batch *batchEntry, item batchLesson
 			}
 		}
 		batch.status.CurrentStage = stage
+		batch.status.CurrentMessage = msg
 		batch.status.ChunkIndex = chunkIdx
 		batch.status.ChunkTotal = chunkTotal
 		s.mu.Unlock()
@@ -1830,6 +1882,7 @@ func (s *Service) executeSummaryBatchItem(batch *batchEntry, item batchLessonIte
 	batch.status.CurrentLessonID = item.lessonID
 	batch.status.CurrentLessonTitle = item.lessonTitle
 	batch.status.CurrentStage = StageReadingSubtitle
+	batch.status.CurrentMessage = "正在读取字幕..."
 	batch.status.ChunkIndex = 0
 	batch.status.ChunkTotal = 0
 	s.mu.Unlock()
@@ -1846,6 +1899,7 @@ func (s *Service) executeSummaryBatchItem(batch *batchEntry, item batchLessonIte
 			}
 		}
 		batch.status.CurrentStage = stage
+		batch.status.CurrentMessage = msg
 		batch.status.ChunkIndex = chunkIdx
 		batch.status.ChunkTotal = chunkTotal
 		s.mu.Unlock()
@@ -2343,8 +2397,14 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, forceR
 
 	report(StageExtractingAudio, "正在提取视频音频...", 0, 0, "asr")
 
+	segSec := s.effectiveAudioSegmentSec(cfg)
+	extractor := s.audioExtractor
+	if !s.hasCustomExtractor && s.media != nil {
+		extractor = NewFFmpegAudioExtractor(s.dataDir, s.media.FFmpegBin(), s.media.FFprobeBin(), segSec)
+	}
+
 	jobID := id.New()
-	chunks, cleanup, err := s.audioExtractor.ExtractChunks(ctx, info.AbsPath, jobID)
+	chunks, cleanup, err := extractor.ExtractChunks(ctx, info.AbsPath, jobID)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -2364,7 +2424,7 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, forceR
 		existingCPs, loadErr := s.loadChunkCheckpoints(ctx, mediaFileID)
 		if loadErr != nil {
 			_ = s.deleteChunkCheckpoints(ctx, mediaFileID)
-		} else if validMap, ok := validateChunkCheckpoints(existingCPs, len(chunks), s.audioSegmentSec, fingerprint); ok {
+		} else if validMap, ok := validateChunkCheckpoints(existingCPs, len(chunks), segSec, fingerprint); ok {
 			savedByIndex = validMap
 		} else if len(existingCPs) > 0 {
 			_ = s.deleteChunkCheckpoints(ctx, mediaFileID)
@@ -2419,7 +2479,7 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, forceR
 		} else if trimmed := strings.TrimSpace(res.Text); trimmed != "" {
 			dur := chunk.DurationSec
 			if dur <= 0 {
-				dur = float64(s.audioSegmentSec)
+				dur = float64(segSec)
 			}
 			chunkCues = []ai.TranscriptCue{{
 				StartSec: chunk.OffsetSec,
@@ -2432,7 +2492,7 @@ func (s *Service) runASRPipeline(ctx context.Context, mediaFileID string, forceR
 			mediaFileID:      mediaFileID,
 			chunkIndex:       i,
 			chunkTotal:       len(chunks),
-			segmentSec:       s.audioSegmentSec,
+			segmentSec:       segSec,
 			mediaFingerprint: fingerprint,
 			offsetSec:        chunk.OffsetSec,
 			durationSec:      chunk.DurationSec,
@@ -2655,7 +2715,7 @@ func (s *Service) computeLessonCapabilities(ctx context.Context, lesson *catalog
 			caps.HasCachedTranscript = true
 			caps.TranscriptSource = cached.source
 		} else if !caps.HasSubtitle {
-			done, total, pErr := s.loadPartialCheckpointProgress(ctx, lesson.MediaFileID)
+			done, total, pErr := s.loadPartialCheckpointProgress(ctx, lesson.MediaFileID, s.effectiveAudioSegmentSec(cfg))
 			if pErr != nil {
 				return LessonCapabilities{}, pErr
 			}

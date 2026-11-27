@@ -403,6 +403,8 @@ describe('SettingsPage ASR section', () => {
             ai_asr_api_key_set: true,
             ai_asr_model: 'whisper-1',
             ai_asr_language: 'zh',
+            ai_asr_segment_seconds: 300,
+            ai_asr_timeout_seconds: 900,
             ai_configured: true,
             ai_asr_configured: true,
           });
@@ -425,6 +427,8 @@ describe('SettingsPage ASR section', () => {
             ai_asr_api_key_set: !body.clear_ai_asr_api_key,
             ai_asr_model: body.ai_asr_model ?? '',
             ai_asr_language: body.ai_asr_language ?? '',
+            ai_asr_segment_seconds: body.ai_asr_segment_seconds ?? 300,
+            ai_asr_timeout_seconds: body.ai_asr_timeout_seconds ?? 900,
             ai_configured: true,
             ai_asr_configured: true,
           });
@@ -471,12 +475,16 @@ describe('SettingsPage ASR section', () => {
     const asrBaseUrlInput = screen.getByLabelText(/ASR Base URL/);
     const asrApiKeyInput = screen.getByLabelText(/ASR API Key/);
     const asrLangInput = screen.getByLabelText(/识别语言提示/);
+    const asrSegInput = screen.getByLabelText(/ASR 单段切片时长/);
+    const asrTimeoutInput = screen.getByLabelText(/ASR 单次请求超时/);
     const testAsrBtn = screen.getByRole('button', { name: /测试语音转文字/ });
 
     expect(asrModelInput).toHaveValue('whisper-1');
     expect(asrBaseUrlInput).toHaveValue('');
     expect(asrApiKeyInput).toHaveValue('');
     expect(asrLangInput).toHaveValue('zh');
+    expect(asrSegInput).toHaveValue(300);
+    expect(asrTimeoutInput).toHaveValue(900);
 
     // Legacy CSS guard across SettingsPage
     expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
@@ -524,6 +532,11 @@ describe('SettingsPage ASR section', () => {
     });
     expect(await screen.findByText('语音转文字接口连接测试成功！')).toBeInTheDocument();
 
+    await user.click(screen.getByRole('button', { name: '3 分钟' }));
+    await user.click(screen.getByRole('button', { name: '30 分钟' }));
+    expect(asrSegInput).toHaveValue(180);
+    expect(asrTimeoutInput).toHaveValue(1800);
+
     // Save ASR settings
     await user.click(screen.getByRole('button', { name: /保存设置/ }));
     await waitFor(() => {
@@ -533,6 +546,8 @@ describe('SettingsPage ASR section', () => {
       ai_asr_base_url: 'http://whisper:8000/v1',
       ai_asr_model: 'whisper-large-v3-turbo',
       ai_asr_language: 'en',
+      ai_asr_segment_seconds: 180,
+      ai_asr_timeout_seconds: 1800,
       ai_asr_api_key: 'sk-asr-unsaved',
     });
 

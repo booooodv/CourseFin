@@ -233,9 +233,12 @@ func evaluatePartialCheckpoints(rows []chunkCheckpoint, dbFingerprint string, me
 	}, true
 }
 
-func (s *Service) loadPartialCheckpointProgress(ctx context.Context, mediaFileID string) (int, int, error) {
+func (s *Service) loadPartialCheckpointProgress(ctx context.Context, mediaFileID string, expectedSegSec int) (int, int, error) {
 	if mediaFileID == "" {
 		return 0, 0, nil
+	}
+	if expectedSegSec <= 0 {
+		expectedSegSec = DefaultAudioSegmentSeconds
 	}
 	var fileSize int64
 	var modTime, updatedAt string
@@ -270,7 +273,7 @@ func (s *Service) loadPartialCheckpointProgress(ctx context.Context, mediaFileID
 		return 0, 0, err
 	}
 
-	summary, ok := evaluatePartialCheckpoints(cps, formatMediaFingerprint(fileSize, modTime), updatedAt, s.audioSegmentSec)
+	summary, ok := evaluatePartialCheckpoints(cps, formatMediaFingerprint(fileSize, modTime), updatedAt, expectedSegSec)
 	if !ok {
 		return 0, 0, nil
 	}
@@ -458,6 +461,7 @@ func (s *Service) computeCourseLessonsPipelineStatus(ctx context.Context, course
 		summaryLessonIDs:    []string{},
 		transcriptLessonIDs: []string{},
 	}
+	expectedSegSec := s.resolveExpectedSegmentSec(ctx)
 
 	for _, r := range lessonRows {
 		snap.lessonTitles[r.lessonID] = r.lessonTitle
@@ -494,7 +498,7 @@ func (s *Service) computeCourseLessonsPipelineStatus(ctx context.Context, course
 			snap.counts.TranscribedLessons++
 		default:
 			if cps := chunksByMedia[r.mediaFileID]; len(cps) > 0 {
-				if pSum, ok := evaluatePartialCheckpoints(cps, formatMediaFingerprint(r.fileSize, r.modTime), r.mediaUpdatedAt, s.audioSegmentSec); ok {
+				if pSum, ok := evaluatePartialCheckpoints(cps, formatMediaFingerprint(r.fileSize, r.modTime), r.mediaUpdatedAt, expectedSegSec); ok {
 					transcriptStatus = "partial"
 					transcribedChunks = pSum.done
 					totalChunks = pSum.total

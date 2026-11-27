@@ -18,19 +18,42 @@ import (
 )
 
 const (
-	defaultASRHTTPTimeout = 300 * time.Second
+	// DefaultASRTimeoutSeconds is the default 15-minute HTTP timeout per ASR chunk upload.
+	DefaultASRTimeoutSeconds = 900
+	// MinASRTimeoutSeconds is the lower bound for configurable ASR request timeout.
+	MinASRTimeoutSeconds = 30
+	// MaxASRTimeoutSeconds is the upper bound for configurable ASR request timeout.
+	MaxASRTimeoutSeconds = 3600
+
+	defaultASRHTTPTimeout = DefaultASRTimeoutSeconds * time.Second
 	maxAudioUploadBytes   = 32 << 20 // 32 MiB
 	silentWAVSampleRate   = 16000
 	silentWAVChannels     = 1
 	silentWAVBitsSample   = 16
 )
 
+// NormalizeASRTimeoutSeconds clamps configured timeout seconds into [MinASRTimeoutSeconds, MaxASRTimeoutSeconds],
+// falling back to DefaultASRTimeoutSeconds when sec <= 0.
+func NormalizeASRTimeoutSeconds(sec int) int {
+	if sec <= 0 {
+		return DefaultASRTimeoutSeconds
+	}
+	if sec < MinASRTimeoutSeconds {
+		return MinASRTimeoutSeconds
+	}
+	if sec > MaxASRTimeoutSeconds {
+		return MaxASRTimeoutSeconds
+	}
+	return sec
+}
+
 // ASRConfig configures an OpenAI-compatible speech-to-text (/audio/transcriptions) endpoint.
 type ASRConfig struct {
-	BaseURL  string `json:"base_url"`
-	APIKey   string `json:"api_key"`
-	Model    string `json:"model"`
-	Language string `json:"language"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key"`
+	Model          string `json:"model"`
+	Language       string `json:"language"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 
 // TranscriptCue represents a single timed segment of transcribed speech or subtitle text.
@@ -55,10 +78,11 @@ type OpenAICompatibleTranscriber struct {
 }
 
 // NewOpenAICompatibleTranscriber creates an OpenAI-compatible ASR transcriber.
-// When httpClient is nil, it defaults to a 300-second timeout for long audio chunks.
+// When httpClient is nil, it configures Timeout from cfg.TimeoutSeconds (defaulting to 900s).
 func NewOpenAICompatibleTranscriber(cfg ASRConfig, httpClient *http.Client) *OpenAICompatibleTranscriber {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultASRHTTPTimeout}
+		timeoutSec := NormalizeASRTimeoutSeconds(cfg.TimeoutSeconds)
+		httpClient = &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
 	}
 	return &OpenAICompatibleTranscriber{
 		cfg:        cfg,

@@ -476,6 +476,8 @@ export interface SettingsPayload {
   ai_asr_api_key_set?: boolean;
   ai_asr_model?: string;
   ai_asr_language?: string;
+  ai_asr_segment_seconds?: number;
+  ai_asr_timeout_seconds?: number;
   ai_configured?: boolean;
   ai_asr_configured?: boolean;
   ai_image_protocol?: AIImageProtocol;
@@ -501,6 +503,8 @@ export interface UpdateSettingsInput {
   clear_ai_asr_api_key?: boolean;
   ai_asr_model?: string;
   ai_asr_language?: string;
+  ai_asr_segment_seconds?: number;
+  ai_asr_timeout_seconds?: number;
   ai_image_protocol?: AIImageProtocol;
   ai_image_base_url?: string;
   ai_image_api_key?: string;
@@ -708,6 +712,7 @@ export interface CourseBatchSummaryJob {
   current_lesson_id: string;
   current_lesson_title: string;
   current_stage: SummaryJobStage;
+  current_message?: string;
   chunk_index: number;
   chunk_total: number;
   errors: CourseBatchLessonError[];

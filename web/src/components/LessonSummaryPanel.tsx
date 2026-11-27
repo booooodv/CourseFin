@@ -143,6 +143,19 @@ export function formatBatchResultSummary(batchJob: CourseBatchSummaryJob): strin
   return `${prefix}${chapterSuffix}${verb}：成功 ${batchJob.completed}，${skipText}，失败 ${batchJob.failed}`;
 }
 
+export function formatBatchCancelNotice(batchJob: CourseBatchSummaryJob): string {
+  const prefix = batchJob.kind === 'transcribe' ? '批量转写' : '批量总结';
+  const chapterSuffix = batchJob.chapter_title ? `（${batchJob.chapter_title}）` : '';
+  const resumeLabel = batchJob.kind === 'transcribe' ? '继续转写' : '继续总结';
+  if (batchJob.completed > 0) {
+    return `${prefix}${chapterSuffix}已取消：已保存 ${batchJob.completed} 节，可随时点击「${resumeLabel}」续跑`;
+  }
+  if (batchJob.kind === 'transcribe') {
+    return `${prefix}${chapterSuffix}已取消：本次未新完成整节（已完成的分片断点会自动保留）`;
+  }
+  return `${prefix}${chapterSuffix}已取消`;
+}
+
 export function shouldShowBatchBanner(
   batchJob: CourseBatchSummaryJob | null,
   dismissed = false,
@@ -221,11 +234,16 @@ export function BatchSummaryBanner({
     batchJob.current_stage,
     batchJob.chunk_index,
     batchJob.chunk_total,
+    batchJob.current_message,
   );
   const runningPrefix = isTranscribe ? '批量转写中' : '批量总结中';
   const runningHeading = batchJob.chapter_title
     ? `${runningPrefix} · ${batchJob.chapter_title} ${doneCount}/${batchJob.total}`
     : `${runningPrefix} ${doneCount}/${batchJob.total}`;
+  const latestError =
+    batchJob.errors && batchJob.errors.length > 0
+      ? batchJob.errors[batchJob.errors.length - 1]
+      : null;
 
   return (
     <div className="rounded-2xl border border-accent-ring/40 bg-accent-soft p-3 space-y-2">
@@ -258,6 +276,22 @@ export function BatchSummaryBanner({
           style={{ width: `${pct}%` }}
         />
       </div>
+
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] tabular-nums text-ink-secondary">
+        <span>成功 {batchJob.completed}</span>
+        {batchJob.skipped > 0 && <span>跳过 {batchJob.skipped}</span>}
+        {batchJob.failed > 0 && (
+          <span className="font-semibold text-status-danger-ink">
+            失败 {batchJob.failed}
+          </span>
+        )}
+      </div>
+
+      {batchJob.failed > 0 && latestError && (
+        <p className="text-[11px] text-status-danger-ink leading-snug break-words">
+          最近失败（{latestError.lesson_title || latestError.lesson_id}）：{latestError.error}
+        </p>
+      )}
     </div>
   );
 }

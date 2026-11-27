@@ -2110,4 +2110,176 @@ describe('CourseDetailPage AI Summary & LessonSummaryPanel', () => {
     expect(transcriptRequests).toEqual([{}, { force_retranscribe: true }]);
     expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
   });
+
+  it('shows live success/skip/fail breakdown, latest error, current_message, and error toast on batch cancel with failures', async () => {
+    const course = makeCourse();
+    const playback = makePlayback();
+    let batchRunning = false;
+    let cancelCalled = false;
+
+    const runningWithMixedResults: CourseBatchSummaryJob = {
+      course_id: 'c1',
+      kind: 'transcribe',
+      running: true,
+      total: 8,
+      completed: 2,
+      skipped: 1,
+      failed: 3,
+      current_lesson_id: 'l2',
+      current_lesson_title: '2.1 长视频断点节',
+      current_stage: 'transcribing',
+      current_message: '复用已转写分片（1/4）...',
+      chunk_index: 1,
+      chunk_total: 4,
+      errors: [
+        { lesson_id: 'l0', lesson_title: '0.1 失败课', error: 'ASR 请求超时' },
+      ],
+      started_at: '2026-11-27T00:00:00Z',
+    };
+
+    const cancelledWithFailures: CourseBatchSummaryJob = {
+      ...runningWithMixedResults,
+      running: false,
+      current_stage: 'cancelled',
+      current_message: '',
+      current_lesson_id: '',
+      current_lesson_title: '',
+      chunk_index: 0,
+      chunk_total: 0,
+      finished_at: '2026-11-27T00:02:00Z',
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) return jsonResponse(course);
+        if (url.includes('/api/v1/lessons/l1/playback')) return jsonResponse(playback);
+        if (url.endsWith('/api/v1/courses/c1/summaries/status')) {
+          return jsonResponse({
+            course_id: 'c1',
+            summary_lesson_ids: [],
+            transcribe_batch_job: batchRunning ? runningWithMixedResults : cancelCalled ? cancelledWithFailures : null,
+            batch_job: null,
+          });
+        }
+        if (url.endsWith('/api/v1/courses/c1/transcripts/generate') && init?.method === 'POST') {
+          batchRunning = true;
+          return jsonResponse(runningWithMixedResults, 202);
+        }
+        if (url.endsWith('/api/v1/courses/c1/transcripts/cancel') && init?.method === 'POST') {
+          cancelCalled = true;
+          batchRunning = false;
+          return jsonResponse(cancelledWithFailures);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = renderCoursePage();
+    expect(await screen.findByRole('heading', { name: 'Go 微服务全栈实战' })).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    const sidebar = screen.getByRole('complementary');
+    await user.click(await within(sidebar).findByRole('button', { name: /批量转写/ }));
+
+    expect(await within(sidebar).findByText(/批量转写中 6\/8/)).toBeInTheDocument();
+    expect(within(sidebar).getByText('成功 2')).toBeInTheDocument();
+    expect(within(sidebar).getByText('跳过 1')).toBeInTheDocument();
+    expect(within(sidebar).getByText('失败 3')).toBeInTheDocument();
+    expect(within(sidebar).getByText(/复用已转写分片（1\/4）.*2\.1 长视频断点节/)).toBeInTheDocument();
+    expect(within(sidebar).getByText('最近失败（0.1 失败课）：ASR 请求超时')).toBeInTheDocument();
+
+    await user.click(within(sidebar).getByRole('button', { name: '取消' }));
+
+    await waitFor(() => {
+      expect(cancelCalled).toBe(true);
+      expect(screen.getAllByText('批量转写已取消：成功 2，跳过 1，失败 3').length).toBeGreaterThanOrEqual(2);
+    });
+    expect(within(sidebar).getByText(/0\.1 失败课/)).toBeInTheDocument();
+    expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
+  });
+
+  it('shows saved-progress preservation notice when cancelling batch transcribe without failures', async () => {
+    const course = makeCourse();
+    const playback = makePlayback();
+    let batchRunning = false;
+    let cancelCalled = false;
+
+    const runningBatch: CourseBatchSummaryJob = {
+      course_id: 'c1',
+      kind: 'transcribe',
+      running: true,
+      total: 22,
+      completed: 10,
+      skipped: 0,
+      failed: 0,
+      current_lesson_id: 'l2',
+      current_lesson_title: '1.2 gRPC 实战与拦截器',
+      current_stage: 'transcribing',
+      current_message: '正在语音转写（分片 1/2）...',
+      chunk_index: 1,
+      chunk_total: 2,
+      errors: [],
+      started_at: '2026-11-27T00:00:00Z',
+    };
+
+    const cancelledBatch: CourseBatchSummaryJob = {
+      ...runningBatch,
+      running: false,
+      current_stage: 'cancelled',
+      current_message: '',
+      current_lesson_id: '',
+      current_lesson_title: '',
+      chunk_index: 0,
+      chunk_total: 0,
+      finished_at: '2026-11-27T00:05:00Z',
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/courses/c1')) return jsonResponse(course);
+        if (url.includes('/api/v1/lessons/l1/playback')) return jsonResponse(playback);
+        if (url.endsWith('/api/v1/courses/c1/summaries/status')) {
+          return jsonResponse({
+            course_id: 'c1',
+            summary_lesson_ids: [],
+            transcribe_batch_job: batchRunning ? runningBatch : cancelCalled ? cancelledBatch : null,
+            batch_job: null,
+          });
+        }
+        if (url.endsWith('/api/v1/courses/c1/transcripts/generate') && init?.method === 'POST') {
+          batchRunning = true;
+          return jsonResponse(runningBatch, 202);
+        }
+        if (url.endsWith('/api/v1/courses/c1/transcripts/cancel') && init?.method === 'POST') {
+          cancelCalled = true;
+          batchRunning = false;
+          return jsonResponse(cancelledBatch);
+        }
+        return jsonResponse({}, 404);
+      }),
+    );
+
+    const { container } = renderCoursePage();
+    expect(await screen.findByRole('heading', { name: 'Go 微服务全栈实战' })).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    const sidebar = screen.getByRole('complementary');
+    await user.click(await within(sidebar).findByRole('button', { name: /批量转写/ }));
+    expect(await within(sidebar).findByText(/批量转写中 10\/22/)).toBeInTheDocument();
+
+    await user.click(within(sidebar).getByRole('button', { name: '取消' }));
+
+    await waitFor(() => {
+      expect(cancelCalled).toBe(true);
+      expect(within(sidebar).queryByText(/批量转写中/)).toBeNull();
+    });
+    expect(
+      screen.getByText('批量转写已取消：已保存 10 节，可随时点击「继续转写」续跑'),
+    ).toBeInTheDocument();
+    expect(container.innerHTML).not.toMatch(LEGACY_CLASS_REGEX);
+  });
 });

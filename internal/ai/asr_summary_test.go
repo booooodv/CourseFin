@@ -748,3 +748,26 @@ func TestValidateAndNormalizeSummaryClampsAndSortsTimestamps(t *testing.T) {
 		}
 	})
 }
+
+func TestNormalizeASRTimeoutSeconds(t *testing.T) {
+	if ai.DefaultASRTimeoutSeconds != 900 {
+		t.Fatalf("DefaultASRTimeoutSeconds = %d, want 900", ai.DefaultASRTimeoutSeconds)
+	}
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{0, ai.DefaultASRTimeoutSeconds},
+		{-10, ai.DefaultASRTimeoutSeconds},
+		{5, ai.MinASRTimeoutSeconds},
+		{30, 30},
+		{1800, 1800},
+		{3600, 3600},
+		{9999, ai.MaxASRTimeoutSeconds},
+	}
+	for _, tc := range cases {
+		if got := ai.NormalizeASRTimeoutSeconds(tc.in); got != tc.want {
+			t.Errorf("NormalizeASRTimeoutSeconds(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}

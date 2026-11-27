@@ -2357,13 +2357,18 @@ func TestSettingsASRFieldsMaskingAndClear(t *testing.T) {
 			t.Fatalf("expected %s=\"\" in initial GET /settings, got %v (%s)", strKey, v, raw)
 		}
 	}
+	if initial["ai_asr_segment_seconds"] != float64(300) || initial["ai_asr_timeout_seconds"] != float64(900) {
+		t.Fatalf("expected default ai_asr_segment_seconds=300 and ai_asr_timeout_seconds=900, got seg=%v timeout=%v", initial["ai_asr_segment_seconds"], initial["ai_asr_timeout_seconds"])
+	}
 
 	// 2. PUT saves ASR fields and masks API key
 	rec, raw = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
-		"ai_asr_base_url": "https://whisper.local/v1",
-		"ai_asr_api_key":  "sk-asr-secret",
-		"ai_asr_model":    "whisper-1",
-		"ai_asr_language": "zh",
+		"ai_asr_base_url":        "https://whisper.local/v1",
+		"ai_asr_api_key":         "sk-asr-secret",
+		"ai_asr_model":           "whisper-1",
+		"ai_asr_language":        "zh",
+		"ai_asr_segment_seconds": 180,
+		"ai_asr_timeout_seconds": 1800,
 	}, token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT /settings ASR = %d: %s", rec.Code, raw)
@@ -2382,9 +2387,25 @@ func TestSettingsASRFieldsMaskingAndClear(t *testing.T) {
 		saved["ai_asr_api_key_set"] != true ||
 		saved["ai_asr_model"] != "whisper-1" ||
 		saved["ai_asr_language"] != "zh" ||
+		saved["ai_asr_segment_seconds"] != float64(180) ||
+		saved["ai_asr_timeout_seconds"] != float64(1800) ||
 		saved["ai_configured"] != false ||
 		saved["ai_asr_configured"] != true {
 		t.Fatalf("unexpected saved ASR settings: %s", raw)
+	}
+
+	// 2b. PUT rejects out-of-range ASR segment / timeout bounds
+	rec, _ = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_asr_segment_seconds": 10,
+	}, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for out-of-range ai_asr_segment_seconds, got %d", rec.Code)
+	}
+	rec, _ = env.doRecJSON(t, http.MethodPut, "/api/v1/settings", map[string]any{
+		"ai_asr_timeout_seconds": 5000,
+	}, token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for out-of-range ai_asr_timeout_seconds, got %d", rec.Code)
 	}
 
 	// 3. Updating with masked placeholder preserves stored key

@@ -61,6 +61,8 @@ export default function SettingsPage() {
   const [clearAiAsrKey, setClearAiAsrKey] = useState(false);
   const [aiAsrModel, setAiAsrModel] = useState('');
   const [aiAsrLanguage, setAiAsrLanguage] = useState('');
+  const [aiAsrSegmentSeconds, setAiAsrSegmentSeconds] = useState('300');
+  const [aiAsrTimeoutSeconds, setAiAsrTimeoutSeconds] = useState('900');
 
   // AI cover image generation settings form
   const [coverStyles, setCoverStyles] = useState<CoverStyleTemplate[]>(FALLBACK_COVER_STYLES);
@@ -117,6 +119,8 @@ export default function SettingsPage() {
     setClearAiAsrKey(false);
     setAiAsrModel(data.ai_asr_model || '');
     setAiAsrLanguage(data.ai_asr_language || '');
+    setAiAsrSegmentSeconds(String(data.ai_asr_segment_seconds ?? 300));
+    setAiAsrTimeoutSeconds(String(data.ai_asr_timeout_seconds ?? 900));
     setAiImageProtocol(data.ai_image_protocol || 'openai_images');
     setAiImageBaseUrl(data.ai_image_base_url || '');
     setAiImageApiKey('');
@@ -208,6 +212,14 @@ export default function SettingsPage() {
     const intervalNum = Number.isNaN(parsedInterval) ? 60 : Math.max(1, parsedInterval);
     const parsedMaxSub = Number.parseInt(aiMaxSubtitleChars, 10);
     const maxSubNum = Number.isNaN(parsedMaxSub) ? 4000 : Math.max(0, parsedMaxSub);
+    const parsedAsrSegment = Number.parseInt(aiAsrSegmentSeconds, 10);
+    const asrSegmentNum = Number.isNaN(parsedAsrSegment)
+      ? 300
+      : Math.min(1200, Math.max(60, parsedAsrSegment));
+    const parsedAsrTimeout = Number.parseInt(aiAsrTimeoutSeconds, 10);
+    const asrTimeoutNum = Number.isNaN(parsedAsrTimeout)
+      ? 900
+      : Math.min(3600, Math.max(30, parsedAsrTimeout));
 
     const payload: UpdateSettingsInput = {
       server_name: serverName.trim() || 'CourseFin',
@@ -218,6 +230,8 @@ export default function SettingsPage() {
       ai_asr_base_url: aiAsrBaseUrl.trim(),
       ai_asr_model: aiAsrModel.trim(),
       ai_asr_language: aiAsrLanguage.trim(),
+      ai_asr_segment_seconds: asrSegmentNum,
+      ai_asr_timeout_seconds: asrTimeoutNum,
       ai_image_protocol: aiImageProtocol,
       ai_image_base_url: aiImageBaseUrl.trim(),
       ai_image_model: aiImageModel.trim(),
@@ -810,6 +824,92 @@ export default function SettingsPage() {
                 );
               })}
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="settings-asr-segment-seconds" className="block text-xs font-medium text-ink-secondary">
+              ASR 单段切片时长（秒）
+            </label>
+            <input
+              id="settings-asr-segment-seconds"
+              type="number"
+              min={60}
+              max={1200}
+              value={aiAsrSegmentSeconds}
+              onChange={(e) => setAiAsrSegmentSeconds(e.target.value)}
+              className={FIELD_INPUT_CLASS}
+            />
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-ink-muted">常用：</span>
+              {[
+                { label: '2 分钟', value: '120' },
+                { label: '3 分钟', value: '180' },
+                { label: '5 分钟', value: '300' },
+                { label: '20 分钟', value: '1200' },
+              ].map((preset) => {
+                const active = aiAsrSegmentSeconds.trim() === preset.value;
+                return (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() => setAiAsrSegmentSeconds(preset.value)}
+                    className={`rounded-lg border px-2 py-0.5 transition-colors cursor-pointer ${
+                      active
+                        ? 'border-accent/40 bg-accent-soft text-accent-ink font-medium'
+                        : 'border-default bg-subtle text-ink-secondary hover:bg-muted hover:text-ink-primary'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-ink-muted">
+              默认 300 秒（5 分钟，范围 60~1200 秒）；本地/CPU 自建 Whisper 建议设小以缩短单片耗时并细化断点续转粒度。
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="settings-asr-timeout-seconds" className="block text-xs font-medium text-ink-secondary">
+              ASR 单次请求超时（秒）
+            </label>
+            <input
+              id="settings-asr-timeout-seconds"
+              type="number"
+              min={30}
+              max={3600}
+              value={aiAsrTimeoutSeconds}
+              onChange={(e) => setAiAsrTimeoutSeconds(e.target.value)}
+              className={FIELD_INPUT_CLASS}
+            />
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-ink-muted">常用：</span>
+              {[
+                { label: '10 分钟', value: '600' },
+                { label: '15 分钟', value: '900' },
+                { label: '30 分钟', value: '1800' },
+                { label: '60 分钟', value: '3600' },
+              ].map((preset) => {
+                const active = aiAsrTimeoutSeconds.trim() === preset.value;
+                return (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() => setAiAsrTimeoutSeconds(preset.value)}
+                    className={`rounded-lg border px-2 py-0.5 transition-colors cursor-pointer ${
+                      active
+                        ? 'border-accent/40 bg-accent-soft text-accent-ink font-medium'
+                        : 'border-default bg-subtle text-ink-secondary hover:bg-muted hover:text-ink-primary'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-ink-muted">
+              默认 900 秒（15 分钟，范围 30~3600 秒）；慢速本地 Whisper 遇到超时时可调大（若经反代需同步放宽反代超时）。
+            </p>
           </div>
 
           <div className="space-y-1.5 sm:col-span-2 pt-3 border-t border-subtle">

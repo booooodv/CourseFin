@@ -16,9 +16,13 @@ import (
 	"coursefin/internal/id"
 )
 
-// DefaultAudioSegmentSeconds is the default 20-minute segment length (~7.2 MB MP3 at 48kbps)
-// so each chunk fits comfortably within typical 25 MB OpenAI Whisper upload limits.
-const DefaultAudioSegmentSeconds = 1200
+// DefaultAudioSegmentSeconds is the default 5-minute segment length (~1.8 MB MP3 at 48kbps),
+// keeping per-chunk local/CPU Whisper inference fast and checkpoint granularity fine.
+const (
+	DefaultAudioSegmentSeconds = 300
+	MinAudioSegmentSeconds     = 60
+	MaxAudioSegmentSeconds     = 1200
+)
 
 // AudioChunk describes an extracted audio segment file and its timeline offset within the source media.
 type AudioChunk struct {

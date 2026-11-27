@@ -43,6 +43,8 @@ type settingsPayload struct {
 	AIASRAPIKeySet      bool   `json:"ai_asr_api_key_set"`
 	AIASRModel          string `json:"ai_asr_model"`
 	AIASRLanguage       string `json:"ai_asr_language"`
+	AIASRSegmentSeconds int    `json:"ai_asr_segment_seconds"`
+	AIASRTimeoutSeconds int    `json:"ai_asr_timeout_seconds"`
 	AIConfigured        bool   `json:"ai_configured"`
 	AIASRConfigured     bool   `json:"ai_asr_configured"`
 	AIImageProtocol     string `json:"ai_image_protocol"`
@@ -130,6 +132,8 @@ func (h *handler) buildSettingsResponse(ctx context.Context) (*settingsPayload, 
 		AIASRAPIKeySet:      rawASRKey != "",
 		AIASRModel:          resolved.ASR.Model,
 		AIASRLanguage:       resolved.ASR.Language,
+		AIASRSegmentSeconds: resolved.ASRSegmentSeconds,
+		AIASRTimeoutSeconds: resolved.ASR.TimeoutSeconds,
 		AIConfigured:        resolved.AIConfigured,
 		AIASRConfigured:     resolved.ASRConfigured,
 		AIImageProtocol:     resolvedImg.Image.Protocol,
@@ -174,6 +178,8 @@ func (h *handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		ClearAIASRAPIKey    bool    `json:"clear_ai_asr_api_key"`
 		AIASRModel          *string `json:"ai_asr_model"`
 		AIASRLanguage       *string `json:"ai_asr_language"`
+		AIASRSegmentSeconds *int    `json:"ai_asr_segment_seconds"`
+		AIASRTimeoutSeconds *int    `json:"ai_asr_timeout_seconds"`
 		AIImageProtocol     *string `json:"ai_image_protocol"`
 		AIImageBaseURL      *string `json:"ai_image_base_url"`
 		AIImageAPIKey       *string `json:"ai_image_api_key"`
@@ -226,6 +232,20 @@ func (h *handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AIASRLanguage != nil {
 		updates["ai_asr_language"] = strings.TrimSpace(*req.AIASRLanguage)
+	}
+	if req.AIASRSegmentSeconds != nil {
+		if *req.AIASRSegmentSeconds < summary.MinAudioSegmentSeconds || *req.AIASRSegmentSeconds > summary.MaxAudioSegmentSeconds {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("ai_asr_segment_seconds must be between %d and %d", summary.MinAudioSegmentSeconds, summary.MaxAudioSegmentSeconds))
+			return
+		}
+		updates["ai_asr_segment_seconds"] = strconv.Itoa(*req.AIASRSegmentSeconds)
+	}
+	if req.AIASRTimeoutSeconds != nil {
+		if *req.AIASRTimeoutSeconds < ai.MinASRTimeoutSeconds || *req.AIASRTimeoutSeconds > ai.MaxASRTimeoutSeconds {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("ai_asr_timeout_seconds must be between %d and %d", ai.MinASRTimeoutSeconds, ai.MaxASRTimeoutSeconds))
+			return
+		}
+		updates["ai_asr_timeout_seconds"] = strconv.Itoa(*req.AIASRTimeoutSeconds)
 	}
 	if req.AIImageProtocol != nil {
 		proto, err := ai.ValidateImageProtocol(*req.AIImageProtocol)
