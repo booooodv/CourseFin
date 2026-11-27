@@ -19,7 +19,7 @@ import (
 	"coursefin/internal/updater"
 )
 
-var version = "1.7.0"
+var version = "1.7.1"
 
 func main() {
 	if len(os.Args) > 1 {

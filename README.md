@@ -1,6 +1,6 @@
 # CourseFin
 
-![Version](https://img.shields.io/badge/version-v1.7.0-indigo)
+![Version](https://img.shields.io/badge/version-v1.7.1-indigo)
 ![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)
 ![React](https://img.shields.io/badge/Web-React%2019%20%2B%20TypeScript-61DAFB?logo=react&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-Single%20Container-2496ED?logo=docker&logoColor=white)
@@ -176,6 +176,7 @@ make docker-build
 - [docs/superpowers/specs/2026-11-26-ai-cover-prompt-timeout-fix-design.md](docs/superpowers/specs/2026-11-26-ai-cover-prompt-timeout-fix-design.md)
 - [docs/superpowers/specs/2026-11-26-course-multi-covers-design.md](docs/superpowers/specs/2026-11-26-course-multi-covers-design.md)
 - [docs/superpowers/specs/2026-11-26-decoupled-batch-transcription-summary-design.md](docs/superpowers/specs/2026-11-26-decoupled-batch-transcription-summary-design.md)
+- [docs/superpowers/specs/2026-11-27-asr-timeout-chunk-and-batch-feedback-design.md](docs/superpowers/specs/2026-11-27-asr-timeout-chunk-and-batch-feedback-design.md)
 
 ---
 
